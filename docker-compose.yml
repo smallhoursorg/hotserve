@@ -112,8 +112,10 @@ services:
       - ./e2e/lib.sh:/lib.sh:ro
       - ./e2e/liveswap/systemd.sh:/suite-systemd.sh:ro
       - ./e2e/box/apply.sh:/suite-box.sh:ro
-      # The box template's own client, run by the box apply suite.
-      - ./examples/box/bin/apply:/template-apply:ro
+      # The box template, whose own commands the box apply suite runs:
+      # bin/apply as the workflow does, make secret and the rest as a
+      # laptop does.
+      - ./examples/box:/template:ro
     depends_on:
       - e2e-artifacts
       - e2e-upstream

@@ -17,21 +17,37 @@
 #   - each passes `hotserve validate`, the box's own check before it
 #     applies a push;
 #   - every box lists the same signers (keys): each commit is on every
-#     box's history, so a key one box lacks would stop that box's pushes.
+#     box's history, so a key one box lacks would stop that box's pushes;
+#   - a box's secrets (<dir>/secrets/) are laid out as the box takes
+#     them, each for an app the file declares and whose env_file reads
+#     them, within the box's caps (`hotserve box describe` again: it
+#     reads each value's length from its ciphertext, no key needed, and
+#     warns at 75% of a cap), with a recipients file that names the keys
+#     they are encrypted to.
 #
-# It prints a line for each box:
+# It prints a line for each box, the secrets counted when it has any:
 #
 #   deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer)
+#   deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer, 2 secrets)
+#
+# and a warning for what the box takes but is near a cap, or would trip
+# up a checkout on a Mac's case-insensitive disk.
 #
 #   HOTSERVE  the hotserve command (default: hotserve)
 set -eu
 cd "$(dirname "$0")/.."
 HOTSERVE=${HOTSERVE:-hotserve}
+actions=${GITHUB_ACTIONS:-}
 
 tmpd=$(mktemp -d)
 trap 'rm -rf "$tmpd"' EXIT
 status=0
 bad() { printf 'check: %s\n' "$*" >&2; status=1; }
+# warn <file> <text>: green, but said, and on the job page in Actions.
+warn() {
+	printf 'check: warning: %s: %s\n' "$1" "$2" >&2
+	[ -z "$actions" ] || printf '::warning file=%s::%s\n' "$1" "$(printf '%s' "$2" | sed 's/%/%25/g')"
+}
 
 # Tracked files and new ones not ignored: a box added but not yet
 # committed is checked too.
@@ -75,6 +91,28 @@ for f in $files; do
 	fi
 	apps=$(grep -c '^app ' "$tmpd/describe" || true)
 	signers=$(grep -c '^signer ' "$tmpd/describe" || true)
+	secrets=$(grep -c '^secret ' "$tmpd/describe" || true)
+	# A value is a file in an app's directory under <dir>/secrets/, as
+	# the box counts them: a hotserve that names none has never heard
+	# of secrets, and would pass them unread.
+	values=$(find "$dir/secrets" -mindepth 2 -maxdepth 2 -name '[!.]*.age' 2>/dev/null | grep -c . || true)
+	if [ "$values" -gt 0 ] && [ "$secrets" = 0 ] && ! grep -q '^recipients ' "$tmpd/describe"; then
+		bad "$f: $dir/secrets holds values, and this hotserve ($("$HOTSERVE" version 2>/dev/null | head -n 1)) does not read secrets: check with a release that does (the workflow's HOTSERVE_VERSION variable, or the latest)"
+		continue
+	fi
+	if [ "$secrets" -gt 0 ] && ! grep -q '^recipients ' "$tmpd/describe"; then
+		bad "$f: $dir/secrets holds values but no recipients file, so no one can read them back or encrypt them again, and bin/apply cannot check the box's key: make secret APP=… VAR=… BOX_KEY=\$(ssh root@$dir hotserve box key) makes one"
+		continue
+	fi
+	sed -n 's/^warning //p' "$tmpd/describe" >"$tmpd/warnings"
+	# Two names a case-insensitive disk holds as one file: the box keeps
+	# both (environment variables are case-sensitive), a Mac's checkout
+	# only one of them.
+	sed -n 's/^secret \([^ ]*\) \([^ ]*\) .*/\1 \2/p' "$tmpd/describe" |
+		awk '{ k = $1 " " tolower($2); if (k in seen) printf "app %s'\''s secrets %s and %s differ only in case: a case-insensitive disk (a Mac'\''s) holds one file for both, so a checkout there loses one\n", $1, seen[k], $2; else seen[k] = $2 }' >>"$tmpd/warnings"
+	while IFS= read -r w; do
+		warn "$f" "$w"
+	done <"$tmpd/warnings"
 	# The keys alone, sorted: a principal is a name the boxes report,
 	# the key is what signs.
 	keys=$(sed -n 's/^signer [^ ]* //p' "$tmpd/describe" | LC_ALL=C sort)
@@ -86,7 +124,9 @@ for f in $files; do
 	fi
 	[ "$apps" = 1 ] && a=app || a=apps
 	[ "$signers" = 1 ] && s=signer || s=signers
-	printf '%s → https://%s/ (%s %s, %s %s)\n' "$f" "$host" "$apps" "$a" "$signers" "$s"
+	sec=
+	[ "$secrets" = 0 ] || { [ "$secrets" = 1 ] && sec=", 1 secret" || sec=", $secrets secrets"; }
+	printf '%s → https://%s/ (%s %s, %s %s%s)\n' "$f" "$host" "$apps" "$a" "$signers" "$s" "$sec"
 done
 # Every file deleted here, or none of them a box's: nothing was checked.
 [ "$checked" -gt 0 ] || bad "no box here: a box is <host>/Caddyfile at the top of the repository"

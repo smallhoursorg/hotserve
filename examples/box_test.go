@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +26,7 @@ import (
 
 	hsbox "github.com/smallhoursorg/hotserve/box"
 	"github.com/smallhoursorg/hotserve/box/proof"
+	"github.com/smallhoursorg/hotserve/liveswap"
 )
 
 // The box template's scripts — bin/signer, bin/check, bin/apply — in a
@@ -404,16 +407,24 @@ type standIn struct {
 	tokens    map[string]bool // minted here: used yet?
 	mints     int
 	bundles   int
-	onGet     string   // "": the baseline; "401"; "nobaseline"
-	onPost    []string // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "front<code>", "throttled", "html409", "504", "502", "524", "lost", "sync"; then "": 202
-	edited    bool     // results say the file was edited on the box
-	throttle  int      // polls answered 429 before the result
-	pollGaps  []int    // polls answered, in order, by something in front of the box
-	mintFails int      // token requests that fail before one succeeds
-	audience  string   // the last token request's audience, decoded
+	onGet     string            // "": the baseline; "401"; "nobaseline"
+	onPost    []string          // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "front<code>", "throttled", "html409", "504", "502", "524", "lost", "sync"; then "": 202
+	edited    bool              // results say the file was edited on the box
+	recipient string            // GET /'s box key; "" leaves it out, as a box without one does
+	secrets   map[string]string // the secrets the box runs: <app>/<VAR> → the value's blob
+	envEdited []string          // results say these apps' env files were edited on the box
+	throttle  int               // polls answered 429 before the result
+	pollGaps  []int             // polls answered, in order, by something in front of the box
+	mintFails int               // token requests that fail before one succeeds
+	audience  string            // the last token request's audience, decoded
 }
 
 var boxID = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// secretNames are the grammars root holds the secrets' names to
+// (box/secrets.go): an app's name as box/tokens.go reads one, a
+// variable's as liveswap does.
+var secretNames = proof.Names{App: regexp.MustCompile(`^[a-z0-9-]{1,63}$`).MatchString, Var: liveswap.ValidEnvKey}
 
 func newStandIn(t *testing.T, baseline string, installed []byte) *standIn {
 	s := &standIn{t: t, baseline: baseline, installed: installed, path: boxFile,
@@ -523,7 +534,11 @@ func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "nobaseline":
 			reply(w, 409, map[string]string{"error": "this box has no baseline; hotserve init <sha>, as root inside the box's directory, sets one"})
 		default:
-			reply(w, 200, map[string]string{"commit": s.baseline, "box_webhook": "deploy.example.com", "sha256": digest(s.installed)})
+			st := map[string]string{"commit": s.baseline, "box_webhook": "deploy.example.com", "sha256": digest(s.installed)}
+			if s.recipient != "" {
+				st["recipient"] = s.recipient
+			}
+			reply(w, 200, st)
 		}
 	case r.Method == http.MethodPost:
 		s.post(w, r)
@@ -605,12 +620,26 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 		fault("the file proof: %v", err)
 		return
 	}
+	// The secrets, as root proves them (step 13): every value the commit
+	// lists must be in the bundle. The stand-in cannot decrypt, so a
+	// value changed is a blob changed.
+	sec, err := proof.ProveSecrets(b.Commit, b.Trees, b.Blobs, b.Path, secretNames)
+	if err != nil {
+		fault("the secrets proof: %v", err)
+		return
+	}
+	values := map[string]string{}
+	for _, a := range sec.Apps {
+		for _, v := range a.Vars {
+			values[a.Name+"/"+v.Name] = v.Blob
+		}
+	}
 	chain, err := proof.Chain(b.Commit, b.Parents, s.baseline)
 	if err != nil {
 		fault("the chain: %v", err)
 		return
 	}
-	if b.Commit.ID == s.baseline && bytes.Equal(b.Caddyfile, s.installed) {
+	if b.Commit.ID == s.baseline && bytes.Equal(b.Caddyfile, s.installed) && maps.Equal(values, s.secrets) {
 		// The fast path writes nothing: no id held, no result to poll.
 		delete(s.ids, id)
 		if how == "lost" {
@@ -645,9 +674,34 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 	res := map[string]any{"id": id, "phase": "verified", "commit": b.Commit.ID, "path": b.Path, "signer": signer,
 		"box_webhook": "deploy.example.com", "caddyfile_edited_out_of_band": s.edited, "apps": next.Apps}
 	verified := encode(res)
-	res["phase"], res["diff"] = "applied", "--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\x1b[2J\r\n"
+	res["phase"] = "applied"
+	// A diff is the Caddyfile's: none when the push changed env files
+	// alone, as the box's (box/diff.go).
+	if !bytes.Equal(b.Caddyfile, s.installed) {
+		res["diff"] = "--- installed\n+++ pushed\n@@ a hunk @@\n-\told \"line\"\n+\tnew\tline <a & b>\x1b[2J\r\n"
+	}
+	var added, changed, removed []string
+	for k, blob := range values {
+		switch old, ok := s.secrets[k]; {
+		case !ok:
+			added = append(added, k)
+		case old != blob:
+			changed = append(changed, k)
+		}
+	}
+	for k := range s.secrets {
+		if _, ok := values[k]; !ok {
+			removed = append(removed, k)
+		}
+	}
+	for key, names := range map[string][]string{"secrets_added": added, "secrets_changed": changed, "secrets_removed": removed, "secrets_edited_out_of_band": s.envEdited} {
+		if len(names) > 0 {
+			slices.Sort(names)
+			res[key] = names
+		}
+	}
 	s.results[id] = encode(res)
-	s.baseline, s.installed = b.Commit.ID, b.Caddyfile
+	s.baseline, s.installed, s.secrets = b.Commit.ID, b.Caddyfile, values
 	switch how {
 	case "504":
 		reply(w, 504, map[string]string{"id": id})
@@ -989,6 +1043,108 @@ func TestBoxApply(t *testing.T) {
 		g.box.set(func(s *standIn) { s.onGet = "401" })
 		if out, code := g.apply(actions...); code != 1 || !strings.Contains(out, "claim repository  your-org/boxes") || !strings.Contains(out, "::error title=apply deploy.example.com failed::") {
 			t.Fatalf("401 in Actions: exit %d\n%s", code, out)
+		}
+	})
+
+	t.Run("secrets ride along", func(t *testing.T) {
+		g := newApplyRig(t)
+		g.env = append(g.env, "PATH="+ageTools(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
+		_, box := g.boxKey("box")
+		g.box.set(func(s *standIn) { s.recipient = box })
+		db := "deploy.example.com/secrets/example/DATABASE_URL.age"
+		// The first secret, and the app's block reading it: the box's
+		// consistency checks refuse either without the other (the
+		// stand-in does not repeat them).
+		if out, code := g.secrets("", "postgres://one", "set", "APP=example", "VAR=DATABASE_URL", "BOX_KEY="+box); code != 0 {
+			t.Fatalf("make secret: exit %d\n%s", code, out)
+		}
+		g.write(boxFile, strings.Replace(g.read(boxFile), "# env_file /etc/hotserve/secrets/example.env", "env_file /etc/hotserve/secrets/example.env", 1))
+		head := g.commit("example: DATABASE_URL")
+		out, code := g.apply()
+		for _, want := range []string{
+			"apply: deploy.example.com secrets: example: added DATABASE_URL\n",
+			"deploy.example.com at " + head[:7] + ": loaded; running apps are not restarted; apps example\n",
+			"apply: example reads its secrets at its next launch; a deploy of a new version launches it now\n",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("no %q in the output", want)
+			}
+		}
+		if code != 0 || g.box.seen().baseline != head {
+			t.Fatalf("exit %d, baseline %s\n%s", code, g.box.seen().baseline, out)
+		}
+
+		// Secrets alone: a value changed and one added in one push, the
+		// added one a copy of the other's file, so one blob, which the
+		// bundle holds once (the stand-in's ReadBundle refuses a name
+		// twice).
+		if out, code := g.secrets("", "postgres://two", "set", "APP=example", "VAR=DATABASE_URL"); code != 0 {
+			t.Fatalf("make secret again: exit %d\n%s", code, out)
+		}
+		g.write("deploy.example.com/secrets/example/COPY.age", g.read(db))
+		head = g.commit("two")
+		out, code = g.apply()
+		if code != 0 || !strings.Contains(out, "apply: deploy.example.com secrets: example: added COPY; changed DATABASE_URL\n") ||
+			!strings.Contains(out, "deploy.example.com at "+head[:7]+": secrets updated; the Caddyfile is unchanged, nothing reloaded; apps example\n") {
+			t.Fatalf("secrets alone: exit %d\n%s", code, out)
+		}
+		// A recipients file written on Windows reads as age reads it.
+		g.write(recipientsFile, strings.ReplaceAll(g.read(recipientsFile), "\n", "\r\n"))
+		g.change("crlf")
+		if out, code := g.apply(); code != 0 {
+			t.Fatalf("a recipients file with CRLF endings: exit %d\n%s", code, out)
+		}
+
+		// Removed, and the Caddyfile changed in the same push.
+		g.remove("deploy.example.com/secrets/example/COPY.age")
+		head = g.change("three")
+		out, code = g.apply()
+		if code != 0 || !strings.Contains(out, "apply: deploy.example.com secrets: example: removed COPY\n") ||
+			!strings.Contains(out, "deploy.example.com at "+head[:7]+": loaded; running apps are not restarted") {
+			t.Fatalf("a removal: exit %d\n%s", code, out)
+		}
+
+		// An env file edited on the box: said, and on the job page.
+		g.box.set(func(s *standIn) { s.envEdited = []string{"example"} })
+		head = g.change("four")
+		out, code = g.apply("GITHUB_ACTIONS=true")
+		if code != 0 || !strings.Contains(out, "example's env file on the box had been edited there since the last apply; this push replaced the edit with deploy.example.com/secrets/example/ at "+head[:7]) ||
+			!strings.Contains(out, "::warning title=apply deploy.example.com::example's env file") {
+			t.Fatalf("an env file edited on the box: exit %d\n%s", code, out)
+		}
+		g.box.set(func(s *standIn) { s.envEdited = nil })
+
+		// A rebuilt box has another key: nothing is sent.
+		_, rebuilt := g.boxKey("rebuilt")
+		g.box.set(func(s *standIn) { s.recipient = rebuilt })
+		g.change("five")
+		sent := g.box.seen().bundles
+		out, code = g.apply()
+		if code != 1 || !strings.Contains(out, "the box's key is "+rebuilt+", but the first recipient in deploy.example.com/secrets/recipients is "+box) ||
+			!strings.Contains(out, "make rekey BOX_KEY="+rebuilt) || g.box.seen().bundles != sent {
+			t.Fatalf("another key on the box: exit %d, %d bundles\n%s", code, g.box.seen().bundles-sent, out)
+		}
+		// A box that names no key.
+		g.box.set(func(s *standIn) { s.recipient = "" })
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "the box names no key for secrets (no recipient in GET /)") || g.box.seen().bundles != sent {
+			t.Fatalf("no key on the box: exit %d\n%s", code, out)
+		}
+		// Values, and no recipients file to check the key against.
+		g.box.set(func(s *standIn) { s.recipient = box })
+		g.remove("deploy.example.com/secrets/recipients")
+		g.commit("no recipients")
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy.example.com/secrets holds values but no recipients file names a key") || g.box.seen().bundles != sent {
+			t.Fatalf("no recipients file: exit %d\n%s", code, out)
+		}
+		// Every secret removed, over an env file edited on the box: the
+		// push removed it, and says so.
+		g.remove("deploy.example.com/secrets")
+		g.write(boxFile, strings.Replace(g.read(boxFile), "\tenv_file /etc/hotserve/secrets/example.env", "\t# env_file /etc/hotserve/secrets/example.env", 1))
+		g.box.set(func(s *standIn) { s.envEdited = []string{"example"} })
+		head = g.commit("no secrets")
+		if out, code := g.apply(); code != 0 || !strings.Contains(out, "apply: deploy.example.com secrets: example: removed DATABASE_URL\n") ||
+			!strings.Contains(out, "example's env file on the box had been edited there since the last apply; this push removed it, as "+head[:7]+" has no secrets for example") {
+			t.Fatalf("every secret removed: exit %d\n%s", code, out)
 		}
 	})
 

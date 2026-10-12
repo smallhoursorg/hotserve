@@ -24,11 +24,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 # libatomic1: what a Node single executable needs on arm64 (the one
 # package examples/node asks the box for); openssh-client: ssh-keygen,
 # which the box applier verifies signatures with (the package Depends
-# on it); git: the box suite makes and signs its commits on the box.
+# on it); git: the box suite makes and signs its commits on the box;
+# age and make: the box template's secrets commands, which the suite
+# runs as a laptop would.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates libatomic1 sudo \
-		openssh-client git \
+		systemd systemd-sysv dbus libpam-systemd procps curl ca-certificates libatomic1 \
+		openssh-client git age make \
 	&& rm -rf /var/lib/apt/lists/*
 RUN systemctl mask \
 	systemd-udevd.service \
@@ -90,14 +92,10 @@ COPY examples/node/hotserve.caddy /etc/hotserve/node-example.caddy
 COPY e2e/mint-token.sh /usr/local/bin/mint-token.sh
 RUN chmod +x /usr/local/bin/mint-token.sh
 
-# An administrator who is not root: the box suite runs as this user,
-# with exactly the sudoers file examples/box ships and the adm group
-# for the journal — the README's claim that the apps' secrets and logs
-# need no root, and that the Caddyfile is not theirs, tested.
-COPY examples/box/sudoers /etc/sudoers.d/hotserve-admin
-RUN chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c -q \
-	&& groupadd hotserve-admin \
-	&& useradd -m -G adm,hotserve-admin admin
+# An administrator who is not root, in the adm group alone, for the
+# journal. The box suite checks that this user reads the logs, and no
+# env file and not the box's key.
+RUN useradd -m -G adm admin
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

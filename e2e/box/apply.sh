@@ -455,7 +455,7 @@ echo "=== box apply 7: the template's bin/apply, unchanged, against this box ===
 # internal CA's certificate (the script has no test hooks). The
 # laptop's token: one, naming the commit, via HOTSERVE_TOKEN.
 mkdir -p "$repo/bin" "$work/curl"
-cp /template-apply "$repo/bin/apply"
+cp /template/bin/apply "$repo/bin/apply"
 printf 'connect-to = %s:443:127.0.0.1:8443\ninsecure\nhttp1.1\n' "$HOST" >"$work/curl/.curlrc"
 template_apply() { # <sha> → its output in $work/tout, exit status returned
 	CURL_HOME=$work/curl HOTSERVE_TOKEN=$(tok "$1") "$repo/bin/apply" "$HOST" >"$work/tout" 2>&1
@@ -488,7 +488,228 @@ fi
 [ "$(baseline)" = "$C4" ] && pass "the baseline did not move" || fail "the baseline is $(baseline)"
 settled "template refused"
 
-echo "=== box apply 8: the path unit never spun ==="
+echo "=== box apply 8: secrets, set with the template's own commands and sent by its bin/apply ==="
+# The laptop's side is the template's Makefile and bin/secrets, run in
+# the repository as an operator runs them (age from Debian's package);
+# the box's is the real handler and applier. The app is demo, whose
+# block moves from its hand-made env file to the one the box writes.
+cp /template/Makefile "$repo/Makefile"
+cp /template/bin/secrets "$repo/bin/secrets"
+ENV=/etc/hotserve/secrets/demo.env
+KEY=$(cat /etc/hotserve/age.pub 2>/dev/null)
+grep -qxF "init: secrets for this box encrypt to $KEY; hotserve box key prints it again" "$work/init.out" \
+	&& pass "hotserve init made the box's key and printed it" || fail "init's key line, against age.pub '$KEY': $(cat "$work/init.out")"
+[ "$(hotserve box key 2>/dev/null)" = "$KEY" ] && pass "hotserve box key prints that key alone" || fail "hotserve box key: $(hotserve box key 2>&1)"
+[ "$(stat -c '%a %U %G' /etc/hotserve/age /etc/hotserve/age/identity /etc/hotserve/age.pub /etc/hotserve/secrets | tr '\n' ' ')" = "700 root root 600 root root 644 root root 2750 root hotserve " ] \
+	&& pass "the key and the env files' directory have the Paths table's modes" \
+	|| fail "modes: $(stat -c '%n %a %U %G' /etc/hotserve/age /etc/hotserve/age/identity /etc/hotserve/age.pub /etc/hotserve/secrets | tr '\n' ' ')"
+ready
+[ "$(json_str "$(resp)" recipient)" = "$KEY" ] && pass "GET / names the box's key" || fail "GET /: $(resp)"
+
+# commit_index <signer> <message>: what the work tree holds, committed
+# on top of HEAD, signed; prints the commit's id.
+commit_index() {
+	git -C "$repo" add -A
+	git -C "$repo" -c user.signingkey="$work/$1" commit -q -S -m "$2"
+	git -C "$repo" rev-parse HEAD
+}
+# secret <var> <value> [<make args>]: make secret for demo, the value
+# piped in as from a password manager; its output in $work/sout.
+secret() {
+	v=$1 val=$2
+	shift 2
+	(cd "$repo" && printf '%s' "$val" | make -s secret APP=demo VAR="$v" "$@") >"$work/sout" 2>&1
+}
+# reloads_since <epoch>: how many times hotserve.service was reloaded.
+reloads_since() { journalctl -u hotserve.service --since "@$1" --no-pager -o cat | grep -c '^Reloading' || true; }
+
+git -C "$repo" checkout -q --detach "$C4"
+V1=e2e-value-from-the-repository-1
+if secret SECRET "$V1" BOX_KEY="$KEY" && grep -qF "env_file /etc/hotserve/secrets/demo.env" "$work/sout"; then
+	pass "make secret encrypted the value and named the env_file line to add"
+else
+	fail "make secret: $(cat "$work/sout")"
+fi
+sed -i 's#env_file /etc/hotserve/demo.env#env_file /etc/hotserve/secrets/demo.env#' "$repo/$FILE"
+S1=$(commit_index alice "demo: SECRET from the repository")
+t0=$(date +%s)
+if template_apply "$S1" && grep -qxF "apply: $HOST secrets: demo: added SECRET" "$work/tout" \
+	&& grep -qF "at $(git -C "$repo" rev-parse --short=7 "$S1"): loaded; running apps are not restarted" "$work/tout" \
+	&& grep -qxF "apply: demo reads its secrets at its next launch; a deploy of a new version launches it now" "$work/tout"; then
+	pass "bin/apply sent the secret and named it"
+else
+	fail "bin/apply with a secret: $(cat "$work/tout")"
+fi
+[ "$(stat -c '%a %U %G' "$ENV" 2>/dev/null)" = "640 root hotserve" ] && pass "the env file is 0640 root:hotserve" || fail "the env file: $(stat -c '%a %U %G' "$ENV" 2>&1)"
+grep -qxF "SECRET=\"$V1\"" "$ENV" && pass "the env file holds the value, as hotserve reads it" || fail "the env file holds: $(cat "$ENV" 2>&1)"
+[ "$(reloads_since "$t0")" -ge 1 ] && pass "a push that changed the Caddyfile reloaded hotserve" || fail "no reload in the journal: the reload check below proves nothing"
+[ "$(baseline)" = "$S1" ] && pass "the baseline is the commit with the secret" || fail "the baseline is $(baseline), not $S1"
+settled "secret added"
+
+# A launch reads it: the crash release prints SECRET and exits, and the
+# deploy's answer names the variable it redacted, never the value.
+code=$(curl -s -o "$work/deploy" -w '%{http_code}' --max-time 60 -X POST -H "Authorization: Bearer $(cat /shared/deploy.token)" \
+	-d '{"url":"http://e2e-artifacts:8080/artifacts/demo-crash.tar.gz","version":"box-secrets-crash"}' http://localhost:8081/demo)
+if grep -q '"redacted_env":\["SECRET"\]' "$work/deploy" && ! grep -qF "$V1" "$work/deploy"; then
+	pass "a launch read the box's env file: the release printed SECRET, and its answer redacted it"
+else
+	fail "deploy with the box's env file: $code $(head -c 600 "$work/deploy")"
+fi
+
+V2=e2e-value-from-the-repository-2
+secret SECRET "$V2" || fail "make secret, again: $(cat "$work/sout")"
+S2=$(commit_index alice "demo: rotate SECRET")
+t0=$(date +%s)
+if template_apply "$S2" && grep -qxF "apply: $HOST secrets: demo: changed SECRET" "$work/tout" \
+	&& grep -qF ": secrets updated; the Caddyfile is unchanged, nothing reloaded" "$work/tout"; then
+	pass "a rotated value is sent alone"
+else
+	fail "a rotation: $(cat "$work/tout")"
+fi
+grep -qxF "SECRET=\"$V2\"" "$ENV" && pass "the env file holds the new value" || fail "after the rotation: $(cat "$ENV" 2>&1)"
+[ "$(reloads_since "$t0")" = 0 ] && pass "a push of secrets alone did not reload hotserve" || fail "hotserve was reloaded for secrets alone"
+settled "secret rotated"
+template_apply "$S2" && grep -qF "the box already runs this Caddyfile" "$work/tout" \
+	&& pass "the same commit again is no_change" || fail "a replay: $(cat "$work/tout")"
+
+# An edit at the console: the replay of HEAD writes the commit's
+# value back and says so.
+printf 'SECRET="edited at the console"\n' >"$ENV"
+if template_apply "$S2" && grep -qF "demo's env file on the box had been edited there since the last apply" "$work/tout" \
+	&& grep -qxF "SECRET=\"$V2\"" "$ENV"; then
+	pass "a replay after a console edit wrote the value back, and said so"
+else
+	fail "after a console edit: $(cat "$work/tout"); the file holds $(cat "$ENV" 2>&1)"
+fi
+settled "env file edited"
+
+# A push that does not load is rolled back, the env file with it.
+secret SECRET e2e-value-never-installed || fail "make secret: $(cat "$work/sout")"
+cp "$repo/$FILE" "$work/fgood"
+printf '\nhttp://192.0.2.1:8182 {\n\tbind 192.0.2.1\n\trespond "unreachable"\n}\n' >>"$repo/$FILE"
+R2=$(commit_index alice "a secret, and a file that does not load")
+if ! template_apply "$R2" && grep -qF "rolled_back" "$work/tout" && grep -qxF "SECRET=\"$V2\"" "$ENV"; then
+	pass "a rolled-back push put the env file back too"
+else
+	fail "a rollback with a secret: $(cat "$work/tout"); the file holds $(cat "$ENV" 2>&1)"
+fi
+[ "$(baseline)" = "$S2" ] && pass "the baseline did not move" || fail "the baseline is $(baseline), not $S2"
+settled "rollback with secrets"
+cp "$work/fgood" "$repo/$FILE"
+
+# A value encrypted to another key: the box cannot open it.
+age-keygen -o "$work/other.key" 2>/dev/null
+printf 'not for this box' | age -r "$(age-keygen -y "$work/other.key")" -o "$repo/$HOST/secrets/demo/OTHER.age"
+N2=$(commit_index alice "a value encrypted to another key")
+if ! template_apply "$N2" && grep -qF "/secrets/demo/OTHER.age is not encrypted to this box's key ($KEY)" "$work/tout"; then
+	pass "a value not encrypted to the box is refused by name"
+else
+	fail "a value for another key: $(cat "$work/tout")"
+fi
+[ "$(baseline)" = "$S2" ] && grep -qxF "SECRET=\"$V2\"" "$ENV" && pass "nothing moved" || fail "the baseline is $(baseline); the file holds $(cat "$ENV" 2>&1)"
+settled "not for this box"
+rm "$repo/$HOST/secrets/demo/OTHER.age"
+
+# Secrets for an app the file does not declare: refused at the door.
+mkdir -p "$repo/$HOST/secrets/ghost"
+printf 'x' | age -R "$repo/$HOST/secrets/recipients" -o "$repo/$HOST/secrets/ghost/X.age"
+G=$(commit_index alice "secrets for no app")
+if ! template_apply "$G" && grep -qF "/secrets/ghost/ names no app in the new Caddyfile" "$work/tout"; then
+	pass "secrets for an undeclared app are refused (422)"
+else
+	fail "secrets for no app: $(cat "$work/tout")"
+fi
+[ "$(baseline)" = "$S2" ] && pass "the baseline did not move" || fail "the baseline is $(baseline), not $S2"
+settled "undeclared app"
+rm -r "$repo/$HOST/secrets/ghost"
+
+# A rebuilt box has a new key: bin/apply stops before sending, naming
+# it, and a reader's make rekey moves every value to it.
+mv /etc/hotserve/age/identity "$work/identity.old"
+KEY2=$(hotserve box key 2>/dev/null)
+[ -n "$KEY2" ] && [ "$KEY2" != "$KEY" ] && [ "$(cat /etc/hotserve/age.pub)" = "$KEY2" ] \
+	&& pass "a key moved aside is made again, and age.pub with it" || fail "the new key '$KEY2', age.pub $(cat /etc/hotserve/age.pub)"
+K=$(commit_index alice "values for the old key")
+if ! template_apply "$K" && grep -qF "the box's key is $KEY2, but the first recipient in $HOST/secrets/recipients is $KEY" "$work/tout" \
+	&& grep -qF "make rekey BOX_KEY=$KEY2" "$work/tout" && grep -qF "nothing was sent" "$work/tout"; then
+	pass "bin/apply stops at a box key the recipients file does not name, and names it"
+else
+	fail "a changed box key: $(cat "$work/tout")"
+fi
+if (cd "$repo" && make -s rekey BOX_KEY="$KEY2" IDENTITY="$work/alice") >"$work/rout" 2>&1; then
+	pass "make rekey encrypted every value to the new key"
+else
+	fail "make rekey: $(cat "$work/rout")"
+fi
+K2=$(commit_index alice "rekeyed to the box's new key")
+if template_apply "$K2" && grep -qxF "apply: $HOST secrets: demo: changed SECRET" "$work/tout" \
+	&& grep -qxF "SECRET=\"e2e-value-never-installed\"" "$ENV"; then
+	pass "after make rekey the box opens the values again"
+else
+	fail "after the rekey: $(cat "$work/tout"); the file holds $(cat "$ENV" 2>&1)"
+fi
+settled "rekey"
+
+# A hand-made env file brought in: the values the box writes are the
+# ones hotserve read from it.
+if (cd "$repo" && make -s secrets-import APP=demo </etc/hotserve/demo.env) >"$work/iout" 2>&1; then
+	pass "make secrets-import read the hand-made env file"
+else
+	fail "make secrets-import: $(cat "$work/iout")"
+fi
+I=$(commit_index alice "demo: the hand-made env file, brought in")
+template_apply "$I" || fail "bin/apply of the import: $(cat "$work/tout")"
+[ "$(grep -v '^#' "$ENV" | sed 's/^SECRET="\(.*\)"$/SECRET=\1/')" = "$(cat /etc/hotserve/demo.env)" ] \
+	&& pass "the env file the box wrote holds the hand-made file's values" || fail "imported: $(cat "$ENV" 2>&1)"
+settled "import"
+
+# Removed from the repository, demo's file goes; a file the box never
+# wrote stays.
+printf 'X=1\n' >/etc/hotserve/secrets/node-example.env
+git -C "$repo" rm -r -q "$HOST/secrets/demo"
+sed -i 's#env_file /etc/hotserve/secrets/demo.env#env_file /etc/hotserve/demo.env#' "$repo/$FILE"
+RM=$(commit_index alice "demo: back to its hand-made env file")
+if template_apply "$RM" && grep -qxF "apply: $HOST secrets: demo: removed SECRET" "$work/tout" && [ ! -e "$ENV" ] \
+	&& [ -e /etc/hotserve/secrets/node-example.env ]; then
+	pass "a removed app's env file is gone, and one the box never wrote is left alone"
+else
+	fail "removal: $(cat "$work/tout"); $(ls -la /etc/hotserve/secrets 2>&1)"
+fi
+rm -f /etc/hotserve/secrets/node-example.env
+settled "secrets removed"
+# The box's first key back, and age.pub from it.
+mv "$work/identity.old" /etc/hotserve/age/identity && [ "$(hotserve box key 2>/dev/null)" = "$KEY" ] \
+	&& pass "the box's first key is back" || fail "could not put the box's first key back"
+
+echo "=== box apply 9: an administrator who is not root reads the logs, and nothing secret ==="
+# As docs/hardening.md makes one: the adm group alone (e2e/Dockerfile).
+# journalctl exits 0 on an empty journal too: look for known lines.
+runuser -u admin -- journalctl -u hotserve --no-pager 2>&1 | grep -q '"liveswap started"' \
+	&& pass "adm reads hotserve's journal without privilege" || fail "admin cannot read hotserve's journal"
+runuser -u admin -- journalctl -t hotserve-demo --no-pager 2>&1 | grep -q 'hotserve-demo' \
+	&& pass "adm reads an app's journal" || fail "admin cannot read the app's journal"
+for f in /etc/hotserve/demo.env /etc/hotserve/age/identity; do
+	runuser -u admin -- cat "$f" >/dev/null 2>&1 && fail "admin can read $f" || pass "admin cannot read $f"
+done
+for d in /etc/hotserve/secrets /etc/hotserve/age /var/lib/hotserve; do
+	runuser -u admin -- ls "$d" >/dev/null 2>&1 && fail "admin can list $d" || pass "admin cannot list $d"
+done
+# The template's own Caddyfile, with a signer (it ships with none, and
+# a box refuses one without), is a box's file this build takes.
+ssh-keygen -q -t ed25519 -N "" -C e2e -f "$work/example-signer"
+ekey=$(cut -d' ' -f1,2 "$work/example-signer.pub")
+awk -v line="signer e2e@example.com $ekey" '{ print } /^[[:space:]]*# signers[[:space:]]*$/ { print "\t\t" line }' \
+	/template/deploy.example.com/Caddyfile >"$work/example"
+runuser -u admin -- hotserve validate --adapter caddyfile --config /dev/stdin <"$work/example" >"$work/out" 2>&1 \
+	&& pass "the template's Caddyfile is a valid config" || fail "the template's Caddyfile does not validate: $(tail -3 "$work/out")"
+if runuser -u admin -- hotserve box describe /dev/stdin <"$work/example" >"$work/out" 2>&1 \
+	&& [ "$(cat "$work/out")" = "$(printf 'host deploy.example.com\napp example\nsigner e2e@example.com %s' "$ekey")" ]; then
+	pass "the box reads the template as the deploy.example.com box, one app, one signer"
+else
+	fail "hotserve box describe on the template: $(cat "$work/out")"
+fi
+
+echo "=== box apply 10: the path unit never spun ==="
 [ "$(systemctl is-active hotserve-box-apply.path)" = active ] \
 	&& pass "the path unit is still active" || fail "the path unit is $(systemctl is-active hotserve-box-apply.path)"
 if journalctl -u hotserve-box-apply.path -u hotserve-box-apply.service --no-pager | grep -qiE 'trigger limit|start request repeated|start-limit'; then
@@ -497,7 +718,7 @@ else
 	pass "no trigger or start limit was hit"
 fi
 
-echo "=== box apply 9: put the e2e config back ==="
+echo "=== box apply 11: put the e2e config back ==="
 restore && pass "restored the original config" || fail "could not load the original config"
 
 echo ""

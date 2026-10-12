@@ -223,11 +223,10 @@ install-test:
 # crashes (SIGKILL, exit 2, OOM) undone by the unit + reattach, a
 # refused start staying down, cgroup teardown of a worker tree, crash
 # cleanup, journal output. The recovery suite is the runner's view
-# after all that: still serving, deploys still work. Then the box
-# suite checks examples/box's administrator from the host against the
-# container: the journals and the env files, never the Caddyfile. Last,
-# the box apply suite runs inside the container: signed commits pushed
-# through box_webhook to the root applier, and the e2e config put back.
+# after all that: still serving, deploys still work. Last, the box
+# apply suite runs inside the container: signed commits and secrets
+# pushed through box_webhook to the root applier, with the box
+# template's own commands, and the e2e config put back.
 e2e:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d e2e-hotserve e2e-upstream e2e-artifacts
@@ -237,8 +236,6 @@ e2e:
 	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-systemd.sh || status=1; \
 	echo "════ recovery suite: the runner's view after hotserve's unclean death ════"; \
 	$(COMPOSE) run --rm --entrypoint "/bin/sh /suite-recovery.sh" e2e-runner || status=1; \
-	echo "════ box suite: examples/box's administrator on the e2e box ════"; \
-	COMPOSE="$(COMPOSE)" sh e2e/box-admin.sh || status=1; \
 	echo "════ box apply suite: signed pushes through box_webhook to the root applier ════"; \
 	$(COMPOSE) exec -T e2e-hotserve /bin/sh /suite-box.sh || status=1; \
 	if [ $$status -ne 0 ]; then \

@@ -18,6 +18,12 @@
 #      it lists signed HEAD and every commit between the two along
 #      main's first-parent line, and that the file is HEAD's: the file,
 #      those commit objects, and the trees from the root down to the file.
+#      With the box's secrets beside the file (<host>/secrets/), the
+#      secrets' tree, each app's, and every value's encrypted blob too,
+#      but not the recipients file, which the box never reads. Before
+#      it sends values, the box's key (GET /'s recipient) must be the
+#      first recipient in <host>/secrets/recipients: a rebuilt box has a
+#      new key, and values encrypted to the old one would be refused.
 #   4. POST / under a request id chosen at random. The box answers at
 #      once (applied, nothing to change, refused), or 202 while it
 #      installs; then GET /?result=<id> until it says how the push
@@ -143,9 +149,36 @@ unescape() {
 		printf "%s", out s
 	}'
 }
+# list <key>...: the items of the result's string arrays, one a line.
+# Their names are held to grammars (an app's name, <app>/<VAR>), with
+# no quote, comma or bracket in them.
+list() {
+	for k in "$@"; do
+		sed -n 's/.*"'"$k"'":\[\([^]]*\)\].*/\1/p' "$tmpd/resp" | tr ',' '\n' | tr -d '"'
+	done
+}
 # apps: the result's app names, comma separated.
-apps() {
-	sed -n 's/.*"apps":\[\([^]]*\)\].*/\1/p' "$tmpd/resp" | tr -d '"' | sed 's/,/, /g'
+apps() { list apps | paste -s -d , - | sed 's/,/, /g'; }
+# secrets_said: a line for each app whose secrets the push added,
+# changed or removed, naming the variables, never a value:
+#   apply: deploy.example.com secrets: example: added STRIPE_KEY; changed DATABASE_URL
+secrets_said() {
+	{
+		list secrets_added | sed 's/^/1 /'
+		list secrets_changed | sed 's/^/2 /'
+		list secrets_removed | sed 's/^/3 /'
+	} | awk 'NF == 2 { i = index($2, "/"); print substr($2, 1, i - 1), $1, substr($2, i + 1) }' |
+		LC_ALL=C sort -k1,1 -k2,2n -k3,3 |
+		awk -v box="$box" '
+		function flush() { if (app != "") printf "apply: %s secrets: %s: %s\n", box, app, out }
+		{
+			if ($1 != app) { flush(); app = $1; out = ""; kind = "" }
+			if ($2 != kind) {
+				kind = $2
+				out = out (out == "" ? "" : "; ") (kind == 1 ? "added " : kind == 2 ? "changed " : "removed ") $3
+			} else out = out ", " $3
+		}
+		END { flush() }'
 }
 
 # The Actions dressing, as scripts/deploy.sh in hotserve's examples has
@@ -187,6 +220,15 @@ done_ok() {
 		printf 'apply: %s\n' "$w"
 		[ -z "$actions" ] || printf '::warning title=%s::%s\n' "$(prop "apply $box")" "$(msg "$w")"
 	}
+	for app in $(list secrets_edited_out_of_band); do
+		if list secrets_removed | grep -q "^$app/"; then
+			w="$app's env file on the box had been edited there since the last apply; this push removed it, as $short has no secrets for $app"
+		else
+			w="$app's env file on the box had been edited there since the last apply; this push replaced the edit with $dir/secrets/$app/ at $short"
+		fi
+		printf 'apply: %s\n' "$w"
+		[ -z "$actions" ] || printf '::warning title=%s::%s\n' "$(prop "apply $box")" "$(msg "$w")"
+	done
 	case $1 in
 	no_change)
 		printf 'apply: %s at %s: the box already runs this Caddyfile\n' "$box" "$short"
@@ -196,8 +238,18 @@ done_ok() {
 		if [ -n "$d" ]; then
 			printf '%s\n' "$d"
 		fi
+		secrets_said
 		a=$(apps)
-		printf 'apply: %s at %s: loaded; running apps are not restarted%s\n' "$box" "$short" "${a:+; apps $a}"
+		# The diff is the Caddyfile's: none means the box wrote env files
+		# alone, and an env file is read at an app's launch, not a reload.
+		if [ -n "$d" ]; then
+			printf 'apply: %s at %s: loaded; running apps are not restarted%s\n' "$box" "$short" "${a:+; apps $a}"
+		else
+			printf 'apply: %s at %s: secrets updated; the Caddyfile is unchanged, nothing reloaded%s\n' "$box" "$short" "${a:+; apps $a}"
+		fi
+		for app in $(list secrets_added secrets_changed secrets_removed | sed 's,/.*,,' | LC_ALL=C sort -u); do
+			printf 'apply: %s reads its secrets at its next launch; a deploy of a new version launches it now\n' "$app"
+		done
 		summary "**$box:** $short applied" ;;
 	*)
 		# A 2xx that is not the box's: something in front of it.
@@ -294,6 +346,14 @@ post() {
 	maxtime=60
 }
 
+# once <tree|blob> <id>: the object into the bundle as trees/<id> or
+# blobs/<id>, and its name printed, unless it is there already.
+once() {
+	[ -e "$b/$1s/$2" ] && return 0
+	git cat-file "$1" "$2" >"$b/$1s/$2"
+	printf '%s\n' "$1s/$2"
+}
+
 # send: one box, $box, from HEAD's $path.
 send() {
 	git cat-file blob "$head:$path" >"$tmpd/Caddyfile" || { red "$path is not in HEAD"; return 0; }
@@ -334,6 +394,38 @@ send() {
 		parents=$(git rev-list --first-parent "$base..$head" | tail -n +2)
 	fi
 
+	# The secrets beside the file, if HEAD has any: the tree, and how
+	# many values it holds (a file in an app's directory). A recipients
+	# file alone is no value, and needs no key on the box.
+	dir=${path%/Caddyfile}
+	# (A <rev>:<path> takes no ^{tree}: everything after the colon is the
+	# path. Anything else at that name is the box's to refuse.)
+	stree=$(git rev-parse -q --verify "$head:$dir/secrets" 2>/dev/null) || stree=
+	[ -z "$stree" ] || [ "$(git cat-file -t "$stree")" = tree ] || stree=
+	values=0
+	[ -z "$stree" ] || values=$(git ls-tree -r --name-only "$stree" | grep -c '^[^/]*/[^/.][^/]*\.age$' || true)
+	if [ "$values" -gt 0 ]; then
+		# The box decrypts with its own key, so the values must be
+		# encrypted to it: the first recipient (box/DESIGN-box.md, "The
+		# box's key"). GET / names the key; this compares, never trusts.
+		key=$(field recipient)
+		# A line as age reads one: a CR before its newline is the line
+		# ending's, not the key's.
+		first=$(git cat-file blob "$head:$dir/secrets/recipients" 2>/dev/null | awk '{ sub(/\r$/, "") } !/^[[:space:]]*(#|$)/ { print; exit }')
+		if [ -z "$first" ]; then
+			red "$dir/secrets holds values but no recipients file names a key: make secret APP=… VAR=… BOX_KEY=\$(ssh root@$box hotserve box key) makes one; nothing was sent"
+			return 0
+		fi
+		if [ -z "$key" ]; then
+			red "the box names no key for secrets (no recipient in GET /): upgrade hotserve there to a release that installs secrets, or run hotserve box key as root on it; nothing was sent"
+			return 0
+		fi
+		if [ "$key" != "$first" ]; then
+			red "the box's key is $key, but the first recipient in $dir/secrets/recipients is $first: a rebuilt box has a new key. Confirm it with ssh root@$box hotserve box key, then make rekey BOX_KEY=$key, commit and push; nothing was sent"
+			return 0
+		fi
+	fi
+
 	# The bundle: exactly these names, regular files, no directories.
 	b=$tmpd/bundle
 	rm -rf "$b" "$tmpd/bundle.tgz"
@@ -362,6 +454,24 @@ send() {
 		set -- "$@" "trees/$t"
 		[ "$rest" = "${rest#*/}" ] && rest= || rest=${rest#*/}
 	done
+	# The secrets (box/DESIGN-box.md, "Proving the secrets"): their tree,
+	# each app's tree, and each value's blob, each name once (two values
+	# copied from one file are one blob). The box needs every value the
+	# commit lists, so a value left out is refused, never read as gone.
+	if [ -n "$stree" ]; then
+		mkdir -p "$b/blobs"
+		for m in $(
+			once tree "$stree"
+			for a in $(git ls-tree "$stree" | awk '$2 == "tree" { print $3 }'); do
+				once tree "$a"
+				for v in $(git ls-tree "$a" | awk '$2 == "blob" { print $3 }'); do
+					once blob "$v"
+				done
+			done
+		); do
+			set -- "$@" "$m"
+		done
+	fi
 	# COPYFILE_DISABLE: macOS tar would add ._ files for extended
 	# attributes, which the box refuses as names it does not know.
 	COPYFILE_DISABLE=1 tar -czf "$tmpd/bundle.tgz" -C "$b" "$@"

@@ -7,10 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/smallhoursorg/hotserve/liveswap"
 )
 
 // The box template's secrets commands — bin/secrets behind make secret,
@@ -24,13 +25,13 @@ var (
 	ageErr  error
 )
 
-// ageVersion is the age the tests encrypt and decrypt with: Homebrew's
-// at the time of writing. Debian 13 ships 1.2.1, which reads and writes
-// the same files.
-const ageVersion = "v1.3.2"
-
-// ageTools builds age and age-keygen once, outside this module's
-// graph: the template's commands run the age CLI, not hotserve's code.
+// ageTools builds age and age-keygen once, at the version of
+// filippo.io/age this repository pins (go.mod): the version the box
+// decrypts with is the version the template's commands are tested with,
+// and a bump moves both. It is installed outside this module's graph
+// (GOWORK=off), with age's own go.sum: the CLI needs modules nothing
+// here imports. Debian 13 ships age 1.2.1, which reads and writes the
+// same files (the e2e lane runs the commands with it).
 func ageTools(t *testing.T) string {
 	t.Helper()
 	ageOnce.Do(func() {
@@ -40,11 +41,17 @@ func ageTools(t *testing.T) string {
 			return
 		}
 		ageDir = dir // TestMain removes it, built or not
+		v, err := exec.Command("go", "list", "-m", "-f", "{{.Version}}", "filippo.io/age").Output()
+		if err != nil {
+			ageErr = fmt.Errorf("the pinned filippo.io/age: %w", err)
+			return
+		}
+		version := strings.TrimSpace(string(v))
 		cmd := exec.Command("go", "install",
-			"filippo.io/age/cmd/age@"+ageVersion, "filippo.io/age/cmd/age-keygen@"+ageVersion)
+			"filippo.io/age/cmd/age@"+version, "filippo.io/age/cmd/age-keygen@"+version)
 		cmd.Env = append(os.Environ(), "GOBIN="+dir, "GOWORK=off", "GOFLAGS=")
 		if out, err := cmd.CombinedOutput(); err != nil {
-			ageErr = fmt.Errorf("go install age %s: %w\n%s", ageVersion, err, out)
+			ageErr = fmt.Errorf("go install age %s: %w\n%s", version, err, out)
 		}
 	})
 	if ageErr != nil {
@@ -944,39 +951,11 @@ func TestBoxSecretsNeedAge(t *testing.T) {
 	}
 }
 
-// envLines is hotserve's env-file parser (liveswap/app.go,
-// parseEnvLines), copied: make secrets-import must read a file as the
-// box would. Once liveswap exports it (ParseEnvFile), this test should
-// call that instead of a copy.
+// envLines is hotserve's own env-file parser, the one every launch reads
+// a file with: make secrets-import must read a file as the box would.
 func envLines(data string) ([]string, error) {
-	var vars []string
-	for i, line := range strings.Split(data, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		key, value, found := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
-		if !found || key == "" {
-			return nil, fmt.Errorf("line %d: not KEY=VALUE", i+1)
-		}
-		if !envKey.MatchString(key) {
-			return nil, fmt.Errorf("line %d: %q is not a valid name", i+1, key)
-		}
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 {
-			if (value[0] == '"' && value[len(value)-1] == '"') ||
-				(value[0] == '\'' && value[len(value)-1] == '\'') {
-				value = value[1 : len(value)-1]
-			}
-		}
-		vars = append(vars, key+"="+value)
-	}
-	return vars, nil
+	return liveswap.ParseEnvLines("the corpus", []byte(data))
 }
-
-var envKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func TestBoxSecretsImport(t *testing.T) {
 	r := secretsRepo(t)
@@ -1079,5 +1058,75 @@ func TestBoxSecretsImport(t *testing.T) {
 	// A value the box would refuse, inside a line hotserve's parser takes.
 	if out, code := r.secrets("", "OK=1\nNUL=a\x00b\n", "import", "APP=other"); code != 1 || !strings.Contains(out, "NUL has a NUL byte in it") || r.exists("deploy.example.com/secrets/other") {
 		t.Errorf("a NUL: exit %d\n%s", code, out)
+	}
+}
+
+// TestBoxCheckSecrets is make check over a box with secrets: describe's
+// lines read, its refusals and warnings shown (annotated in Actions),
+// what make secret leaves to it checked, and a hotserve too old to read
+// secrets named.
+func TestBoxCheckSecrets(t *testing.T) {
+	bin := hotserveBinary(t)
+	r := secretsRepo(t)
+	r.key("id_ed25519")
+	if out, code := r.run("signer"); code != 0 {
+		t.Fatalf("signer: exit %d\n%s", code, out)
+	}
+	_, box := r.boxKey("box")
+	check := func(env ...string) (string, int) {
+		return r.run("check", append([]string{"HOTSERVE=" + bin}, env...)...)
+	}
+	r.write(boxFile, strings.Replace(r.read(boxFile), "# env_file /etc/hotserve/secrets/example.env", "env_file /etc/hotserve/secrets/example.env", 1))
+	// A managed env_file and no secret: describe's consistency check.
+	if out, code := check(); code != 1 || !strings.Contains(out, "holds no secret") {
+		t.Fatalf("a managed env_file with no secret: exit %d\n%s", code, out)
+	}
+	if out, code := r.secrets("", "postgres://one", "set", "APP=example", "VAR=DATABASE_URL", "BOX_KEY="+box); code != 0 {
+		t.Fatalf("make secret: exit %d\n%s", code, out)
+	}
+	if out, code := check(); code != 0 || out != "deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer, 1 secret)\n" {
+		t.Fatalf("one secret: exit %d\n%s", code, out)
+	}
+
+	// Two names one file on a Mac's disk: the box takes both, so a
+	// warning, annotated in Actions.
+	r.write("deploy.example.com/secrets/example/database_url.age", r.read(dbFile))
+	out, code := check("GITHUB_ACTIONS=true")
+	twin := "app example's secrets DATABASE_URL and database_url differ only in case"
+	if code != 0 || !strings.Contains(out, "(1 app, 1 signer, 2 secrets)") ||
+		!strings.Contains(out, "check: warning: deploy.example.com/Caddyfile: "+twin) ||
+		!strings.Contains(out, "::warning file=deploy.example.com/Caddyfile::"+twin) {
+		t.Fatalf("a case twin: exit %d\n%s", code, out)
+	}
+	r.remove("deploy.example.com/secrets/example/database_url.age")
+
+	// Secrets for an app the file does not declare: describe refuses.
+	r.write("deploy.example.com/secrets/ghost/X.age", r.read(dbFile))
+	if out, code := check(); code != 1 || !strings.Contains(out, "secrets/ghost/ names no app in the new Caddyfile") {
+		t.Fatalf("an undeclared app: exit %d\n%s", code, out)
+	}
+	r.remove("deploy.example.com/secrets/ghost")
+
+	// Values, and no recipients file.
+	recipients := r.read(recipientsFile)
+	r.remove(recipientsFile)
+	if out, code := check(); code != 1 || !strings.Contains(out, "deploy.example.com/secrets holds values but no recipients file") {
+		t.Fatalf("no recipients file: exit %d\n%s", code, out)
+	}
+	r.write(recipientsFile, recipients)
+
+	// A hotserve from before secrets: its describe reads none of them.
+	old := filepath.Join(r.home, "old-hotserve")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1 $2\" = \"box describe\" ]; then\n" +
+		"\t\"" + bin + "\" box describe \"$3\" | grep -v -E '^(recipients|secret|warning) '\n" +
+		"\texit 0\n" +
+		"fi\n" +
+		"exec \"" + bin + "\" \"$@\"\n"
+	if err := os.WriteFile(old, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := r.run("check", "HOTSERVE="+old); code != 1 || !strings.Contains(out, "does not read secrets") {
+		t.Fatalf("an old hotserve: exit %d\n%s", code, out)
 	}
 }
