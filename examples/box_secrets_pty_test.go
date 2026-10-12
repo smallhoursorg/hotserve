@@ -19,10 +19,10 @@ import (
 
 // make secret's prompt, on a pseudoterminal of Linux's own (/dev/ptmx,
 // no module beyond the standard library): what is typed is never
-// echoed; Backspace, ^U and ^W edit it; a paste longer than a terminal
-// line (4096 bytes here, 1024 on macOS) is taken whole; any other
-// control character is refused; and the terminal is left as it was,
-// after Ctrl-C too.
+// echoed; a paste longer than a terminal line (4096 bytes here, 1024 on
+// macOS) is taken whole; nothing is edited, so a Backspace, an arrow
+// key, a NUL or any other control character refuses the value; and the
+// terminal is left as it was, after Ctrl-C too.
 
 type pty struct{ master, slave *os.File }
 
@@ -142,7 +142,7 @@ func TestBoxSecretPrompt(t *testing.T) {
 	at := func(v string) string { return "deploy.example.com/secrets/example/" + v + ".age" }
 
 	// Enter is a carriage return at a terminal, as here.
-	out, code := r.typeAtPrompt(t, "hunter2-xyzz\x7f\r", "APP=example", "VAR=TYPED", "BOX_KEY="+box)
+	out, code := r.typeAtPrompt(t, "hunter2-xyz\r", "APP=example", "VAR=TYPED", "BOX_KEY="+box)
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
@@ -151,11 +151,8 @@ func TestBoxSecretPrompt(t *testing.T) {
 		t.Errorf("the value was echoed:\n%q", out)
 	}
 	for _, c := range []struct{ name, keys, want string }{
-		{"KILLED", "wrong\x15right\r", "right"},
-		{"WORD", "one two\x17three\r", "one three"},
-		{"WIDE", "caf" + string(rune(0xe9)) + "\x7fe\r", "cafe"}, // Backspace takes the whole é, both bytes
-		{"BS", "ab\bc\r", "ac"},                                  // ^H, as some terminals send it
 		{"LONG", strings.Repeat("a", 5000) + "\r", strings.Repeat("a", 5000)},
+		{"WIDE", "caf" + string(rune(0xe9)) + " " + string(rune(0x1f600)) + "\r", "caf" + string(rune(0xe9)) + " " + string(rune(0x1f600))},
 	} {
 		if out, code := r.typeAtPrompt(t, c.keys, "APP=example", "VAR="+c.name); code != 0 {
 			t.Fatalf("%s: exit %d\n%s", c.name, code, out)
@@ -163,13 +160,21 @@ func TestBoxSecretPrompt(t *testing.T) {
 		r.mustDecrypt(boxID, at(c.name), c.want)
 	}
 
-	// A NUL typed (^@) is refused, not dropped on the way.
-	if out, code := r.typeAtPrompt(t, "ab\x00c\r", "APP=example", "VAR=NUL"); code != 1 || !strings.Contains(out, "NUL has a control character in it") || r.exists(at("NUL")) {
-		t.Errorf("a typed NUL: exit %d\n%s", code, out)
-	}
-	// An arrow key is a control sequence, not part of a value.
-	if out, code := r.typeAtPrompt(t, "ab\x1b[Dc\r", "APP=example", "VAR=ARROW"); code != 1 || !strings.Contains(out, "ARROW has a control character in it (an arrow key, say)") || r.exists(at("ARROW")) {
-		t.Errorf("an arrow key: exit %d\n%s", code, out)
+	// Nothing typed is edited, and no key becomes part of a value:
+	// Backspace (DEL or ^H), ^U, an arrow key, a NUL (which a shell
+	// variable would have dropped on the way), a tab.
+	for _, c := range []struct{ name, keys string }{
+		{"DEL", "hunter2-xyzz\x7f\r"},
+		{"BS", "ab\bc\r"},
+		{"KILL", "wrong\x15right\r"},
+		{"ARROW", "ab\x1b[Dc\r"},
+		{"NUL", "ab\x00c\r"},
+		{"TAB", "a\tb\r"},
+	} {
+		out, code := r.typeAtPrompt(t, c.keys, "APP=example", "VAR="+c.name)
+		if code != 1 || !strings.Contains(out, c.name+" has a control character in it: typing is not shown, so the prompt takes no edits") || r.exists(at(c.name)) {
+			t.Errorf("%s: exit %d\n%s", c.name, code, out)
+		}
 	}
 	// Ctrl-C leaves, and leaves the terminal as it found it.
 	if out, code := r.typeAtPrompt(t, "abc\x03", "APP=example", "VAR=GONE"); code != 130 || r.exists(at("GONE")) {

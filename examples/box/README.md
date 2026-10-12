@@ -354,7 +354,13 @@ secret:     env_file /etc/hotserve/secrets/example.env
 
 The value goes from the prompt straight into age, so it is never
 written to the laptop's disk or your shell's history; a pipe works too,
-from a password manager's command line, say. Add the `env_file` line
+from a password manager's command line, say. The prompt takes the line
+you paste or type exactly as it is. Typing is not shown, so it takes no
+edits: a Backspace or an arrow key refuses the value, and you paste or
+type it again. It reads the keys itself because a terminal's own line
+editing holds a line of at most 1024 bytes on a Mac (4096 on Linux),
+and past that a Mac drops the rest, Enter included, so a long pasted
+key would never arrive. Add the `env_file` line
 to the app's block, commit (signed) and push. The run names the
 variables the box added, changed or removed, never their values. The
 box writes `/etc/hotserve/secrets/example.env`, which only root and
