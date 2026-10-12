@@ -69,10 +69,10 @@ for f in $boxes; do
 	grep -q '^[[:space:]]*# signers[[:space:]]*$' "$f" ||
 		fail "$f has no '# signers' line: put one inside its box block, where the signer lines go"
 done
-# Each box's secrets, which the key joins as a reader below, laid out as
-# the box reads them: checked before anything here is written, so a
-# refusal leaves no box half done.
-bin/secrets check-layout
+# Each box's recipients file, which the key joins below, checked before
+# anything here is written (no link, a regular file: bin/secrets,
+# guard), so a refusal leaves no box half done.
+bin/secrets guard-readers
 for f in $boxes; do
 	[ -e "$f" ] || continue
 	# A signer line's third argument is the key; the same key twice

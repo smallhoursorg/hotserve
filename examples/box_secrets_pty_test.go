@@ -69,7 +69,20 @@ func (p *pty) termios(t *testing.T) syscall.Termios {
 // the exit status, and checks the terminal is as it was.
 func (r *boxRepo) typeAtPrompt(t *testing.T, keys string, env ...string) (string, int) {
 	t.Helper()
+	return r.typeAtPromptOn(t, nil, keys, env...)
+}
+
+// typeAtPromptOn is typeAtPrompt on a terminal set first by set.
+func (r *boxRepo) typeAtPromptOn(t *testing.T, set func(*syscall.Termios), keys string, env ...string) (string, int) {
+	t.Helper()
 	p := openPTY(t)
+	if set != nil {
+		tio := p.termios(t)
+		set(&tio)
+		if err := ioctl(p.slave.Fd(), syscall.TCSETS, uintptr(unsafe.Pointer(&tio))); err != nil {
+			t.Fatal(err)
+		}
+	}
 	before := p.termios(t)
 	cmd := exec.Command(filepath.Join(r.dir, "bin", "secrets"), "set")
 	cmd.Dir, cmd.Env = r.dir, append(append([]string{}, r.env...), env...)
@@ -197,6 +210,19 @@ func TestBoxSecretPrompt(t *testing.T) {
 			t.Errorf("%s: exit %d\n%s", c.name, code, out)
 		}
 	}
+	// A terminal set to map its input otherwise: CR dropped, the 8th
+	// bit stripped, no CR-to-newline. The prompt sets its own, and puts
+	// these back.
+	odd := func(tio *syscall.Termios) {
+		tio.Iflag |= syscall.IGNCR | syscall.ISTRIP | syscall.INLCR
+		tio.Iflag &^= syscall.ICRNL
+	}
+	wide := "caf" + string(rune(0xe9))
+	if out, code := r.typeAtPromptOn(t, odd, wide+"\r", "APP=example", "VAR=ODD"); code != 0 {
+		t.Fatalf("on an oddly set terminal: exit %d\n%s", code, out)
+	}
+	r.mustDecrypt(boxID, at("ODD"), wide)
+
 	// Ctrl-C leaves, and leaves the terminal as it found it.
 	if out, code := r.typeAtPrompt(t, "abc\x03", "APP=example", "VAR=GONE"); code != 130 || r.exists(at("GONE")) {
 		t.Errorf("Ctrl-C: exit %d\n%s", code, out)

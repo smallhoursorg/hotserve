@@ -313,7 +313,7 @@ func TestBoxSecretSet(t *testing.T) {
 	// On a Mac's disk two names that differ in case are one file: the
 	// second would overwrite the first.
 	r.write("deploy.example.com/secrets/example/Database_URL.age", "x")
-	if out, code := r.secrets("", "v", "set", app...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example holds two files whose names differ only in case (database_url.age): on a Mac's default disk they are one file") {
+	if out, code := r.secrets("", "v", "set", app...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example/Database_URL.age differs from DATABASE_URL.age only in case: on a Mac's default disk they are one file") {
 		t.Errorf("a case twin: exit %d\n%s", code, out)
 	}
 	if r.read("deploy.example.com/secrets/example/Database_URL.age") != "x" {
@@ -321,55 +321,9 @@ func TestBoxSecretSet(t *testing.T) {
 	}
 	r.remove("deploy.example.com/secrets/example/Database_URL.age")
 
-	// An app has at most 256 variables; one already there can change.
-	for i := 0; i < 256; i++ {
-		r.write(fmt.Sprintf("deploy.example.com/secrets/many/V%03d.age", i), "x")
-	}
-	if out, code := r.secrets("", "v", "set", "APP=many", "VAR=ONE_MORE"); code != 1 || !strings.Contains(out, "many has 256 variables, the box's cap for an app") {
-		t.Errorf("the 257th variable: exit %d\n%s", code, out)
-	}
-	if out, code := r.secrets("", "v", "set", "APP=many", "VAR=V000"); code != 0 {
-		t.Errorf("a change at the cap: exit %d\n%s", code, out)
-	}
-	if out, code := r.secrets("", "V999=1\n", "import", "APP=many"); code != 1 || !strings.Contains(out, "many would have more than 256 variables") {
-		t.Errorf("an import past the cap: exit %d\n%s", code, out)
-	}
-	// Past the cap already (made by hand): refused whatever runs.
-	r.write("deploy.example.com/secrets/many/V256.age", "x")
-	if out, code := r.secrets("", "", "list"); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/many holds 257 variables; the box's cap for an app is 256") {
-		t.Errorf("257 variables: exit %d\n%s", code, out)
-	}
-	r.remove("deploy.example.com/secrets/many")
-
-	// At most 32 apps of a box have secrets.
-	have, err := os.ReadDir(filepath.Join(r.dir, "deploy.example.com/secrets"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	apps := 0
-	for _, e := range have {
-		if e.IsDir() {
-			apps++
-		}
-	}
-	for i := 1; i <= 32-apps; i++ {
-		r.write(fmt.Sprintf("deploy.example.com/secrets/app%02d/A.age", i), "x")
-	}
-	if out, code := r.secrets("", "v", "set", "APP=one-more", "VAR=A"); code != 1 || !strings.Contains(out, "deploy.example.com has secrets for 32 apps, the box's cap") {
-		t.Errorf("the 33rd app: exit %d\n%s", code, out)
-	}
-	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=MORE"); code != 0 {
-		t.Errorf("an app already there, at the cap: exit %d\n%s", code, out)
-	}
-	r.remove("deploy.example.com/secrets/example/MORE.age")
-	r.write("deploy.example.com/secrets/app99/A.age", "x")
-	if out, code := r.secrets("", "", "list"); code != 1 || !strings.Contains(out, "deploy.example.com/secrets holds 33 apps' secrets; the box's cap is 32") {
-		t.Errorf("33 apps: exit %d\n%s", code, out)
-	}
-	for i := 1; i <= 32-apps; i++ {
-		r.remove(fmt.Sprintf("deploy.example.com/secrets/app%02d", i))
-	}
-	r.remove("deploy.example.com/secrets/app99")
+	// (An app's variables and the apps with secrets, against the box's
+	// caps, are counted by make check in a pull request and by the box:
+	// this checks only what it writes.)
 
 	// The recipients file's first key is the box's, or nothing is
 	// encrypted to it.
@@ -717,48 +671,27 @@ func TestBoxSecretsRefuseLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Anything but the layout the box reads, refused before a write:
-	// a move into a directory where a file belongs would nest it.
-	for _, c := range []struct {
-		make func()
-		undo string
-		want string
-	}{
-		{func() { r.remove(recipientsFile); r.write(recipientsFile+"/x", "") }, recipientsFile,
-			recipientsFile + " is not a regular file"},
-		{func() { r.write(appDir+"/B.age/x", "") }, appDir + "/B.age",
-			appDir + "/B.age is not a regular file"},
-		{func() { r.write(appDir+"/notes.txt", "") }, appDir + "/notes.txt",
-			appDir + "/notes.txt: an app's secrets directory holds only <VAR>.age files"},
-		{func() { r.write(appDir+"/1X.age", "") }, appDir + "/1X.age",
-			"a variable's name is letters, digits and _"},
-		{func() { r.write("deploy.example.com/secrets/Example/A.age", "") }, "deploy.example.com/secrets/Example",
-			"deploy.example.com/secrets/Example: a box's secrets directory holds the recipients file and one directory per app"},
-		{func() { r.write("deploy.example.com/secrets/blog", "") }, "deploy.example.com/secrets/blog",
-			"deploy.example.com/secrets/blog is not a directory"},
-		{func() { r.write("deploy.example.com/secrets/"+strings.Repeat("a", 64)+"/A.age", "") }, "deploy.example.com/secrets/" + strings.Repeat("a", 64),
-			"an app's name is at most 63 characters"},
-		{func() { r.write(appDir+"/"+strings.Repeat("V", 129)+".age", "") }, appDir + "/" + strings.Repeat("V", 129) + ".age",
-			"a variable's name is at most 128 bytes"},
-		// Values with no recipients file: nothing could encrypt another
-		// to the same keys.
-		{func() { r.remove(recipientsFile) }, recipientsFile,
-			"deploy.example.com/secrets has apps' secrets but no recipients file"},
-	} {
-		c.make()
-		if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 1 || !strings.Contains(out, c.want) {
-			t.Errorf("want %q: exit %d\n%s", c.want, code, out)
-		}
-		if r.exists(appDir + "/C.age") {
-			t.Fatalf("written past %q", c.want)
-		}
-		r.remove(c.undo)
-		if c.undo == recipientsFile {
-			r.write(recipientsFile, rec)
-		}
+	// A path it writes that is not what it must be: a move into a
+	// directory where a file belongs would nest it there.
+	r.remove(recipientsFile)
+	r.write(recipientsFile+"/x", "")
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 1 || !strings.Contains(out, recipientsFile+" is not a regular file") || r.exists(appDir+"/C.age") {
+		t.Errorf("a directory for the recipients file: exit %d\n%s", code, out)
 	}
+	r.remove(recipientsFile)
+	r.write(recipientsFile, rec)
+	r.write(appDir+"/C.age/x", "")
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 1 || !strings.Contains(out, appDir+"/C.age is not a regular file") {
+		t.Errorf("a directory for the value: exit %d\n%s", code, out)
+	}
+	r.remove(appDir + "/C.age")
+	r.write("deploy.example.com/secrets/blog", "")
+	if out, code := r.secrets("", "v", "set", "APP=blog", "VAR=C"); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/blog is not a directory") {
+		t.Errorf("a file for the app's directory: exit %d\n%s", code, out)
+	}
+	r.remove("deploy.example.com/secrets/blog")
 	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 0 {
-		t.Errorf("the layout put back: exit %d\n%s", code, out)
+		t.Errorf("the paths put back: exit %d\n%s", code, out)
 	}
 
 	// The box's own Caddyfile a link: its signer lines would be copied
@@ -780,8 +713,8 @@ func TestBoxSecretsRefuseLinks(t *testing.T) {
 	r.write(boxFile, caddy)
 }
 
-// make signer with more than one box: a box whose secrets the box
-// would refuse stops it before any box is written, the good one too.
+// make signer with more than one box: a box whose recipients file it
+// may not write stops it before any box is written, the good one too.
 func TestBoxSignerChecksEveryBoxFirst(t *testing.T) {
 	r := secretsRepo(t)
 	r.key("id_ed25519")
@@ -796,13 +729,23 @@ func TestBoxSignerChecksEveryBoxFirst(t *testing.T) {
 			t.Fatalf("%s: exit %d\n%s", b, code, out)
 		}
 	}
-	r.write("deploy2.example.com/secrets/example/notes.txt", "")
 	before := map[string]string{}
 	for _, f := range []string{boxFile, recipientsFile, "deploy2.example.com/Caddyfile", "deploy2.example.com/secrets/recipients"} {
 		before[f] = r.read(f)
 	}
+	// The second box's recipients file a link, to a copy of itself.
+	copyOf := filepath.Join(t.TempDir(), "recipients")
+	if err := os.WriteFile(copyOf, []byte(before["deploy2.example.com/secrets/recipients"]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(r.dir, "deploy2.example.com/secrets/recipients")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(copyOf, filepath.Join(r.dir, "deploy2.example.com/secrets/recipients")); err != nil {
+		t.Fatal(err)
+	}
 	mo := r.key("mo")
-	if out, code := r.run("signer", "KEY="+mo, "PRINCIPAL=mo"); code == 0 || !strings.Contains(out, "deploy2.example.com/secrets/example/notes.txt: an app's secrets directory holds only <VAR>.age files") {
+	if out, code := r.run("signer", "KEY="+mo, "PRINCIPAL=mo"); code == 0 || !strings.Contains(out, "deploy2.example.com/secrets/recipients is a symbolic link") {
 		t.Fatalf("a bad second box: exit %d\n%s", code, out)
 	}
 	for f, b := range before {
@@ -810,6 +753,177 @@ func TestBoxSignerChecksEveryBoxFirst(t *testing.T) {
 			t.Errorf("%s changed in a refused make signer", f)
 		}
 	}
+}
+
+// snapshot is every regular file under dir, but .git, by its contents.
+func snapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if d.Type().IsRegular() {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			files[path] = string(b)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// A branch someone else pushed may hold links where a box's secrets go,
+// and checking it out puts them here. No command reads through one: a
+// linked .age would have make rekey decrypt a file from this laptop and
+// encrypt it into the repository, and a linked secrets directory would
+// have every command work on files outside it. git's index is asked
+// too, for a link the checkout has not made yet.
+func TestBoxSecretsNeverReadThroughALink(t *testing.T) {
+	r := secretsRepo(t)
+	alicePub := r.key("id_ed25519")
+	alice := strings.TrimSuffix(alicePub, ".pub")
+	if out, code := r.run("signer"); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	_, box := r.boxKey("box")
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=A", "BOX_KEY="+box); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	r.commit("a secret")
+	appDir := filepath.Join(r.dir, "deploy.example.com/secrets/example")
+
+	// A file of this laptop's, encrypted to alice: what a linked .age
+	// would hand make rekey to decrypt.
+	const local = "a secret of this laptop's"
+	outside := t.TempDir()
+	localAge := filepath.Join(outside, "local.age")
+	c := exec.Command(filepath.Join(ageTools(t), "age"), "-R", alicePub, "-o", localAge)
+	c.Stdin = strings.NewReader(local)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("age: %v\n%s", err, out)
+	}
+	leak := filepath.Join(appDir, "LEAK.age")
+	if err := os.Symlink(localAge, leak); err != nil {
+		t.Fatal(err)
+	}
+	repoBefore, outsideBefore := snapshot(t, r.dir), snapshot(t, outside)
+	refusals := []struct {
+		cmd, stdin string
+		env        []string
+	}{
+		{"set", "v", []string{"APP=example", "VAR=LEAK"}},
+		{"show", "", []string{"APP=example", "VAR=LEAK", "IDENTITY=" + alice}},
+		{"list", "", nil},
+		{"rekey", "", []string{"IDENTITY=" + alice}},
+		{"import", "LEAK=v\n", []string{"APP=example"}},
+	}
+	for _, c := range refusals {
+		if out, code := r.secrets("", c.stdin, c.cmd, c.env...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example/LEAK.age is a symbolic link") {
+			t.Errorf("%s with a linked .age: exit %d\n%s", c.cmd, code, out)
+		}
+	}
+	if fi, err := os.Lstat(leak); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("LEAK.age is no longer the link: %v %v", fi, err)
+	}
+	if got := snapshot(t, r.dir); !mapsEqual(got, repoBefore) {
+		t.Error("a refused command changed the repository")
+	}
+	if got := snapshot(t, outside); !mapsEqual(got, outsideBefore) {
+		t.Error("a refused command changed the file outside")
+	}
+	for path := range snapshot(t, r.dir) {
+		if strings.HasSuffix(path, ".age") {
+			if v, err := r.decrypt(alice, path); err == nil && v == local {
+				t.Fatalf("%s holds the laptop's secret", path)
+			}
+		}
+	}
+	if err := os.Remove(leak); err != nil {
+		t.Fatal(err)
+	}
+
+	// The secrets directory itself a link, to a copy outside that the
+	// box would take.
+	secrets := filepath.Join(r.dir, "deploy.example.com/secrets")
+	moved := filepath.Join(outside, "secrets")
+	if err := os.Rename(secrets, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, secrets); err != nil {
+		t.Fatal(err)
+	}
+	outsideBefore = snapshot(t, outside)
+	kim := r.key("kim")
+	for _, c := range append(refusals[:0:0], []struct {
+		cmd, stdin string
+		env        []string
+	}{
+		{"set", "v", []string{"APP=example", "VAR=B"}},
+		{"show", "", []string{"APP=example", "VAR=A", "IDENTITY=" + alice}},
+		{"list", "", nil},
+		{"rekey", "", []string{"IDENTITY=" + alice}},
+		{"import", "B=v\n", []string{"APP=example"}},
+	}...) {
+		if out, code := r.secrets("", c.stdin, c.cmd, c.env...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets is a symbolic link") {
+			t.Errorf("%s with a linked secrets directory: exit %d\n%s", c.cmd, code, out)
+		}
+	}
+	if out, code := r.run("signer", "KEY="+kim, "PRINCIPAL=kim"); code == 0 || !strings.Contains(out, "deploy.example.com/secrets is a symbolic link") {
+		t.Errorf("make signer with a linked secrets directory: exit %d\n%s", code, out)
+	}
+	if got := snapshot(t, outside); !mapsEqual(got, outsideBefore) {
+		t.Error("a refused command changed the files outside")
+	}
+	if err := os.Remove(secrets); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, secrets); err != nil {
+		t.Fatal(err)
+	}
+	r.git("checkout", "--", ".")
+
+	// A link in git's index, a file in its place here: the next
+	// checkout makes it a link again.
+	if err := os.Symlink(localAge, filepath.Join(appDir, "LINKED.age")); err != nil {
+		t.Fatal(err)
+	}
+	r.commit("a link", "-c", "commit.gpgsign=false")
+	if err := os.Remove(filepath.Join(appDir, "LINKED.age")); err != nil {
+		t.Fatal(err)
+	}
+	r.write("deploy.example.com/secrets/example/LINKED.age", "x")
+	for _, c := range []struct {
+		cmd string
+		env []string
+	}{
+		{"rekey", []string{"IDENTITY=" + alice}},
+		{"show", []string{"APP=example", "VAR=LINKED", "IDENTITY=" + alice}},
+	} {
+		if out, code := r.secrets("", "", c.cmd, c.env...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example/LINKED.age is a symbolic link in git's index") {
+			t.Errorf("%s with a link in the index: exit %d\n%s", c.cmd, code, out)
+		}
+	}
+}
+
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || w != v {
+			return false
+		}
+	}
+	return true
 }
 
 func TestBoxSecretsNeedAge(t *testing.T) {
