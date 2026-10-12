@@ -320,6 +320,12 @@ func TestBoxSecretSet(t *testing.T) {
 		t.Error("the case twin was overwritten")
 	}
 	r.remove("deploy.example.com/secrets/example/Database_URL.age")
+	// The suffix too: DATABASE_URL.AGE is DATABASE_URL.age there.
+	r.write("deploy.example.com/secrets/example/DATABASE_URL.AGE", "x")
+	if out, code := r.secrets("", "v", "set", app...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example/DATABASE_URL.AGE differs from DATABASE_URL.age only in case") {
+		t.Errorf("a case twin by its suffix: exit %d\n%s", code, out)
+	}
+	r.remove("deploy.example.com/secrets/example/DATABASE_URL.AGE")
 
 	// (An app's variables and the apps with secrets, against the box's
 	// caps, are counted by make check in a pull request and by the box:
