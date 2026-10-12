@@ -163,15 +163,23 @@ func (r *record) validSecrets() error {
 	if err := validInstalled(r.SecretsInstalled); err != nil {
 		return err
 	}
-	for _, names := range [][]string{r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved} {
-		if !validSecretNames(names) {
-			return errors.New("a secret is not named <app>/<VAR>")
-		}
-	}
-	if len(r.SecretsOutOfBand) > 2*proof.MaxSecretApps || slices.ContainsFunc(r.SecretsOutOfBand, func(s string) bool { return !appName.MatchString(s) }) {
-		return errors.New("secrets_edited_out_of_band is not app names")
+	if !validNameLists(r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved, r.SecretsOutOfBand) {
+		return errors.New("the secrets' names are not <app>/<VAR>, or the apps out of band not app names")
 	}
 	return nil
+}
+
+// validNameLists holds a record's or a result's secrets fields to what
+// root writes: the added, changed and removed lists each within its cap
+// and each name `<app>/<VAR>`; the apps out of band app names, at most
+// a set's worth.
+func validNameLists(added, changed, removed, oob []string) bool {
+	for _, names := range [][]string{added, changed, removed} {
+		if !validSecretNames(names) {
+			return false
+		}
+	}
+	return len(oob) <= 2*proof.MaxSecretApps && !slices.ContainsFunc(oob, func(s string) bool { return !appName.MatchString(s) })
 }
 
 // validInstalled holds an app → digest map of managed env files, as
@@ -230,10 +238,7 @@ func (t *txn) pick(caddyfile, files string) string {
 }
 
 func (t *txn) installFailed(err error) string {
-	if t.files() {
-		return installFailedFiles(err)
-	}
-	return installFailed(err)
+	return t.pick(installFailed(err), installFailedFiles(err))
 }
 
 // env is the set's entry for app.
@@ -259,6 +264,14 @@ var (
 	// trigger limit; the console decides.
 	errUnsettled = errors.New("the transaction could not be settled")
 )
+
+// diskFullError is errFullDisk in the words for the file that could not
+// be written back: the command's exit text names the env file when it
+// was one (Console commands).
+type diskFullError struct{ msg string }
+
+func (e *diskFullError) Error() string        { return e.msg }
+func (e *diskFullError) Is(target error) bool { return target == errFullDisk }
 
 func (t *txn) result(phase, msg string) result {
 	r := t.rec
@@ -360,19 +373,46 @@ func known(f fileAt) bool  { return f.prev || f.next }
 // first, then each env file the record lists. An error is a read's own,
 // for the caller to stop on as found.
 func (a *Applier) states(t *txn) ([]fileAt, error) {
-	d, err := a.installedDigest()
-	if err != nil {
-		return nil, err
-	}
-	out := []fileAt{{prev: d == t.rec.PrevSHA256, next: d == t.rec.NewSHA256}}
-	for _, e := range t.rec.Secrets {
-		d, err := a.envDigest(e.App)
+	out := make([]fileAt, 0, 1+len(t.rec.Secrets))
+	for _, app := range append([]string{""}, t.envApps()...) {
+		f, err := a.state(t, app)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, fileAt{app: e.App, prev: d == e.PrevSHA256, next: d == e.NewSHA256})
+		out = append(out, f)
 	}
 	return out, nil
+}
+
+// state is one file of the set as it stands, by its app ("" for the
+// Caddyfile).
+func (a *Applier) state(t *txn, app string) (fileAt, error) {
+	if app == "" {
+		d, err := a.installedDigest()
+		return fileAt{prev: d == t.rec.PrevSHA256, next: d == t.rec.NewSHA256}, err
+	}
+	e := t.env(app)
+	d, err := a.envDigest(app)
+	return fileAt{app: app, prev: d == e.PrevSHA256, next: d == e.NewSHA256}, err
+}
+
+// envApps are the set's env files, in the record's order.
+func (t *txn) envApps() []string {
+	apps := make([]string, len(t.rec.Secrets))
+	for i, e := range t.rec.Secrets {
+		apps[i] = e.App
+	}
+	return apps
+}
+
+// rollbackSet is the files a rollback puts back: the set, the Caddyfile
+// only if the push changed it — so that a console edit of a Caddyfile a
+// push of env files alone never touched does not stop their write-back.
+func (t *txn) rollbackSet(fs []fileAt) []fileAt {
+	if t.caddyfileInSet() {
+		return fs
+	}
+	return fs[1:] // states puts the Caddyfile first
 }
 
 // firstNot is the first file of fs that is not as want says, if any:
@@ -384,18 +424,6 @@ func firstNot(fs []fileAt, want func(fileAt) bool) (app string, ok bool) {
 		}
 	}
 	return "", true
-}
-
-// fileDigest is d for one file of the set, by its app ("" for the
-// Caddyfile), with its prev and new.
-func (a *Applier) fileDigest(t *txn, app string) (d, prev, next string, err error) {
-	if app == "" {
-		d, err = a.installedDigest()
-		return d, t.rec.PrevSHA256, t.rec.NewSHA256, err
-	}
-	e := t.env(app)
-	d, err = a.envDigest(app)
-	return d, e.PrevSHA256, e.NewSHA256, err
 }
 
 // install runs the transaction from the buffer comparison (Transitions
@@ -446,27 +474,36 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 		a.changed(t, odd)
 		return nil
 	}
-	// The env files, in app-name order, then the Caddyfile. A write that
-	// fails once a file has changed is the post-swap failure.
-	wrote := false
+	// The swap (Transitions table): each env file the push writes, in
+	// app-name order, then the Caddyfile, then each env file it removes —
+	// so that no Caddyfile on disk names an env file that is not there.
+	// A write that fails once a file's bytes have changed is the
+	// post-swap failure; before that, the first write's own failure. A
+	// rewrite that only gives a file its mode changes no bytes.
+	changed := false
 	for _, e := range t.rec.Secrets {
-		if err := a.writeEnv(t, e); err != nil {
-			if wrote {
-				a.recordUnwritten(t, err)
-				return a.rollback(ctx, t, msgRolledBackUnrecordedFiles, false)
-			}
-			return a.firstWriteFailed(ctx, t, e.App, err)
+		if e.NewSHA256 == "" {
+			continue
 		}
-		wrote = true
+		if err := a.writeEnv(t, e); err != nil {
+			return a.swapFailed(ctx, t, e.App, changed, err)
+		}
+		changed = changed || e.PrevSHA256 != e.NewSHA256
 	}
 	if t.caddyfileInSet() {
 		if err := a.writeDurable("caddyfile:new", a.caddyfile(), a.caddyfileTmp(t.rec.ID), t.next, 0o644); err != nil {
-			if wrote {
-				a.recordUnwritten(t, err)
-				return a.rollback(ctx, t, msgRolledBackUnrecordedFiles, false)
-			}
-			return a.firstWriteFailed(ctx, t, "", err)
+			return a.swapFailed(ctx, t, "", changed, err)
 		}
+		changed = true
+	}
+	for _, e := range t.rec.Secrets {
+		if e.NewSHA256 != "" {
+			continue
+		}
+		if err := a.writeEnv(t, e); err != nil {
+			return a.swapFailed(ctx, t, e.App, changed, err)
+		}
+		changed = true
 	}
 	t.rec.Phase = phaseSwapped
 	if err := a.writeRecord(&t.rec); err != nil {
@@ -477,22 +514,27 @@ func (a *Applier) install(ctx context.Context, t *txn) error {
 	return a.reloadSwapped(ctx, t)
 }
 
-// firstWriteFailed settles the swap's first write that failed, before
-// any file of the set is known to have changed: the rename may have
-// happened with only the directory's fsync failing, so what is on disk
-// decides, and what cannot be read is left, with the record, for the
-// next run's recovery. A file whose bytes the push keeps (an env file
-// rewritten for its mode) reads as unchanged either way.
-func (a *Applier) firstWriteFailed(ctx context.Context, t *txn, app string, err error) error {
-	d, prev, next, derr := a.fileDigest(t, app)
+// swapFailed settles a write of the swap that failed, on the file app
+// names. Once a file's bytes have changed (changed) it is the post-swap
+// failure: every file at its new goes back. Before that, the rename may
+// have happened with only the directory's fsync failing, so what is on
+// disk decides, and what cannot be read is left, with the record, for
+// the next run's recovery. A file whose bytes the push keeps (an env
+// file rewritten for its mode) reads as unchanged either way.
+func (a *Applier) swapFailed(ctx context.Context, t *txn, app string, changed bool, err error) error {
+	if changed {
+		a.recordUnwritten(t, err)
+		return a.rollback(ctx, t, msgRolledBackUnrecordedFiles, false)
+	}
+	f, derr := a.state(t, app)
 	switch {
 	case derr != nil:
 		return a.unsettled(t, derr)
-	case d == prev:
+	case f.prev:
 		a.removeTemp(t.rec.ID)
 		a.finish(t, phaseFailed, t.installFailed(err))
 		return nil
-	case d == next:
+	case f.next:
 		a.recordUnwritten(t, err)
 		return a.rollback(ctx, t, t.pick(msgRolledBackUnrecorded, msgRolledBackUnrecordedFiles), false)
 	}
@@ -605,22 +647,32 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	if err != nil {
 		return a.unsettled(t, err)
 	}
-	if odd, ok := firstNot(fs, known); !ok {
+	set := t.rollbackSet(fs)
+	if odd, ok := firstNot(set, known); !ok {
 		a.changed(t, odd)
 		return nil
 	}
-	for _, f := range fs {
-		if f.prev {
-			continue
-		}
-		if f.app == "" {
-			if err := a.restore(t); err != nil {
-				return a.fullDisk(t, err, "")
+	// The swap's order reversed: every env file that had bytes gets them
+	// back, then the Caddyfile, then the env files the push added go —
+	// so that, at every instant, the Caddyfile on disk names no env file
+	// that is not there (a full disk ends it at any of these).
+	for _, f := range set {
+		if f.app != "" && !f.prev && t.env(f.app).PrevSHA256 != "" {
+			if err := a.restoreEnv(t, t.env(f.app)); err != nil {
+				return a.fullDisk(t, err, f.app)
 			}
-			continue
 		}
-		if err := a.restoreEnv(t, t.env(f.app)); err != nil {
-			return a.fullDisk(t, err, f.app)
+	}
+	if f := fs[0]; t.caddyfileInSet() && !f.prev {
+		if err := a.restore(t); err != nil {
+			return a.fullDisk(t, err, "")
+		}
+	}
+	for _, f := range set {
+		if f.app != "" && !f.prev && t.env(f.app).PrevSHA256 == "" {
+			if err := a.restoreEnv(t, t.env(f.app)); err != nil {
+				return a.fullDisk(t, err, f.app)
+			}
 		}
 	}
 	why := t.rec.Error
@@ -700,7 +752,7 @@ func (a *Applier) fullDisk(t *txn, err error, app string) error {
 	}
 	r := t.result(t.rec.Phase, msg)
 	a.logger.Error(msg, append(resultFields(r), zap.String("write_error", proof.Bound(err.Error())))...)
-	return errFullDisk
+	return &diskFullError{msg: msg}
 }
 
 // recordUnwritten journals the write that failed after the swap — the
@@ -749,41 +801,50 @@ func (a *Applier) recoverRecord(ctx context.Context, rec *record) error {
 	if err != nil {
 		return a.unsettled(t, err)
 	}
+	// The phases that advance read every file, the Caddyfile included
+	// (I1, I4); the ones that roll back read the files they would put
+	// back (rollbackSet).
+	set := t.rollbackSet(fs)
 	_, allPrev := firstNot(fs, atPrev)
 	_, allNew := firstNot(fs, atNew)
-	_, allKnown := firstNot(fs, known)
-	want := known
+	_, setPrev := firstNot(set, atPrev)
+	_, setKnown := firstNot(set, known)
+	odd := func(fs []fileAt, want func(fileAt) bool) string {
+		app, _ := firstNot(fs, want)
+		return app
+	}
 	switch rec.Phase {
 	case phaseNoChange:
 		if allPrev {
 			return a.advance(t, phaseNoChange)
 		}
-		want = atPrev
+		a.changed(t, odd(fs, atPrev))
+		return nil
 	case phaseInstalling:
 		switch {
-		case allPrev:
+		case setPrev:
 			a.finish(t, phaseFailed, t.pick(msgInterrupted, msgInterruptedFiles))
 			return nil
-		case allKnown: // the crash fell in or after the swap: as swapped
+		case setKnown: // the crash fell in or after the swap: as swapped
 			return a.rollback(ctx, t, t.pick(msgRolledBackInterrupted, msgRolledBackInterruptedFiles), true)
 		}
 	case phaseSwapped:
 		// The reload's outcome is unknown, whoever began it: roll back.
-		if allKnown {
+		if setKnown {
 			return a.rollback(ctx, t, t.pick(msgRolledBackInterrupted, msgRolledBackInterruptedFiles), true)
 		}
 	case phaseApplied:
 		if allNew {
 			return a.advance(t, phaseApplied)
 		}
-		want = atNew
+		a.changed(t, odd(fs, atNew))
+		return nil
 	case phaseRollingBack:
-		if allKnown {
+		if setKnown {
 			return a.rollingBack(ctx, t, true)
 		}
 	}
-	odd, _ := firstNot(fs, want)
-	a.changed(t, odd)
+	a.changed(t, odd(set, known))
 	return nil
 }
 

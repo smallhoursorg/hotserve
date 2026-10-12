@@ -27,10 +27,14 @@ import (
 //     the app grammar, and removes only one applied.json lists whose
 //     app HEAD no longer has. Any other name there is left alone.
 //  2. An installed env file is read without following a link, without
-//     blocking, held to a regular file, to maxEnvRead plus one byte.
-//     Anything at the name that is not a regular file reads as no file
-//     (it is replaced, never followed); one larger than the cap is the
-//     box's error before the transaction, and matches nothing during it.
+//     blocking, held to a regular file, to maxEnvRead plus one byte. A
+//     link at the name reads as no file (it is replaced, never
+//     followed); anything else that is not a regular file — which no
+//     rename replaces — and a file larger than the cap are the box's
+//     errors before the transaction, and match nothing during it.
+//  6. Names read from a file root did not write are held to the grammar
+//     and the caps a record and a result are read back with, so every
+//     record root writes reads back.
 //  3. A file root writes is the rendered bytes, 0640, born group
 //     hotserve in the setgid directory (Paths): the unit has no
 //     CAP_CHOWN. Before anything is written, the directory must be the
@@ -68,6 +72,8 @@ const (
 	msgNoKey       = "this box has no key for secrets (/etc/hotserve/age/identity): hotserve box key, as root, makes one; then make rekey BOX_KEY=<the key it prints> in the repository, and push; nothing changed"
 	msgSecretsDir  = "/etc/hotserve/secrets is not the setgid root:hotserve directory tmpfiles.d makes: systemd-tmpfiles --create hotserve-box.conf, as root, puts it back; nothing changed" //nolint:gosec // a message naming a directory, not a credential
 	msgEnvTooLarge = "/etc/hotserve/secrets/<app>.env is larger than 66560 bytes, which no push writes: move it aside, as root, and push again; nothing changed"
+	// A directory, a FIFO or a socket at the name: no rename replaces it.
+	msgEnvNotRegular = "/etc/hotserve/secrets/<app>.env is not a regular file, which no push writes: move it aside, as root, and push again; nothing changed"
 )
 
 // fill is a catalogue text with its app named.
@@ -133,26 +139,46 @@ type envFile struct {
 	ours    bool   // regular, 0640 and nothing else, owned as root writes it
 }
 
-// readEnv reads what stands at app's env file (rule 2). A file larger
-// than the cap is a *tooLargeError. owner, when given, decides ours.
+// errEnvNotRegular is something at an env file's name that is neither
+// a regular file nor a link — a directory, a FIFO, a socket — which a
+// rename cannot replace: the box's error, named, before the transaction.
+var errEnvNotRegular = errors.New("not a regular file")
+
+// readEnv reads what stands at app's env file (rule 2): nothing, a link
+// (never followed, and replaced like a missing file), or a regular file.
+// Anything else is errEnvNotRegular, a file larger than the cap a
+// *tooLargeError. owner, when given, decides ours. The kind is decided
+// from the name before it is opened, so a socket or a FIFO is never
+// opened, and again from the descriptor, so a swap between the two is
+// caught.
 func (a *Applier) readEnv(app string, owner *fileOwner) (envFile, error) {
 	path := a.envPath(app)
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return envFile{}, nil
+	case err != nil:
+		return envFile{}, err
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return envFile{present: true}, nil
+	case !fi.Mode().IsRegular():
+		return envFile{}, errEnvNotRegular
+	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0) //nolint:gosec // a fixed name in a directory only root writes
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return envFile{}, nil
-	case errors.Is(err, syscall.ELOOP): // a link at the name: never followed
+	case errors.Is(err, syscall.ELOOP): // became a link since the Lstat
 		return envFile{present: true}, nil
 	case err != nil:
 		return envFile{}, err
 	}
 	defer f.Close() //nolint:errcheck // read-only
-	fi, err := f.Stat()
-	if err != nil {
+	if fi, err = f.Stat(); err != nil {
 		return envFile{}, err
 	}
 	if !fi.Mode().IsRegular() {
-		return envFile{present: true}, nil
+		return envFile{}, errEnvNotRegular
 	}
 	data, err := readCapped(f, path, maxEnvRead)
 	if err != nil {
@@ -166,14 +192,14 @@ func (a *Applier) readEnv(app string, owner *fileOwner) (envFile, error) {
 }
 
 // envDigest is d for one env file of the set: its bytes' digest, ""
-// when no regular file stands at the name, envNeither when it is too
-// large to be one root wrote. An error is the read's own (I2's
-// stop-as-found).
+// when nothing or a link stands at the name, envNeither when what
+// stands there cannot be one root wrote (too large, or not a regular
+// file). An error is the read's own (I2's stop-as-found).
 func (a *Applier) envDigest(app string) (string, error) {
 	e, err := a.readEnv(app, nil)
 	var big *tooLargeError
 	switch {
-	case errors.As(err, &big):
+	case errors.As(err, &big), errors.Is(err, errEnvNotRegular):
 		return envNeither, nil
 	case err != nil:
 		return "", err
@@ -256,7 +282,8 @@ func (a *Applier) planSecrets(s *proof.Secrets, base *applied, caddyfile string)
 		p.next[o.name] = o.file
 	}
 	for _, app := range slices.Sorted(maps.Keys(base.Secrets)) {
-		if inHead[app] || !appName.MatchString(app) {
+		if inHead[app] { // readApplied held every listed app to the grammar
+
 			continue
 		}
 		cur, err := a.readEnvFor(app, owner)
@@ -275,20 +302,32 @@ func (a *Applier) planSecrets(s *proof.Secrets, base *applied, caddyfile string)
 		p.entries = append(p.entries, envEntry{App: app, Prev: cur.data, PrevSHA256: digest(cur.data)})
 	}
 	slices.SortFunc(p.entries, func(x, y envEntry) int { return strings.Compare(x.App, y.App) })
-	slices.Sort(p.added)
-	slices.Sort(p.changed)
-	slices.Sort(p.removed)
+	p.added, p.changed, p.removed = capNames(p.added), capNames(p.changed), capNames(p.removed)
 	slices.Sort(p.oob)
 	return p, nil
 }
 
-// readEnvFor is readEnv before the transaction, a file over the cap the
-// catalogue's failure for it.
+// capNames sorts names and keeps the first maxSecretNames (rule 6): a
+// file a console made can hold more variables than any push writes, and
+// the names are a report, never a decision.
+func capNames(names []string) []string {
+	slices.Sort(names)
+	if len(names) > maxSecretNames {
+		names = names[:maxSecretNames]
+	}
+	return names
+}
+
+// readEnvFor is readEnv before the transaction, a file over the cap and
+// a thing a rename cannot replace each the catalogue's failure for it.
 func (a *Applier) readEnvFor(app string, owner *fileOwner) (envFile, error) {
 	cur, err := a.readEnv(app, owner)
 	var big *tooLargeError
-	if errors.As(err, &big) {
+	switch {
+	case errors.As(err, &big):
 		return envFile{}, &failure{msg: fill(msgEnvTooLarge, app)}
+	case errors.Is(err, errEnvNotRegular):
+		return envFile{}, &failure{msg: fill(msgEnvNotRegular, app)}
 	}
 	return cur, err
 }
@@ -329,6 +368,9 @@ func envVars(data []byte) map[string]string {
 	}
 	for _, kv := range vars {
 		k, v, _ := strings.Cut(kv, "=")
+		if len(k) > proof.MaxVarName { // no secret's name: rule 6
+			continue
+		}
 		out[k] = v
 	}
 	return out

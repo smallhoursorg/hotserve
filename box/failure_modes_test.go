@@ -234,7 +234,7 @@ func TestApplierMessagesAreCatalogued(t *testing.T) {
 		msgNoRecord, msgReloadFailed, msgRecordAfterReload, msgRolledBackUnrecorded,
 		msgRolledBackInterrupted, msgBothReloads, msgPrevReloadFailed, msgChanged, msgDiskFull,
 		msgInterruptedFiles, msgRolledBackUnrecordedFiles, msgRolledBackInterruptedFiles, msgEnvChanged, msgEnvDiskFull,
-		msgNoKey, msgSecretsDir, msgEnvTooLarge, msgKeyNotRoot,
+		msgNoKey, msgSecretsDir, msgEnvTooLarge, msgEnvNotRegular, msgKeyNotRoot,
 	} {
 		if !strings.Contains(catalogue, "`"+msg+"`") {
 			t.Errorf("not in the Message catalogue: %q", msg)

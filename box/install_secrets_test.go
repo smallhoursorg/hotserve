@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -55,6 +56,23 @@ func (b *testBox) env(app string) []byte {
 		b.t.Fatal(err)
 	}
 	return data
+}
+
+// envSnapshot is what stands at app's env file, read without opening
+// anything that is not a regular file (a FIFO would block).
+func (b *testBox) envSnapshot(app string) string {
+	b.t.Helper()
+	fi, err := os.Lstat(b.envPath(app))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "absent"
+	}
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fi.Mode().String()
+	}
+	return fi.Mode().String() + " " + string(b.env(app))
 }
 
 func (b *testBox) putEnv(app string, data []byte, mode os.FileMode) {
@@ -378,12 +396,24 @@ func TestApplySecretsFailures(t *testing.T) {
 		{name: "a secret not encrypted to this box", phase: phaseRefused, setup: func(b *testBox, _ *age.X25519Identity) secrets {
 			return one(newIdentity(b.t.(*testing.T)), b.t)
 		}},
+		{name: "a directory at the env file's name", phase: phaseFailed, msg: fill(msgEnvNotRegular, "example"), setup: func(b *testBox, id *age.X25519Identity) secrets {
+			if err := os.Mkdir(b.envPath("example"), 0o750); err != nil {
+				b.t.Fatal(err)
+			}
+			return one(id, b.t)
+		}},
+		{name: "a FIFO at the env file's name", phase: phaseFailed, msg: fill(msgEnvNotRegular, "example"), setup: func(b *testBox, id *age.X25519Identity) secrets {
+			if err := syscall.Mkfifo(b.envPath("example"), 0o640); err != nil {
+				b.t.Fatal(err)
+			}
+			return one(id, b.t)
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			b, id := newSecretsBox(t)
 			s := c.setup(b, id)
-			envBefore := b.env("example")
+			envBefore := b.envSnapshot("example")
 			head := b.repo.commitSecrets(boxFile(2, b.alice), s, &b.alice, b.base)
 			r := b.pushOne(b.repo.bundleFiles(head, b.base))
 			msg := c.msg
@@ -399,7 +429,7 @@ func TestApplySecretsFailures(t *testing.T) {
 				t.Fatalf("%q, want %q", r.Error, msg)
 			}
 			b.unchanged()
-			if !bytes.Equal(b.env("example"), envBefore) {
+			if b.envSnapshot("example") != envBefore {
 				t.Error("the env file changed")
 			}
 		})
@@ -593,8 +623,9 @@ func TestFailureModesSecrets(t *testing.T) {
 					t.Fatalf("recovery: %v", err)
 				}
 			case rw.fullDisk:
-				if err := b.run(h); !errors.Is(err, errFullDisk) {
-					t.Fatalf("first run: %v, want the full-disk end", err)
+				// The exit text names the file that could not be put back.
+				if err := b.run(h); !errors.Is(err, errFullDisk) || err.Error() != rw.journal {
+					t.Fatalf("first run: %v, want the full-disk end %q", err, rw.journal)
 				}
 				whole("at the full-disk end")
 				if r := b.record(); r == nil || r.Phase != rw.fullPhase {
@@ -651,6 +682,108 @@ func TestFailureModesSecrets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The swap writes env files, then the Caddyfile, then removes env files;
+// a rollback puts back the env files that had bytes, then the Caddyfile,
+// then removes the ones the push added — so no Caddyfile on disk names
+// an env file that is not there.
+func TestSecretsSwapOrder(t *testing.T) {
+	b, id := newSecretsBox(t)
+	enc := func(v string) []byte { return encrypt(t, []byte(v), id.Recipient()) }
+	before := b.repo.commitSecrets(b.v1, secrets{"example": {"KEY": enc("old")}}, &b.alice, b.base)
+	if r := b.pushOne(b.repo.bundleFiles(before, b.base)); r.Phase != phaseApplied {
+		t.Fatalf("setup: %+v", r)
+	}
+	// api added, example removed, the Caddyfile changed; the reload fails.
+	head := b.repo.commitSecrets(boxFile(2, b.alice), secrets{"api": {"TOKEN": enc("t")}}, &b.alice, before)
+	b.push(b.repo.bundleFiles(head, before))
+	b.sd.reloads = []error{errReload}
+	if err := b.run(hooks{}); err != nil {
+		t.Fatal(err)
+	}
+	var writes []string
+	for _, p := range b.lastPoint {
+		if strings.HasPrefix(p, "envfile:") || strings.HasPrefix(p, "caddyfile:") {
+			writes = append(writes, p)
+		}
+	}
+	want := []string{"envfile:new", "caddyfile:new", "envfile:remove", "envfile:prev", "caddyfile:prev", "envfile:unlink"}
+	if !slices.Equal(writes, want) {
+		t.Errorf("writes in order %v, want %v", writes, want)
+	}
+	if !bytes.Equal(b.env("example"), rendered(t, "KEY=old")) || b.env("api") != nil || !bytes.Equal(b.installed(), b.v1) {
+		t.Error("not rolled back")
+	}
+}
+
+// A push of env files alone puts them back after a failure even if the
+// console edited the Caddyfile meanwhile: the push never touched it.
+// The edit is left as it is, and the next push reports it.
+func TestApplySecretsRollbackIgnoresAnUntouchedCaddyfile(t *testing.T) {
+	b, id := newSecretsBox(t)
+	head := b.repo.commitSecrets(b.v1, secrets{"example": {"KEY": encrypt(t, []byte("v"), id.Recipient())}}, &b.alice, b.base)
+	pushed := b.push(b.repo.bundleFiles(head, b.base))
+	edited := append(slices.Clone(b.v1), "# edited\n"...)
+	// The edit lands after the swap's files were read back, as the
+	// record `applied` fails: the post-swap failure's rollback meets it.
+	h := hooks{fail: func(p string) error {
+		if p != "record:applied" {
+			return nil
+		}
+		b.writeInstalled(edited)
+		return fmt.Errorf("%s: %w", p, errNoSpace)
+	}}
+	if err := b.run(h); err != nil {
+		t.Fatal(err)
+	}
+	r := b.result(pushed)
+	if r == nil || r.Phase != phaseRolledBack || r.Error != msgRolledBackUnrecordedFiles {
+		t.Fatalf("%+v", r)
+	}
+	if b.env("example") != nil || !bytes.Equal(b.installed(), edited) || b.sd.reloaded != 0 {
+		t.Errorf("env %q, the console's edit kept %v, %d reloads", b.env("example"), bytes.Equal(b.installed(), edited), b.sd.reloaded)
+	}
+}
+
+// An env file rewritten for its mode alone changes no bytes: a later
+// write of the swap that fails is the first write's failure, `failed`,
+// with nothing to roll back or reload.
+func TestApplySecretsModeFixIsNoChange(t *testing.T) {
+	b, id := newSecretsBox(t)
+	b.putEnv("example", rendered(t, "KEY=v"), 0o644)
+	head := b.repo.commitSecrets(boxFile(2, b.alice), secrets{"example": {"KEY": encrypt(t, []byte("v"), id.Recipient())}}, &b.alice, b.base)
+	b.push(b.repo.bundleFiles(head, b.base))
+	if err := b.run(hooks{fail: failAt(map[string]int{"caddyfile:new": -1})}); err != nil {
+		t.Fatal(err)
+	}
+	b.settled()
+	r := b.result(b.names(b.x("out"))[0][:32])
+	if r == nil || r.Phase != phaseFailed || !strings.HasPrefix(r.Error, "the install failed before the box's files changed: caddyfile:new") || b.sd.reloaded != 0 {
+		t.Fatalf("%+v, %d reloads", r, b.sd.reloaded)
+	}
+}
+
+// Names read from an env file a console made are held to the caps a
+// record and a result are read back with: a variable name no secret can
+// have is not reported, and the lists stop at their cap — so the push's
+// result reads back, and so would its record.
+func TestApplySecretsNamesFromAConsoleFile(t *testing.T) {
+	b, id := newSecretsBox(t)
+	var file strings.Builder
+	file.WriteString(strings.Repeat("L", proof.MaxVarName+1) + "=x\n")
+	for i := 0; i < maxSecretNames+100; i++ {
+		fmt.Fprintf(&file, "V%04d=\n", i)
+	}
+	b.putEnv("example", []byte(file.String()), 0o640)
+	head := b.repo.commitSecrets(b.v1, secrets{"example": {"KEY": encrypt(t, []byte("v"), id.Recipient())}}, &b.alice, b.base)
+	r := b.pushOne(b.repo.bundleFiles(head, b.base))
+	if r.Phase != phaseApplied || len(r.SecretsRemoved) != maxSecretNames || !slices.Equal(r.SecretsAdded, []string{"example/KEY"}) {
+		t.Fatalf("%s %q: %d removed", r.Phase, r.Error, len(r.SecretsRemoved))
+	}
+	if slices.ContainsFunc(r.SecretsRemoved, func(s string) bool { return strings.Contains(s, "LLL") }) {
+		t.Error("a name no secret can have was reported")
 	}
 }
 

@@ -617,8 +617,11 @@ digest being `""`, a state of its own — each against its own `prev`
 and `new`. "`d == prev`" then means every file is at its `prev`,
 "`d == new`" every file at its `new`, and **mixed** means each file is
 at one of the two and they are not all at the same one: a crash
-inside the swap, which writes the env files first and the Caddyfile
-last. A set of the Caddyfile alone reads exactly as before.
+inside the swap, or inside a rollback. A set of the Caddyfile alone
+reads exactly as before. The phases that roll back read the files a
+rollback puts back: the Caddyfile only if the push changed it, so a
+console edit of a Caddyfile that a push of env files alone never
+touched does not stop their write-back.
 
 | Phase | Meaning | `d` must be | Recovery (crash found this phase) |
 |---|---|---|---|
@@ -677,7 +680,7 @@ stateDiagram-v2
     no_change --> [*] : applied.json, result, record removed
     verified --> installing : record written (phase installing)
     installing --> failed : temp write fails (nothing changed)
-    installing --> swapped : env files, then the Caddyfile, renamed over
+    installing --> swapped : env files written, the Caddyfile, env files removed
     swapped --> applied : systemctl reload exit 0, or no reload needed
     swapped --> rolling_back : reload failed, record rewrite failed, or a later file write failed
     applied --> [*] : applied.json, result, record removed
@@ -702,8 +705,8 @@ stateDiagram-v2
 | checking → verified | active (`origin: init`: up); the set is not empty | result `verified` (if this write fails: result `failed` in its place if that can be written, else any `verified` whose rename landed removed; the `work/` entry removed; nothing else changes) — `init` writes no result, it prints | I3 |
 | verified → installing | — | record `installing` (the previous bytes of every file in the set embedded) | I5, I8, I9 |
 | installing → failed | a temporary cannot be written before any file of the set has changed | remove temporaries; result `failed` → record removed → entry removed | I1 (files untouched), I2 |
-| installing → swapped | every file of the set is re-read and still at its `prev` (a console edit since step 10 or 15a → `unknown`, the catalogue's "changed during the transaction" text for that file, record removed, entry removed); then each env file, in app-name order, is written to a temp and renamed over its name (one the push removes is unlinked), and last the Caddyfile, if it is in the set, the same way. A write that fails once a file has changed is the post-swap failure (Failure-mode table, "each file of the set") | record `swapped` | I1 (each file exists whole, or is absent, at every instant). Env files first, so a reload of a Caddyfile that names a new `env_file` finds it in place. The reread and the rename are not atomic: a bare console edit landing in that window is overwritten, and one landing after the post-reload check is reported as out-of-band by the next push, not refused (Accepted residuals). |
-| swapped → rolling_back | record rewrite to `swapped` fails, a write after the first file changed fails, or reload fails | record `rolling_back` (if writable) → previous bytes written back to every file at its `new` (an env file absent before is unlinked) | I1 |
+| installing → swapped | every file of the set is re-read and still at its `prev` (a console edit since step 10 or 15a → `unknown`, the catalogue's "changed during the transaction" text for that file, record removed, entry removed); then each env file the push writes, in app-name order, is written to a temp and renamed over its name, then the Caddyfile, if it is in the set, the same way, then each env file the push removes is unlinked, in app-name order. A write that fails once a file's bytes have changed is the post-swap failure (Failure-mode table, "each file of the set"); a rewrite that only gives an env file its mode changes no bytes | record `swapped` | I1 (each file exists whole, or is absent, at every instant). In this order no Caddyfile on disk names an env file that is not there: a reload of a Caddyfile that names a new `env_file` finds it in place, and the Caddyfile that named a removed one is gone before it is. The reread and the rename are not atomic: a bare console edit landing in that window is overwritten, and one landing after the post-reload check is reported as out-of-band by the next push, not refused (Accepted residuals). |
+| swapped → rolling_back | record rewrite to `swapped` fails, a write after the first file changed fails, or reload fails | record `rolling_back` (if writable) → previous bytes written back to every file at its `new`, the swap's order reversed: each env file that had bytes gets them back, then the Caddyfile, then each env file absent before is unlinked | I1, and no Caddyfile on disk names an env file that is not there, at a full-disk end too |
 | swapped → applied | `systemctl reload hotserve` exits 0 — asked only if the Caddyfile is in the set; a set of env files alone reloads nothing — and every file of the set, re-read, is at its `new` (a console edit since the swap → `unknown`, baseline not advanced, as the States table's `applied` row) | record `applied` → `applied.json` | I4 (record before baseline; the digest check is why "applied" means these bytes) |
 | rolling_back → rolled_back | previous bytes back, and — if the Caddyfile was in the set — a reload that exits 0 | result `rolled_back` → record removed → entry removed | I1, I2 |
 | rolling_back → unknown | second reload fails | result `unknown` → record removed → entry removed | I2, I3 (bytes that cannot be written back are the full-disk end: Failure-mode table, "previous bytes back") |
@@ -795,7 +798,7 @@ refusing every push at admission — scores severity 1.
 | A `no_change` reloads nothing, so it records as the baseline bytes the running hotserve may not have loaded: a console that copied a file in without a reload, then pushes or runs `init` with the same bytes | `hotserve init`; Transitions, checking → no_change | 3 | 1 | 3 | 9; two console acts, the copy without its reload first; the next reload loads the recorded bytes |
 | A record that does not read, from a transaction past its swap, removed by a console that skips the write-back: the push ends `failed` ("interrupted before the Caddyfile changed") with the new file on disk, and the next push reports an out-of-band edit | States, "(record unreadable)" | 3 | 1 | 3 | 9; root-only state corrupted, then the console skipping the step its journal line names |
 | A crash or shutdown between the swap and the reload's outcome, for a file that validates but does not load: hotserve starts on it at boot and fails, and recovery puts the previous bytes back on a hotserve that stays down (`failed`, "hotserve is not running") | States, `swapped` and `rolling_back` | 4 | 2 | 1 | 8; red, and the result names the commands that start hotserve on the previous file |
-| A link, or anything but a regular file, that a console put at an env file's name reads as no file: a push for that app replaces it, and should the push then roll back, the rollback removes the push's file and does not put the link back | "Values and the env file" | 2 | 2 | 3 | 12; two independent faults (a console's link in root's own directory, then a failed push), and the push is red and named |
+| What a console put at an env file's name that is not root's own is not put back as it was by a rollback: a link reads as no file, so the push replaces it and the rollback removes the push's file; a file at another mode or owner gets its bytes back at 0640 `root:hotserve` | "Values and the env file" | 2 | 2 | 3 | 12; two independent faults (a console's own entry in root's directory, then a failed push), and the push is red and named |
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
 
 ## Admission
@@ -1234,8 +1237,13 @@ and decrypts every secret the proof returned; with none, it reads no
 key. It reads each installed env file the set may touch the same way
 (no link followed, within the handler's cap for one, Caps): one that
 is larger is the box's error, `failed`, since its bytes could not be
-kept in the record for a rollback. Then each value is held to these
-rules, in this order:
+kept in the record for a rollback, and so is anything at the name
+that is neither a regular file nor a link — a directory, a FIFO, a
+socket — which no rename replaces. Names read from a file root did
+not write are held to the caps the record and the result are read
+back with: a variable no secret could be named is not reported, and
+each list stops at its cap. Then each value is held to these rules, in
+this order:
 
 | Rule | Past it |
 |---|---|
@@ -1273,7 +1281,7 @@ What root does with what is already there, per app:
 | On disk | HEAD has secrets for the app | HEAD has none for it |
 |---|---|---|
 | `<app>.env`, listed in `applied.json` at the digest it records | rewritten if the rendered bytes differ, or if its mode or owner is not the applier's (then named out of band too) | removed |
-| `<app>.env` listed in `applied.json`, at another digest (a console edit, a disk fault) or absent | HEAD's bytes written, the app named in `secrets_edited_out_of_band`, as step 10's flag reports a Caddyfile edit | removed if a regular file, named the same way; a link or other kind at the name is not the box's and is left alone, named |
+| `<app>.env` listed in `applied.json`, at another digest (a console edit, a disk fault) or absent | HEAD's bytes written, the app named in `secrets_edited_out_of_band`, as step 10's flag reports a Caddyfile edit | removed if a regular file, named the same way; a link at the name is not the box's and is left alone, named |
 | `<app>.env`, not listed in `applied.json` (a console made it) | overwritten with HEAD's bytes if they differ or its mode or owner is not the applier's, named the same way; listed from then on | left alone, never listed |
 | no file, none listed | written | — |
 
@@ -1379,7 +1387,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` / `<path> does not decrypt: <reason>` (one of the four reasons in "Values and the env file") / `<app>/<VAR>: the value has a line break` / `<app>/<VAR>: the value has a NUL byte` / `<app>/<VAR>: the value is not UTF-8` / `app <app>'s env file would be <n> bytes; the cap is 65536` (step 15a) | applier | fail |
-| 422 / poll | `failed` | `this box has no key for secrets (/etc/hotserve/age/identity): hotserve box key, as root, makes one; then make rekey BOX_KEY=<the key it prints> in the repository, and push; nothing changed` / `/etc/hotserve/secrets is not the setgid root:hotserve directory tmpfiles.d makes: systemd-tmpfiles --create hotserve-box.conf, as root, puts it back; nothing changed` / `/etc/hotserve/secrets/<app>.env is larger than 66560 bytes, which no push writes: move it aside, as root, and push again; nothing changed` (step 15a) | applier | red |
+| 422 / poll | `failed` | `this box has no key for secrets (/etc/hotserve/age/identity): hotserve box key, as root, makes one; then make rekey BOX_KEY=<the key it prints> in the repository, and push; nothing changed` / `/etc/hotserve/secrets is not the setgid root:hotserve directory tmpfiles.d makes: systemd-tmpfiles --create hotserve-box.conf, as root, puts it back; nothing changed` / `/etc/hotserve/secrets/<app>.env is larger than 66560 bytes, which no push writes: move it aside, as root, and push again; nothing changed` / `/etc/hotserve/secrets/<app>.env is not a regular file, which no push writes: move it aside, as root, and push again; nothing changed` (a directory, a FIFO or a socket, which no rename replaces) (step 15a) | applier | red |
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
 | 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |
 | 202 | `verified` | `verified; installing` | applier | poll, 30 min bound; then red naming `journalctl -u hotserve-box-apply` |

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"time"
 
 	"go.uber.org/zap"
@@ -254,22 +253,13 @@ func readResultFile(dir, id string) (*result, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) || !namesIDs(r.Named) || !namesSecrets(&r) {
+	// The secrets' names, as named, reach an answer: anything but what
+	// root writes is refused, not forwarded.
+	if r.ID != id || (r.Phase != phaseVerified && !terminal(r.Phase)) || !namesIDs(r.Named) ||
+		!validNameLists(r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved, r.SecretsOutOfBand) {
 		return nil, fmt.Errorf("%s: not a result", path)
 	}
 	return &r, nil
-}
-
-// namesSecrets reports whether a result's secrets fields are what root
-// writes: names in their grammars, within their caps. As for named, an
-// answer passes them on, so anything else is refused, not forwarded.
-func namesSecrets(r *result) bool {
-	for _, names := range [][]string{r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved} {
-		if !validSecretNames(names) {
-			return false
-		}
-	}
-	return len(r.SecretsOutOfBand) <= 2*proof.MaxSecretApps && !slices.ContainsFunc(r.SecretsOutOfBand, func(s string) bool { return !appName.MatchString(s) })
 }
 
 // maxNamed bounds a result's `named`: a refusal names at most a few

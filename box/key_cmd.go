@@ -20,9 +20,10 @@ import (
 //     is refused with nothing written.
 //  2. age.pub is rewritten only when it is missing or names another
 //     key: a temporary in /etc/hotserve, renamed over it, the directory
-//     fsynced (I8), under the same flock on /etc/hotserve/age/ as the
-//     identity's, so two runs never meet; a temporary a crashed run left
-//     is removed first.
+//     fsynced (I8), under the flock on /etc/hotserve/age/ that guards the
+//     identity, and from the identity as read under that lock — so two
+//     runs never write it from different keys; a temporary a crashed run
+//     left is removed first.
 //  3. Standard output is the `age1…` line alone, so that
 //     `$(ssh root@box hotserve box key)` is the key; what it did goes to
 //     standard error.
@@ -54,21 +55,32 @@ func runKey(euid int, a *Applier, out, errOut io.Writer) error {
 // missing or another key's, and returns the recipient. created reports
 // whether this call made the identity.
 func (a *Applier) boxKey() (recipient string, created bool, err error) {
-	id, created, err := ensureIdentity(filepath.Join(a.root, identityFile), a.clock.Now())
-	if err != nil {
+	if _, created, err = ensureIdentity(filepath.Join(a.root, identityFile), a.clock.Now()); err != nil {
 		return "", created, err
 	}
-	recipient = id.Recipient().String()
-	return recipient, created, a.writeAgePub(recipient)
+	recipient, err = a.writeAgePub()
+	return recipient, created, err
 }
 
-// writeAgePub is rule 2.
-func (a *Applier) writeAgePub(recipient string) error {
+// writeAgePub is rule 2, from the identity as it stands under the lock —
+// not as ensureIdentity found it, since another run may have come
+// between the two — and returns its recipient.
+func (a *Applier) writeAgePub() (string, error) {
 	unlock, err := lockDir(filepath.Dir(filepath.Join(a.root, identityFile)))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer unlock()
+	id, err := readIdentity(filepath.Join(a.root, identityFile))
+	if err != nil {
+		return "", err
+	}
+	recipient := id.Recipient().String()
+	return recipient, a.putAgePub(recipient)
+}
+
+// putAgePub writes age.pub as rule 2 says, under the caller's lock.
+func (a *Applier) putAgePub(recipient string) error {
 	pub := filepath.Join(a.root, agePubFile)
 	dir := filepath.Dir(pub)
 	left, err := filepath.Glob(filepath.Join(dir, agePubTemp))
