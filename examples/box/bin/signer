@@ -103,8 +103,11 @@ done
 
 # The same key as a reader of each box's secrets, where a box has
 # some: into <host>/secrets/recipients when age can encrypt to it, and
-# what to do instead when it cannot (bin/secrets).
-bin/secrets add-reader "$principal" "$type" "$b64"
+# what to do instead when it cannot (bin/secrets): age reads only with
+# a key file, not through an agent.
+holder=file
+[ -f "${key%.pub}" ] || holder=agent
+bin/secrets add-reader "$principal" "$type" "$b64" "$holder"
 
 # git signs with the private key file when there is one beside the .pub,
 # and with ssh-agent's copy of the .pub's key when there is not.

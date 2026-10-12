@@ -569,6 +569,112 @@ func TestBoxSignerAddsAReader(t *testing.T) {
 	}
 }
 
+// An agent holds the key, with no file beside the .pub: still a
+// reader in the file, and told that age cannot read through an agent.
+func TestBoxSignerAgentHeldReader(t *testing.T) {
+	r := secretsRepo(t)
+	r.key("id_ed25519")
+	if out, code := r.run("signer"); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	_, box := r.boxKey("box")
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=A", "BOX_KEY="+box); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	kim := r.key("kim")
+	if err := os.Remove(strings.TrimSuffix(kim, ".pub")); err != nil {
+		t.Fatal(err)
+	}
+	out, code := r.run("signer", "KEY="+kim, "PRINCIPAL=kim")
+	if code != 0 || !strings.Contains(out, "signer: an agent holds this key, with no file beside the .pub, and age decrypts only with a key file") ||
+		!strings.Contains(out, "add its age1… line under '# kim'") {
+		t.Fatalf("an agent-held key: exit %d\n%s", code, out)
+	}
+	if !strings.Contains(r.read(recipientsFile), "# kim\nssh-ed25519 "+r.b64(kim)+"\n") {
+		t.Errorf("recipients:\n%s", r.read(recipientsFile))
+	}
+}
+
+// A symbolic link anywhere in a box's secrets is refused before
+// anything is written through it: the box takes none, and through one
+// a write could reach outside the repository.
+func TestBoxSecretsRefuseLinks(t *testing.T) {
+	r := secretsRepo(t)
+	r.key("id_ed25519")
+	if out, code := r.run("signer"); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	_, box := r.boxKey("box")
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=A", "BOX_KEY="+box); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "authorized_keys")
+	if err := os.WriteFile(victim, []byte("theirs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := func(rel, target string) {
+		t.Helper()
+		p := filepath.Join(r.dir, rel)
+		if err := os.RemoveAll(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := r.read(recipientsFile)
+	appDir := "deploy.example.com/secrets/example"
+
+	// The recipients file a link: make signer would append through it.
+	link(recipientsFile, victim)
+	lee := r.key("lee")
+	if out, code := r.run("signer", "KEY="+lee, "PRINCIPAL=lee"); code == 0 || !strings.Contains(out, recipientsFile+" is a symbolic link") {
+		t.Errorf("make signer over a linked recipients file: exit %d\n%s", code, out)
+	}
+	for _, cmd := range []string{"set", "rekey", "import"} {
+		if out, code := r.secrets("", "B=1\n", cmd, "APP=example", "VAR=B"); code != 1 || !strings.Contains(out, recipientsFile+" is a symbolic link") {
+			t.Errorf("%s over a linked recipients file: exit %d\n%s", cmd, code, out)
+		}
+	}
+	link(recipientsFile, "x") // a dangling one too
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=B"); code != 1 || !strings.Contains(out, "is a symbolic link") {
+		t.Errorf("set over a dangling link: exit %d\n%s", code, out)
+	}
+	if err := os.Remove(filepath.Join(r.dir, recipientsFile)); err != nil {
+		t.Fatal(err)
+	}
+	r.write(recipientsFile, rec)
+
+	// The app's directory a link: the new .age would land outside.
+	saved := r.read(appDir + "/A.age")
+	link(appDir, outside)
+	for _, cmd := range []string{"set", "import", "show"} {
+		if out, code := r.secrets("", "B=1\n", cmd, "APP=example", "VAR=B"); code != 1 || !strings.Contains(out, appDir+" is a symbolic link") {
+			t.Errorf("%s into a linked app directory: exit %d\n%s", cmd, code, out)
+		}
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 1 {
+		t.Errorf("something was written outside the repository: %v", entries)
+	}
+	if err := os.Remove(filepath.Join(r.dir, appDir)); err != nil {
+		t.Fatal(err)
+	}
+	r.write(appDir+"/A.age", saved)
+
+	// A value's file a link.
+	link(appDir+"/B.age", victim)
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=B"); code != 1 || !strings.Contains(out, appDir+"/B.age is a symbolic link") {
+		t.Errorf("set over a linked value: exit %d\n%s", code, out)
+	}
+	if out, code := r.secrets("", "", "rekey", "IDENTITY="+filepath.Join(r.home, ".ssh", "id_ed25519")); code != 1 || !strings.Contains(out, appDir+"/B.age is a symbolic link") {
+		t.Errorf("rekey with a linked value: exit %d\n%s", code, out)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "theirs\n" {
+		t.Errorf("the file outside was written: %q", b)
+	}
+}
+
 func TestBoxSecretsNeedAge(t *testing.T) {
 	r := newBoxRepo(t) // the age CLI not on PATH
 	if _, err := exec.LookPath("age"); err == nil {
