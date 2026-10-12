@@ -265,6 +265,31 @@ func TestDescribeSecrets(t *testing.T) {
 	}
 }
 
+// describe's first refusal is the one the commit's proof names: a bad
+// entry ahead of the cap is named before the cap; and an env file just
+// over the cap by a line break the box strips is only "at or just over".
+func TestDescribeSecretsFirstRefusal(t *testing.T) {
+	id := newIdentity(t)
+	files := map[string][]byte{"Bad/KEY.age": []byte("x")} // "B" sorts before every app
+	for i := 0; i < proof.MaxSecretApps; i++ {
+		files["app"+itoa(i)+"/KEY.age"] = []byte("x")
+	}
+	err := describe(writeTree(t, secretsFile("", ""), files), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "secrets/Bad is not an app's directory: Bad is not an app name") {
+		t.Errorf("%v", err)
+	}
+
+	// 65,529 bytes and a LF: describe counts KEY="…"\n as 3+65530+4 =
+	// 65,537, but once 15a strips the LF it renders 65,536 bytes, at the
+	// cap, which the box accepts.
+	value := append(bytes.Repeat([]byte("x"), 65529), '\n')
+	path := writeTree(t, secretsFile("\t\t\tenv_file /etc/hotserve/secrets/example.env\n", ""), map[string][]byte{"example/KEY.age": encrypt(t, value, id.Recipient())})
+	var out bytes.Buffer
+	if err := describe(path, &out); err != nil || !strings.Contains(out.String(), "at or just over the cap") || strings.Contains(out.String(), "will refuse") {
+		t.Errorf("%v\n%s", err, out.String())
+	}
+}
+
 // mistyped is an age recipient with one data character changed, so its
 // checksum fails.
 func mistyped(r string) string {

@@ -74,19 +74,36 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The count of apps before any secret's file is read: a listing of
-	// each directory, none of whose files is opened.
+	// One pass before any secret's file is opened, as the commit's proof
+	// scans its tree: in git's order, each entry held to the layout, the
+	// apps counted — past the cap only counted — and the cap refused
+	// last, so the first refusal is the one root would name.
 	apps := 0
 	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		name := e.Name()
+		switch {
+		case strings.HasPrefix(name, "."):
 			continue
+		case name == "recipients":
+			if !e.Type().IsRegular() {
+				return nil, refused("%s/recipients is not a regular file", shown)
+			}
+			continue
+		case !e.IsDir() || e.Type()&fs.ModeSymlink != 0:
+			return nil, refused("%s/%s is not an app's directory: %s", shown, proof.Bound(name), entryWhat(e))
 		}
-		inner, err := os.ReadDir(filepath.Join(dir, e.Name()))
+		inner, err := os.ReadDir(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
-		if slices.ContainsFunc(inner, func(f fs.DirEntry) bool { return !strings.HasPrefix(f.Name(), ".") }) {
-			apps++ // git tracks no empty directory, nor usually a dot-name
+		if !slices.ContainsFunc(inner, func(f fs.DirEntry) bool { return !strings.HasPrefix(f.Name(), ".") }) {
+			continue // git tracks no empty directory, nor usually a dot-name
+		}
+		if apps++; apps > proof.MaxSecretApps {
+			continue
+		}
+		if !appName.MatchString(name) {
+			return nil, refused("%s/%s is not an app's directory: %s is not an app name", shown, proof.Bound(name), proof.Bound(name))
 		}
 	}
 	if apps > proof.MaxSecretApps {
@@ -143,9 +160,23 @@ func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, er
 	if err != nil {
 		return app, 0, err
 	}
-	// The count before any file is read: past the cap nothing is.
-	if n := len(slices.DeleteFunc(slices.Clone(entries), func(e fs.DirEntry) bool { return strings.HasPrefix(e.Name(), ".") })); n > proof.MaxSecretVars {
-		return app, 0, refused("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars)
+	// One pass before any file is opened, as the commit's proof scans an
+	// app's tree: in git's order, each entry held to the layout up to
+	// the cap, the rest only counted, and the cap refused last.
+	count := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if count++; count > proof.MaxSecretVars {
+			continue
+		}
+		if err := secretEntry(e, shown); err != nil {
+			return app, 0, err
+		}
+	}
+	if count > proof.MaxSecretVars {
+		return app, 0, refused("app %s has %d secrets; the cap is %d", app.Name, count, proof.MaxSecretVars)
 	}
 	var ciphertext, rendered int64
 	for _, e := range entries {
@@ -154,17 +185,7 @@ func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, er
 			ts.warnings = append(ts.warnings, notCommitted(shown+"/"+proof.Bound(name)))
 			continue
 		}
-		v, isAge := strings.CutSuffix(name, ".age")
-		switch {
-		case !e.Type().IsRegular():
-			return app, 0, refused("%s/%s is not a secret: %s", shown, proof.Bound(name), entryWhat(e))
-		case !isAge:
-			return app, 0, refused("%s/%s is not a secret: a secret's file is <VAR>.age", shown, proof.Bound(name))
-		case len(v) > proof.MaxVarName:
-			return app, 0, refused("%s/%s is not a secret: its name is over %d bytes", shown, proof.Bound(name), proof.MaxVarName)
-		case !liveswap.ValidEnvKey(v):
-			return app, 0, refused("%s/%s is not a secret: %s is not an environment variable's name", shown, proof.Bound(name), proof.Bound(v))
-		}
+		v := strings.TrimSuffix(name, ".age") // secretEntry held it to <VAR>.age
 		size, n, err := secretFileLength(filepath.Join(dir, name))
 		var big *tooLargeError
 		var notAge *notAgeError
@@ -184,15 +205,36 @@ func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, er
 	if n := len(app.Vars); n >= warnSecretVars {
 		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars))
 	}
-	switch {
-	case rendered > maxEnvFile:
-		// A warning, not a refusal: the cap is step 15a's, and the
-		// lengths are right to within a line break a value.
+	// A warning, not a refusal: the cap is step 15a's, and each value's
+	// length counts a line break (up to 2 bytes) that 15a may strip, so
+	// the box surely refuses only when the file is over even without them.
+	switch least := rendered - 2*int64(len(app.Vars)); {
+	case least > maxEnvFile:
 		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes, over the cap of %d: the box will refuse the push", app.Name, rendered, maxEnvFile))
+	case rendered > maxEnvFile:
+		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes, at or just over the cap of %d: the box refuses the push unless values end in the line break it strips", app.Name, rendered, maxEnvFile))
 	case rendered >= warnEnvFile:
 		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes; the cap is %d", app.Name, rendered, maxEnvFile))
 	}
 	return app, ciphertext, nil
+}
+
+// secretEntry holds one entry of an app's directory to the layout: a
+// regular file `<VAR>.age`, VAR an env file's name within its cap.
+func secretEntry(e fs.DirEntry, shown string) error {
+	name := e.Name()
+	v, isAge := strings.CutSuffix(name, ".age")
+	switch {
+	case !e.Type().IsRegular():
+		return refused("%s/%s is not a secret: %s", shown, proof.Bound(name), entryWhat(e))
+	case !isAge:
+		return refused("%s/%s is not a secret: a secret's file is <VAR>.age", shown, proof.Bound(name))
+	case len(v) > proof.MaxVarName:
+		return refused("%s/%s is not a secret: its name is over %d bytes", shown, proof.Bound(name), proof.MaxVarName)
+	case !liveswap.ValidEnvKey(v):
+		return refused("%s/%s is not a secret: %s is not an environment variable's name", shown, proof.Bound(name), proof.Bound(v))
+	}
+	return nil
 }
 
 // entryWhat names what a directory entry is, for a refusal.
