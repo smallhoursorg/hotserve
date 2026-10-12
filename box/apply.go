@@ -118,7 +118,7 @@ func (a *Applier) removeTemp(id string) {
 	if err := os.Remove(a.caddyfileTmp(id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		a.logger.Warn("box: could not remove a temporary", zap.String("error", proof.Bound(err.Error())))
 	}
-	a.removeEnvTemps(".*.env.box-" + id)
+	a.removeEnvTemps(id)
 }
 
 // lock takes root's blocking lock (DESIGN-box.md, Paths: `lock`), shared
@@ -306,7 +306,7 @@ func (a *Applier) removeVerified(id string) {
 // txn.json, applied.json and the results. Every one is in a directory
 // only root writes.
 func (a *Applier) sweepTemporaries() {
-	a.removeEnvTemps(".*.env.box-*")
+	a.removeEnvTemps("")
 	etc := filepath.Dir(a.caddyfile())
 	var stale []string
 	if names, err := filepath.Glob(filepath.Join(etc, ".Caddyfile.box-*")); err == nil {
