@@ -955,6 +955,9 @@ func TestRecordSecretsValid(t *testing.T) {
 		"a no_change with env files": func(r *record) {
 			r.Phase, r.NewSHA256 = phaseNoChange, r.PrevSHA256
 		},
+		"a written file listed at another digest": func(r *record) { r.SecretsInstalled["api"] = digest([]byte("other")) },
+		"a written file not listed":               func(r *record) { delete(r.SecretsInstalled, "api") },
+		"a removed file still listed":             func(r *record) { r.SecretsInstalled["example"] = digest([]byte("old")) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := ok
