@@ -309,12 +309,43 @@ func TestBoxSecretSet(t *testing.T) {
 	}
 	r.write(boxFile, f)
 
-	// On a Mac's disk two names that differ in case are one file.
+	// On a Mac's disk two names that differ in case are one file: the
+	// second would overwrite the first.
 	r.write("deploy.example.com/secrets/example/Database_URL.age", "x")
-	if out, code := r.secrets("", "v", "set", app...); code != 0 || !strings.Contains(out, "warning: deploy.example.com/secrets/example/Database_URL.age differs from DATABASE_URL.age only in case") {
+	if out, code := r.secrets("", "v", "set", app...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example/Database_URL.age differs from DATABASE_URL.age only in case: on a Mac's default disk they are one file") {
 		t.Errorf("a case twin: exit %d\n%s", code, out)
 	}
+	if r.read("deploy.example.com/secrets/example/Database_URL.age") != "x" {
+		t.Error("the case twin was overwritten")
+	}
 	r.remove("deploy.example.com/secrets/example/Database_URL.age")
+
+	// An app has at most 256 variables; one already there can change.
+	for i := 0; i < 256; i++ {
+		r.write(fmt.Sprintf("deploy.example.com/secrets/many/V%03d.age", i), "x")
+	}
+	if out, code := r.secrets("", "v", "set", "APP=many", "VAR=ONE_MORE"); code != 1 || !strings.Contains(out, "many has 256 variables, the box's cap for an app") {
+		t.Errorf("the 257th variable: exit %d\n%s", code, out)
+	}
+	if out, code := r.secrets("", "v", "set", "APP=many", "VAR=V000"); code != 0 {
+		t.Errorf("a change at the cap: exit %d\n%s", code, out)
+	}
+	if out, code := r.secrets("", "V999=1\n", "import", "APP=many"); code != 1 || !strings.Contains(out, "many would have more than 256 variables") {
+		t.Errorf("an import past the cap: exit %d\n%s", code, out)
+	}
+	r.remove("deploy.example.com/secrets/many")
+
+	// The recipients file's first key is the box's, or nothing is
+	// encrypted to it.
+	rec = r.read(recipientsFile)
+	r.write(recipientsFile, "# alice first\nssh-ed25519 "+r.b64(alice+".pub")+"\n"+rec)
+	if out, code := r.secrets("", "v", "set", app...); code != 1 || !strings.Contains(out, "the first key in the recipients file is not a box's") {
+		t.Errorf("a reader first: exit %d\n%s", code, out)
+	}
+	if out, code := r.secrets("", "", "rekey", "IDENTITY="+alice); code != 1 || !strings.Contains(out, "the first key in the recipients file is not a box's") {
+		t.Errorf("rekey with a reader first: exit %d\n%s", code, out)
+	}
+	r.write(recipientsFile, rec)
 
 	// More than one box: BOX names it.
 	r.write("deploy2.example.com/Caddyfile", strings.Replace(f, "deploy.example.com {", "deploy2.example.com {", 1))
@@ -323,6 +354,13 @@ func TestBoxSecretSet(t *testing.T) {
 	}
 	if out, code := r.secrets("", "v", "set", append(app, "BOX=deploy.example.com/")...); code != 0 {
 		t.Errorf("BOX=: exit %d\n%s", code, out)
+	}
+	// A box tracked but deleted here is on its way out, as make signer
+	// and make check read it: the other is then the only one.
+	r.commit("a second box")
+	r.remove("deploy2.example.com")
+	if out, code := r.secrets("", "v", "set", app...); code != 0 {
+		t.Errorf("a deleted second box: exit %d\n%s", code, out)
 	}
 }
 
@@ -378,6 +416,16 @@ func TestBoxSecretsListShowRekey(t *testing.T) {
 	r.write(boxFile, strings.Replace(f, "\t\t# signers\n", "\t\t# signers\n\t\tsigner erin ssh-ed25519 "+r.b64(erin)+"\n", 1))
 	if out, _ := r.secrets("", "", "list"); !strings.Contains(out, "  erin signs but is not a reader: their make signer adds them, then a reader runs make rekey\n") {
 		t.Errorf("a signer who is not a reader:\n%s", out)
+	}
+	// The last signer a hardware key, which can never be a reader: still
+	// a clean exit.
+	carolLine := "signer carol ssh-rsa " + r.b64(carol+".pub") + "\n"
+	if !strings.Contains(f, carolLine) {
+		t.Fatalf("no carol line in:\n%s", f)
+	}
+	r.write(boxFile, strings.Replace(f, carolLine, carolLine+"\t\tsigner zed sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIA==\n", 1))
+	if out, code := r.secrets("", "", "list"); code != 0 {
+		t.Errorf("list with an sk- signer last: exit %d\n%s", code, out)
 	}
 	r.write(boxFile, f)
 
@@ -621,6 +669,24 @@ func TestBoxSecretsImport(t *testing.T) {
 	}
 	if out, code := r.secrets("", "# nothing\n", "import", "APP=other"); code != 1 || !strings.Contains(out, "the env file has no KEY=VALUE line") {
 		t.Errorf("an empty file: exit %d\n%s", code, out)
+	}
+	// Two names one file on a Mac's disk, in the file or against one
+	// already there.
+	if out, code := r.secrets("", "foo=1\nFOO=2\n", "import", "APP=other"); code != 1 || !strings.Contains(out, "line 2: FOO and foo differ only in case") || r.exists("deploy.example.com/secrets/other") {
+		t.Errorf("foo and FOO: exit %d\n%s", code, out)
+	}
+	if out, code := r.secrets("", "a=1\n", "import", "APP=example"); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example/A.age differs from a.age only in case") {
+		t.Errorf("a against A: exit %d\n%s", code, out)
+	}
+	// A value at the cap, in time linear in its length.
+	big := strings.Repeat("v", 65536)
+	if out, code := r.secrets("", "BIG="+big+"\n", "import", "APP=big"); code != 0 {
+		t.Fatalf("a 64 KiB value: exit %d\n%s", code, out)
+	}
+	r.mustDecrypt(boxID, "deploy.example.com/secrets/big/BIG.age", big)
+	// The wrong file entirely.
+	if out, code := r.secrets("", strings.Repeat("x", 1048577), "import", "APP=other"); code != 1 || !strings.Contains(out, "the file is over 1048576 bytes") {
+		t.Errorf("a file over the cap: exit %d\n%s", code, out)
 	}
 	// A value the box would refuse, inside a line hotserve's parser takes.
 	if out, code := r.secrets("", "OK=1\nNUL=a\x00b\n", "import", "APP=other"); code != 1 || !strings.Contains(out, "NUL has a NUL byte in it") || r.exists("deploy.example.com/secrets/other") {

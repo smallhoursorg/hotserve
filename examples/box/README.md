@@ -415,9 +415,9 @@ ssh root@box.example.com cat /etc/hotserve/example.env | make secrets-import APP
 file as hotserve does: one `KEY=VALUE` a line, `#` comments, an
 optional `export `, and one pair of quotes around a value taken off.
 Then set `env_file /etc/hotserve/secrets/example.env` in the app's
-block, commit and push; once the run shows it applied, the old file is
-read no more, and `rm /etc/hotserve/example.env` as root on the box
-removes it.
+block, commit and push. Once the run names those variables as added,
+the box has written the new file and the old one is read no more:
+`rm /etc/hotserve/example.env` as root on the box removes it.
 
 The rest, from rotating a value to what GitHub and CI see, is on
 hotserve's [Secrets](https://github.com/smallhoursorg/hotserve/blob/main/docs/secrets.md)
