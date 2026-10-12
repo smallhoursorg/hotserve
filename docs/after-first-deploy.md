@@ -61,25 +61,79 @@ and [what to do when a push is refused](../examples/box/README.md#when-a-push-is
 
 ## 2. Secrets, if the app has any
 
-Skip this if it does not; the examples do not. Secrets do not go
-through the box's repository: the values go in a file on the box that
-only root and the `hotserve` user can read, and the app's block names
-it with `env_file`. As root on the box (`ssh root@box.example.com`):
+Skip this if it does not; the examples do not. A secret is a commit,
+like the config. Each value is one small file in the box's repository,
+encrypted on your laptop with [age](https://age-encryption.org) to two
+kinds of key: the box's own, which hotserve made when it was
+installed, and the SSH key you sign commits with. GitHub and the
+workflow only ever hold ciphertext, and nothing is typed onto the box.
+
+Once, on the laptop: `brew install age` (Debian: `apt install age`).
+The first secret also needs the box's key, which root prints:
 
 ```sh
-install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
-editor /etc/hotserve/example.env      # one KEY=VALUE per line
+make secret APP=example VAR=DATABASE_URL BOX_KEY=$(ssh root@box.example.com hotserve box key)
 ```
 
-Then uncomment `env_file /etc/hotserve/example.env` in the app's block
-and push it — in that order: hotserve reads the file each time the app
-launches, and a missing one fails the launch. A changed file applies
-at the app's next launch: its next deploy. A Deno app also needs
-`--allow-env=` to name each variable it reads. An administrator who is
-not root can do the same
-([Hardening](hardening.md#3-an-administrator-if-you-want-one)), and the
-box README's [Secrets](../examples/box/README.md#secrets) section has
-more.
+```
+value for example DATABASE_URL (typing is not shown):
+secret: made deploy.example.com/secrets/recipients: this box (age1qpzr…7k2d), alice@example.com
+secret: deploy.example.com/secrets/example/DATABASE_URL.age, encrypted to 2 keys, added to the commit
+secret: example's block does not read its secrets yet; add this line to it:
+secret:     env_file /etc/hotserve/secrets/example.env
+```
+
+The value goes from the prompt straight into age, so it is never
+written to the laptop's disk or your shell's history. Add that
+`env_file` line to the app's block (the template's Caddyfile has it
+ready, commented out: uncomment it), then commit and push:
+
+```sh
+git commit -am "example: database" && git push
+```
+
+```
+apply: deploy.example.com at 9be0d44, signed by alice@example.com; verified; installing
+--- installed
++++ pushed
+…
+apply: deploy.example.com secrets: example: added DATABASE_URL
+apply: deploy.example.com at 9be0d44: loaded; running apps are not restarted; apps example
+apply: example reads its secrets at its next launch; a deploy of a new version launches it now
+```
+
+The box decrypts the value with its own key, only after it has checked
+the commit's signature, and writes `/etc/hotserve/secrets/example.env`.
+hotserve reads that file each time the app launches, and no app can
+see it. A pull request shows which variables changed and never what
+they are, and the workflow checks the names before anything is
+merged.
+
+The same command changes a value; once the box has a secret it needs
+no `BOX_KEY`. A push that changes only secrets reloads nothing:
+
+```
+apply: deploy.example.com secrets: example: changed DATABASE_URL
+apply: deploy.example.com at 3c1d0e8: secrets updated; the Caddyfile is unchanged, nothing reloaded; apps example
+apply: example reads its secrets at its next launch; a deploy of a new version launches it now
+```
+
+| To | Run |
+|---|---|
+| Change a value | `make secret APP=example VAR=DATABASE_URL` |
+| See the names, and who can read them | `make secrets` |
+| Read a value back | `make secret-show APP=example VAR=DATABASE_URL` |
+| Remove one | `git rm deploy.example.com/secrets/example/DATABASE_URL.age` |
+| Move an env file you made by hand into the repository | `ssh root@box.example.com cat /etc/hotserve/example.env \| make secrets-import APP=example` (with `BOX_KEY=…` too, if it is the box's first secret) |
+| Let a new signer read them, or move them to a rebuilt box | `make rekey`, or `make rekey BOX_KEY=…` |
+
+Who can read a value: the box, and every key in
+`deploy.example.com/secrets/recipients`, which `make signer` keeps in
+step with the signers. Removing a person stops them reading new
+values, not the ones they could already read, so change those. A Deno
+app also needs `--allow-env=` to name each variable it reads.
+[Secrets](secrets.md) has the rest: a signing key age cannot use, a
+rebuilt box, a lost laptop, who can read what, and what GitHub sees.
 
 ## 3. Know the way back
 
@@ -98,8 +152,8 @@ see during the restart, and how to pick a quiet moment for it.
   releases page lists them, and one of the newest five, which is what
   the box still holds ([examples/node](../examples/node/README.md#rolling-back)).
 - **Change the box** — an app's flags, a second app, a new site, a new
-  signer — by a signed push to the box's repository (step 1). The run's
-  output is what changed.
+  signer, a secret — by a signed push to the box's repository (steps 1
+  and 2). The run's output is what changed.
 - **Logs:** `journalctl -t hotserve-example` for the app's own output,
   `journalctl -u hotserve` for hotserve's, `journalctl -u
   hotserve-box-apply` for what the box did with a push — as root, or as
@@ -119,8 +173,8 @@ see during the restart, and how to pick a quiet moment for it.
   then — or, if it does not load, keeps hotserve down.
 - **A second app:** another `app` block and site in the box's
   Caddyfile, pushed; another copy of the example, with its own
-  `HOTSERVE_URL`. The Caddyfile is the only thing on the box that
-  changes.
+  `HOTSERVE_URL`. The Caddyfile, and the app's secrets if it has any
+  (step 2), are all that change on the box.
 - **A second box:** another directory in the box's repository, named
   for that box's deploy host, and `hotserve init` from it once as root
   on the new box. Every push goes to every box
@@ -146,3 +200,9 @@ only if SSH itself is down), in one of two ways:
 
 A change that loads but misbehaves is reverted like any commit: `git
 revert`, push.
+
+A secret that has leaked is changed like any other (`make secret`, a
+push), and reaches the app only at its next launch: deploy a new
+version of the app to launch it with the new value. A hand edit of an
+env file under `/etc/hotserve/secrets/` is overwritten by the next
+push, as a hand edit of the Caddyfile is.

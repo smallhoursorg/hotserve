@@ -465,7 +465,10 @@ you add tomorrow is already absent from every unit running today,
 because nothing ever bound it.
 
 **Keep env files outside every app's view.** `/etc/hotserve` is the
-documented location and no app may name it. hotserve refuses a config
+documented location and no app may name it. The box writes each app's
+secrets from its repository to `/etc/hotserve/secrets/<app>.env`
+([docs/secrets.md](../docs/secrets.md)); a file made by hand elsewhere
+under `/etc/hotserve` works the same way. hotserve refuses a config
 in which one app's `env_file` sits inside another app's own dirs,
 or anywhere in the OS base view (`/usr`, the named `/etc` entries) —
 both would put one app's secrets in another app's sandbox, and the
@@ -476,10 +479,12 @@ file and so choose its own next launch's environment.
 
 hotserve reads the file itself, as the `hotserve` user, each time the
 app launches (a deploy, a rollback, a relaunch after a crash or a
-reboot); loading the config does not open it. So create it readable by
-that user and nobody else —
-`sudo install -m 0640 -o root -g hotserve blog.env /etc/hotserve/` —
-and keep it in place: a missing or unreadable file fails that launch.
+reboot); loading the config does not open it. So it must be readable
+by that user and nobody else: the box writes its files 0640
+`root:hotserve`, and a file made by hand needs the same, as root —
+`install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/blog.env`,
+then edit it — and keep it in place: a missing or unreadable file
+fails that launch.
 A world-readable or world-writable file is warned about — at config
 load (`hotserve validate` shows it when run as an account that can
 reach the file, and says so when it cannot) and again at each launch,
@@ -957,8 +962,8 @@ deploy, a rollback, or a relaunch after a crash, a sustained health failure, or 
 the unit runs an absolute resolved path with the placeholders already
 substituted. Compare it against the release it should be running, not
 against the directive. Anything you put in `command` is readable by
-anyone who can read status, so keep secrets in `env`, which status
-does not report. Then: last deploy result (including `deployed_by`,
+anyone who can read status, so keep secrets out of it: they belong in
+`env_file`. The environment, inline `env` included, is not in status. Then: last deploy result (including `deployed_by`,
 the `sha256` it was pinned to, and the artifact's `artifact_entries` /
 `artifact_bytes` against the caps),
 the watchdog's state (restart counts, last restart cause), and

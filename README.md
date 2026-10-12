@@ -76,12 +76,13 @@ without the feature it exists for.
 (A hosted APT repository with automatic updates is on the roadmap.)
 
 **Installing needs root; administering does not.** Checking a config
-(`hotserve validate`) needs no privilege, reading the journal —
-hotserve's and every app's — needs the `adm` group, and creating and
-editing the apps' secret files needs two fixed commands, listed in
-[examples/box/sudoers](examples/box/sudoers). The config itself
-changes only by a signed push from the box's repository
-([examples/box](examples/box)); hotserve itself runs unprivileged. One thing reaches wider: `adm` reads the
+(`hotserve validate`) needs no privilege, and reading the journal —
+hotserve's and every app's — needs the `adm` group. The config changes
+only by a signed push from the box's repository
+([examples/box](examples/box)), and so do the apps' secrets kept there,
+as values encrypted to the box's own key
+([docs/secrets.md](docs/secrets.md)); hotserve itself runs
+unprivileged. One thing reaches wider: `adm` reads the
 whole system journal, not only hotserve's lines, so it is a trust
 grant in its own right. The e2e suite administers its box that way.
 
@@ -92,7 +93,8 @@ server to an app that deploys on every push to `main`, in four steps,
 with the box's config in a repository of its own that the box applies
 on each signed push.
 [After the first deploy](docs/after-first-deploy.md) then covers
-changing the config, secrets and the way back, and
+changing the config, secrets (whose reference is
+[Secrets](docs/secrets.md)) and the way back, and
 [Hardening the box](docs/hardening.md) covers SSH by key only, the SSH
 port shut, and an optional administrator who is not root.
 The first two use the three directories below, which the e2e suite
@@ -111,7 +113,8 @@ builds and deploys on every change, so what they say works:
   may deploy it, where the deploy webhook answers, who may sign a
   change), applied by the workflow on each signed push to `main`; the
   box checks the signatures and keeps the file it had if the new one
-  does not load. And the sudoers file above. Its template is
+  does not load. The apps' secrets live there too, encrypted, one
+  file per value ([docs/secrets.md](docs/secrets.md)). Its template is
   [hotserve-example-box](https://github.com/smallhoursorg/hotserve-example-box).
 
 Both apps serve on the socket hotserve hands them, answer `/health`,

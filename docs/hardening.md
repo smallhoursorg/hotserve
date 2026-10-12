@@ -52,48 +52,43 @@ settings, which do not need the box.
 
 ## 3. An administrator, if you want one
 
-An account that is not root, for reading the logs and editing the
-secrets without root's key: for a second person, or to keep root's
-key for when it is needed. It cannot change the box's config — that is
-a signed push — and holds nothing else: the logs through the `adm`
-group, and the two commands of
-[Secrets](after-first-deploy.md#2-secrets-if-the-app-has-any) through
-the `sudoers` file in the box's repository. Read the file: it is
-short, and it says what it grants.
+An account that is not root, for reading the logs: for a second
+person, or to keep root's key for when it is needed. It reads
+hotserve's journal and every app's through the `adm` group, and that
+is all it holds. It needs no `sudo`: the config changes only by signed
+pushes from the box's repository, and so do the apps' secrets kept
+there ([Secrets](secrets.md)).
 
-From the laptop, in the box's repository, put it on the box, with the
-administrator's SSH public key — yours, or the second person's:
+From the laptop, put the administrator's SSH public key on the box —
+yours, or the second person's:
 
 ```sh
-scp sudoers root@box.example.com:/etc/sudoers.d/hotserve-admin
 scp alice.pub root@box.example.com:      # the administrator's public key
 ```
 
 Then as root on the box:
 
 ```sh
-chmod 0440 /etc/sudoers.d/hotserve-admin && visudo -c
-adduser --disabled-password --comment "" alice      # no password: SSH keys only, and the sudoers lines ask for none
+adduser --disabled-password --comment "" alice      # no password: SSH keys only
 install -d -m 0700 -o alice -g alice /home/alice/.ssh
 install -m 0600 -o alice -g alice alice.pub /home/alice/.ssh/authorized_keys
-groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
+usermod -aG adm alice
 ```
 
 Check from the laptop:
 
 ```sh
 ssh alice@box.example.com journalctl -u hotserve -n 5   # the journal, through adm
-ssh alice@box.example.com sudo -n -l                    # the two secrets commands, no password
 ```
 
-`alice` then follows
-[Secrets](after-first-deploy.md#2-secrets-if-the-app-has-any) with
-`sudo` in front of the `install` line, and `sudoedit` in place of
-`editor`; the sudoers file admits exactly those two.
-
 What this grants: `adm` reads the whole system journal, not only
-hotserve's lines, so it is a trust grant in its own right. The secrets
-grant is every app's environment, read at the app's next launch — and
-for most runtimes an environment variable (`NODE_OPTIONS`, say) is a
-way to run code as that app. Give the account to the people who may
-change what the apps run.
+hotserve's lines, so it is a trust grant in its own right. An app that
+writes a secret to its own output puts it there too.
+
+A box set up from an earlier version of the box template may have
+that template's `sudoers` file at `/etc/sudoers.d/hotserve-admin`, which
+let the administrator create and edit env files under
+`/etc/hotserve`. Once the apps' secrets are in the repository
+([Move a hand-made env file in](secrets.md#move-a-hand-made-env-file-in)),
+remove it and its group, as root: `rm /etc/sudoers.d/hotserve-admin &&
+groupdel hotserve-admin`.
