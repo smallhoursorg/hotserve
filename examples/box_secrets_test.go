@@ -463,6 +463,30 @@ func TestBoxSecretsListShowRekey(t *testing.T) {
 		r.mustDecrypt(carol, f, map[bool]string{true: "one", false: "two"}[f == dbFile])
 	}
 
+	// A reader added to the recipients file by hand: the rekey that
+	// encrypts to them stages the file too, so the commit's ciphertext
+	// and the readers it names agree.
+	r.commit("rekeyed", "-c", "commit.gpgsign=false") // the signing key was unset above
+	ivy := r.key("ivy")
+	r.write(recipientsFile, r.read(recipientsFile)+"# ivy\nssh-ed25519 "+r.b64(ivy)+"\n")
+	if out, code := r.secrets("", "", "rekey", "IDENTITY="+alice); code != 0 {
+		t.Fatalf("rekey to a hand-added reader: exit %d\n%s", code, out)
+	}
+	if got := r.git("diff", "--name-only"); got != "" {
+		t.Errorf("left unstaged after rekey: %q", got)
+	}
+	r.mustDecrypt(strings.TrimSuffix(ivy, ".pub"), dbFile, "one")
+	// And make secret, the same.
+	r.commit("ivy", "-c", "commit.gpgsign=false") // the signing key was unset above
+	jo := r.key("jo")
+	r.write(recipientsFile, r.read(recipientsFile)+"# jo\nssh-ed25519 "+r.b64(jo)+"\n")
+	if out, code := r.secrets("", "three", "set", "APP=example", "VAR=STRIPE_KEY"); code != 0 {
+		t.Fatalf("set to a hand-added reader: exit %d\n%s", code, out)
+	}
+	if got := r.git("diff", "--name-only"); got != "" {
+		t.Errorf("left unstaged after set: %q", got)
+	}
+
 	// A value this reader cannot open: nothing changes.
 	c := exec.Command(filepath.Join(ageTools(t), "age"), "-r", newBox, "-o", filepath.Join(r.dir, "deploy.example.com/secrets/example/BOX_ONLY.age"))
 	c.Stdin = strings.NewReader("box only")
