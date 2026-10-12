@@ -39,14 +39,13 @@ func ageTools(t *testing.T) string {
 			ageErr = err
 			return
 		}
+		ageDir = dir // TestMain removes it, built or not
 		cmd := exec.Command("go", "install",
 			"filippo.io/age/cmd/age@"+ageVersion, "filippo.io/age/cmd/age-keygen@"+ageVersion)
 		cmd.Env = append(os.Environ(), "GOBIN="+dir, "GOWORK=off", "GOFLAGS=")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			ageErr = fmt.Errorf("go install age %s: %w\n%s", ageVersion, err, out)
-			return
 		}
-		ageDir = dir
 	})
 	if ageErr != nil {
 		t.Fatal(ageErr)
@@ -245,7 +244,9 @@ func TestBoxSecretSet(t *testing.T) {
 		{"  \"quoted\" and 'single'  ", "  \"quoted\" and 'single'  "},
 		{"#=a=b # c", "#=a=b # c"},
 		{"caf" + string(rune(0xe9)) + " " + string(rune(0x1f600)) + string(rune(0x3000)), "caf" + string(rune(0xe9)) + " " + string(rune(0x1f600)) + string(rune(0x3000))},
-		{strings.Repeat("v", 65536), strings.Repeat("v", 65536)},
+		// The longest whose own line, EDGE="…" and its newline, fits
+		// the box's 64 KiB env file.
+		{strings.Repeat("v", 65536-len("EDGE")-4), strings.Repeat("v", 65536-len("EDGE")-4)},
 	} {
 		if out, code := r.secrets("", c.in, "set", "APP=example", "VAR=EDGE"); code != 0 {
 			t.Fatalf("value %q: exit %d\n%s", c.in, code, out)
@@ -264,7 +265,7 @@ func TestBoxSecretSet(t *testing.T) {
 		{"\xed\xa0\x80", "EDGE is not UTF-8 text"}, // a surrogate
 		{"\xc0\xaf", "EDGE is not UTF-8 text"},     // overlong
 		{"\xe2\x82", "EDGE is not UTF-8 text"},     // cut short
-		{strings.Repeat("v", 65537), "EDGE is longer than 65536 bytes"},
+		{strings.Repeat("v", 65536-len("EDGE")-3), "EDGE is too long: its line in the env file would be over 65536 bytes"},
 	} {
 		if out, code := r.secrets("", c.in, "set", "APP=example", "VAR=EDGE"); code != 1 || !strings.Contains(out, c.want) {
 			t.Errorf("value %q: exit %d, want %q\n%s", c.in, code, c.want, out)
@@ -679,7 +680,7 @@ func TestBoxSecretsImport(t *testing.T) {
 		t.Errorf("a against A: exit %d\n%s", code, out)
 	}
 	// A value at the cap, in time linear in its length.
-	big := strings.Repeat("v", 65536)
+	big := strings.Repeat("v", 65536-len("BIG")-4)
 	if out, code := r.secrets("", "BIG="+big+"\n", "import", "APP=big"); code != 0 {
 		t.Fatalf("a 64 KiB value: exit %d\n%s", code, out)
 	}
