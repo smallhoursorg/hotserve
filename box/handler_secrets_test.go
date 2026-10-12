@@ -202,7 +202,10 @@ func TestDescribeSecrets(t *testing.T) {
 		"an armored value":                 {reads, map[string][]byte{"example/KEY.age": []byte("-----BEGIN AGE ENCRYPTED FILE-----\nx\n")}, "is ASCII-armored"},
 		"a plaintext value":                {reads, map[string][]byte{"example/KEY.age": []byte("hunter2\n")}, "does not decrypt: it is not an age file"},
 		"recipients without the box first": {reads, map[string][]byte{"recipients": []byte("ssh-ed25519 AAAA\n"), "example/KEY.age": enc("v")}, "recipients:1: the first recipient is not the box's key"},
-		"a recipient age cannot use":       {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\nsk-ssh-ed25519@openssh.com AAAA\n"), "example/KEY.age": enc("v")}, "recipients:2: not a recipient age encrypts to"},
+		"a recipient age cannot read":      {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\nssh-ed25519 AAAA\n"), "example/KEY.age": enc("v")}, "recipients:2: not a recipient age encrypts to"},
+		"a mistyped reader's key":          {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\n" + mistyped(reader.Recipient().String()) + "\n"), "example/KEY.age": enc("v")}, "recipients:2: not a recipient age encrypts to"},
+		"a trailing space":                 {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + " \n"), "example/KEY.age": enc("v")}, "recipients:1: a space or tab at the line's start or end"},
+		"a recipients file with none":      {reads, map[string][]byte{"recipients": []byte("# the box\n"), "example/KEY.age": enc("v")}, "secrets/recipients has no recipient"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeTree(t, c.file, c.files)
@@ -224,10 +227,75 @@ func TestDescribeSecrets(t *testing.T) {
 		t.Errorf("over the cap: %v\n%s", err, out.String())
 	}
 
+	// A plugin's recipient is taken as it is: its checksum is the
+	// plugin's to check.
+	path = writeTree(t, reads, map[string][]byte{
+		"recipients":      []byte(box.Recipient().String() + "\nage1yubikey1qwt50d05nh5vutpdzmlg5wn80xq5negm4uj9ghv0snvdd3yysf5yw3rhl3t\n"),
+		"example/KEY.age": enc("v"),
+	})
+	if err := describe(path, &bytes.Buffer{}); err != nil {
+		t.Errorf("a plugin's recipient: %v", err)
+	}
+
+	// As age reads a recipients file: a CRLF line is a line, and an SSH
+	// key of a type age does not encrypt to is skipped with a warning.
+	sk := "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIGYd6dqGEgHa0E1ijwY+XaYHV1Ts9ux0iEsNx8K1DtwPAAAABHNzaDo= alice"
+	path = writeTree(t, reads, map[string][]byte{
+		"recipients":      []byte(box.Recipient().String() + "\r\n" + sk + "\r\n"),
+		"example/KEY.age": enc("v"),
+	})
+	out.Reset()
+	if err := describe(path, &out); err != nil || !strings.Contains(out.String(), "recipients 1\n") || !strings.Contains(out.String(), "recipients:2: age skips this sk-ssh-ed25519@openssh.com key") {
+		t.Errorf("CRLF and an sk- key: %v\n%s", err, out.String())
+	}
+
+	// A dot-name, which git usually ignores, is warned about and not read.
+	path = writeTree(t, reads, map[string][]byte{".DS_Store": []byte("x"), "example/.KEY.age.swp": []byte("x"), "example/KEY.age": enc("v")})
+	out.Reset()
+	if err := describe(path, &out); err != nil || strings.Count(out.String(), "is not a secret, and is not read here; the box refuses the push if it is committed\n") != 2 {
+		t.Errorf("dot-names: %v\n%s", err, out.String())
+	}
+
 	// A directory with no secret is not a commit's: git keeps none.
 	path = writeTree(t, secretsFile("", ""), map[string][]byte{"example": nil})
 	if err := describe(path, &bytes.Buffer{}); err != nil {
 		t.Errorf("an empty app directory: %v", err)
+	}
+}
+
+// mistyped is an age recipient with one data character changed, so its
+// checksum fails.
+func mistyped(r string) string {
+	c := byte('q')
+	if r[10] == 'q' {
+		c = 'p'
+	}
+	return r[:10] + string(c) + r[11:]
+}
+
+// describe lists the working tree in git's order: a directory sorts as
+// if its name ended in `/`, so api-v2 comes before api, as root walks the
+// commit's tree.
+func TestGitOrder(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"api", "api-v2"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "recipients"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := gitOrder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name())
+	}
+	if want := "api-v2 api recipients"; strings.Join(got, " ") != want {
+		t.Errorf("%v, want %s", got, want)
 	}
 }
 

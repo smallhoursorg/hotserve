@@ -43,6 +43,9 @@ type verdict struct {
 	// secrets are the commit's secrets beside the file, proved (13),
 	// still encrypted: what step 15a opens, in the applier alone.
 	secrets *proof.Secrets
+	// next is the incoming file's walk (11): what the handler's
+	// consistency checks read (step 6, last).
+	next *Shape
 }
 
 // check is steps 10 to 15 of the trust chain (DESIGN-box.md), from
@@ -99,7 +102,7 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 		}
 		return nil, refused("this box's file is %s; the bundle is %s — a box's file is %s/Caddyfile at the top of the repository: %s", proof.Bound(base.Path), proof.Bound(b.Path), cur.Host, fix)
 	}
-	vd.host, vd.apps = cur.Host, next.Apps
+	vd.host, vd.apps, vd.next = cur.Host, next.Apps, next
 
 	// 13. The file is the committed file, and the secrets beside it the
 	// committed secrets ("Proving the secrets").

@@ -5,14 +5,18 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"syscall"
 
 	"filippo.io/age"
 	"filippo.io/age/agessh"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
 	"github.com/smallhoursorg/hotserve/liveswap"
@@ -31,7 +35,7 @@ import (
 //
 //	recipients <n>                 the recipients file's recipient lines, when there is one
 //	secret <app> <VAR> <bytes>     each secret, apps and variables in git's order
-//	warning <text>                 each cap past 75%
+//	warning <text>                 each cap past 75%, and each dot-name, which is not read
 
 // treeSecrets is a working tree's secrets as describe reads them.
 type treeSecrets struct {
@@ -66,18 +70,22 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 	case !fi.IsDir():
 		return nil, refused("%s is not a directory", shown)
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := gitOrder(dir)
 	if err != nil {
 		return nil, err
 	}
 	var ciphertext int64
 	for _, e := range entries {
 		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			ts.warnings = append(ts.warnings, notCommitted(shown+"/"+proof.Bound(name)))
+			continue
+		}
 		if name == "recipients" {
 			if !e.Type().IsRegular() {
 				return nil, refused("%s/recipients is not a regular file", shown)
 			}
-			n, err := countRecipients(filepath.Join(dir, name), shown+"/recipients")
+			n, err := countRecipients(filepath.Join(dir, name), shown+"/recipients", ts)
 			if err != nil {
 				return nil, err
 			}
@@ -115,13 +123,17 @@ func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
 // value's length, and returns the ciphertext's bytes.
 func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, error) {
 	app := proof.SecretApp{Name: filepath.Base(dir)}
-	entries, err := os.ReadDir(dir)
+	entries, err := gitOrder(dir)
 	if err != nil {
 		return app, 0, err
 	}
 	var ciphertext, rendered int64
 	for _, e := range entries {
 		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			ts.warnings = append(ts.warnings, notCommitted(shown+"/"+proof.Bound(name)))
+			continue
+		}
 		v, isAge := strings.CutSuffix(name, ".age")
 		switch {
 		case !e.Type().IsRegular():
@@ -133,23 +145,20 @@ func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, er
 		case !liveswap.ValidEnvKey(v):
 			return app, 0, refused("%s/%s is not a secret: %s is not an environment variable's name", shown, proof.Bound(name), proof.Bound(v))
 		}
-		path := filepath.Join(dir, name)
-		data, err := readFile(path, proof.MaxSecretFile, false)
+		size, n, err := secretFileLength(filepath.Join(dir, name))
 		var big *tooLargeError
-		if errors.As(err, &big) {
-			fi, _ := os.Lstat(path)
-			return app, 0, refused("%s/%s is %d bytes; the cap is %d", shown, name, fi.Size(), proof.MaxSecretFile)
-		}
-		if err != nil {
+		var notAge *notAgeError
+		switch {
+		case errors.As(err, &big):
+			return app, 0, refused("%s/%s is %d bytes; the cap is %d", shown, name, size, proof.MaxSecretFile)
+		case errors.As(err, &notAge):
+			return app, 0, refused("%s/%s does not decrypt: %s", shown, name, notAge.why)
+		case err != nil:
 			return app, 0, err
-		}
-		n, err := valueLength(data)
-		if err != nil {
-			return app, 0, refused("%s/%s does not decrypt: %s", shown, name, err)
 		}
 		app.Vars = append(app.Vars, proof.SecretVar{Name: v})
 		ts.sizes[app.Name+"/"+v] = n
-		ciphertext += int64(len(data))
+		ciphertext += size
 		rendered += int64(len(v)) + n + 4 // KEY="value"\n
 	}
 	if n := len(app.Vars); n > proof.MaxSecretVars {
@@ -181,40 +190,107 @@ func entryWhat(e fs.DirEntry) string {
 	return "not a regular file"
 }
 
-// valueLength is a binary age file's plaintext length, from its sizes
-// alone: the payload after the header is a 16-byte nonce, then the
-// value in 64 KiB chunks, each with a 16-byte tag, and at least one
-// chunk.
-func valueLength(data []byte) (int64, error) {
-	if bytes.HasPrefix(data, []byte(ageArmor)) {
-		return 0, errors.New("it is ASCII-armored (age -a); the box reads age's binary form")
-	}
-	if !bytes.HasPrefix(data, []byte(ageIntro)) {
-		return 0, errors.New("it is not an age file")
-	}
-	header, err := age.ExtractHeader(bytes.NewReader(data))
+// gitOrder lists dir as a git tree orders it: by name, a directory's
+// name read as if it ended in `/` — so `api-v2` comes before `api` —
+// and so in the order root walks the commit's.
+func gitOrder(dir string) ([]fs.DirEntry, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0, errors.New("its header is not one age reads")
+		return nil, err
+	}
+	key := func(e fs.DirEntry) string {
+		if e.IsDir() {
+			return e.Name() + "/"
+		}
+		return e.Name()
+	}
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(key(a), key(b)) })
+	return entries, nil
+}
+
+// notCommitted is the warning for a dot-name in the working tree's
+// secrets — `.DS_Store`, an editor's swap file — which git usually
+// ignores: not read, since the commit may not have it, but the box
+// refuses it if it does.
+func notCommitted(path string) string {
+	return path + " is not a secret, and is not read here; the box refuses the push if it is committed"
+}
+
+// notAgeError is why a secret's file is not an age file the box reads,
+// in the words of root's refusal for it.
+type notAgeError struct{ why string }
+
+func (e *notAgeError) Error() string { return e.why }
+
+// secretFileLength is a secret's file's size and its value's length,
+// read as far as the header: the file is never read whole. A file over
+// the cap is a *tooLargeError with its size.
+func secretFileLength(path string) (size, n int64, err error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0) //nolint:gosec // the operator's own working tree
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, 0, err
+	}
+	if !fi.Mode().IsRegular() {
+		return 0, 0, fmt.Errorf("%s: %w", path, errNotRegular)
+	}
+	if size = fi.Size(); size > proof.MaxSecretFile {
+		return size, 0, &tooLargeError{name: path, limit: proof.MaxSecretFile}
+	}
+	n, err = valueLengthOf(f, size)
+	return size, n, err
+}
+
+// valueLength is valueLengthOf over bytes in memory.
+func valueLength(data []byte) (int64, error) {
+	return valueLengthOf(bytes.NewReader(data), int64(len(data)))
+}
+
+// valueLengthOf is a binary age file's plaintext length, from its header
+// and its size alone: the payload after the header is a 16-byte nonce,
+// then the value in 64 KiB chunks, each with a 16-byte tag, and at
+// least one chunk. Why it is not one the box reads is a *notAgeError.
+func valueLengthOf(r io.ReaderAt, size int64) (int64, error) {
+	notAge := func(why string) error { return &notAgeError{why: why} }
+	head := make([]byte, len(ageArmor))
+	got, _ := r.ReadAt(head, 0)
+	head = head[:got]
+	if bytes.HasPrefix(head, []byte(ageArmor)) {
+		return 0, notAge("it is ASCII-armored (age -a); the box reads age's binary form")
+	}
+	if !bytes.HasPrefix(head, []byte(ageIntro)) {
+		return 0, notAge("it is not an age file")
+	}
+	header, err := age.ExtractHeader(io.NewSectionReader(r, 0, size))
+	if err != nil {
+		return 0, notAge("its header is not one age reads")
 	}
 	const nonce, chunk, tag = 16, 64 << 10, 16
-	q := int64(len(data)-len(header)) - nonce
+	q := size - int64(len(header)) - nonce
 	if q < tag {
-		return 0, errors.New("its payload is cut short")
+		return 0, notAge("its payload is cut short")
 	}
 	chunks := (q + chunk + tag - 1) / (chunk + tag)
 	return q - chunks*tag, nil
 }
 
-// age1Line is a bech32 age recipient other than X25519's — a plugin's,
-// age1<name>1… (age-plugin-yubikey, age-plugin-se) — whose own encoding
-// describe cannot check without the plugin.
-var age1Line = regexp.MustCompile(`^age1[a-z0-9]+$`)
+// agePluginLine is a plugin's age recipient, age1<name>1<data>
+// (age-plugin-yubikey, age-plugin-se, age1pq…): a second `1` after the
+// name, then bech32 data, which has no `1` of its own. Its checksum is
+// the plugin's to check; an X25519 recipient (one `1`) that does not
+// parse is a mistyped key, never a plugin's.
+var agePluginLine = regexp.MustCompile(`^age1[a-z0-9]+1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+$`)
 
 // countRecipients reads a recipients file as age does — one recipient a
-// line, `#` lines and blank ones skipped — and counts the recipients. The
-// first must be the box's key, an X25519 recipient ("The box's key");
-// every other an SSH key age encrypts to, or an age recipient.
-func countRecipients(path, shown string) (int, error) {
+// line, read as it is (no space trimmed), a line that is empty or starts
+// with `#` skipped — and counts the recipients. There must be one, and
+// the first must be the box's key, an X25519 recipient ("The box's
+// key"); every other an SSH key age encrypts to, or an age recipient.
+func countRecipients(path, shown string, ts *treeSecrets) (int, error) {
 	data, err := readFile(path, maxRecipientsFile, false)
 	if err != nil {
 		return 0, err
@@ -223,9 +299,14 @@ func countRecipients(path, shown string) (int, error) {
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 64<<10), maxRecipientsFile)
 	for line := 1; sc.Scan(); line++ {
-		s := strings.TrimSpace(sc.Text())
+		s := sc.Text()
 		if s == "" || strings.HasPrefix(s, "#") {
 			continue
+		}
+		// A line's CR is the scanner's to drop, as age's own scanner does;
+		// a space is the recipient's, which age then cannot parse.
+		if s != strings.TrimSpace(s) {
+			return 0, refused("%s:%d: a space or tab at the line's start or end, which age reads as part of the recipient", shown, line)
 		}
 		if n == 0 {
 			if _, err := age.ParseX25519Recipient(s); err != nil {
@@ -236,12 +317,17 @@ func countRecipients(path, shown string) (int, error) {
 		}
 		var ok bool
 		switch {
-		case strings.HasPrefix(s, "ssh-"):
-			_, err := agessh.ParseRecipient(s)
-			ok = err == nil
 		case strings.HasPrefix(s, "age1"):
 			_, err := age.ParseX25519Recipient(s)
-			ok = err == nil || age1Line.MatchString(s)
+			ok = err == nil || agePluginLine.MatchString(s)
+		default:
+			_, err := agessh.ParseRecipient(s)
+			ok = err == nil
+			if !ok && unsupportedSSHKey(s) {
+				// As age does: skipped, with a warning, never an error.
+				ts.warnings = append(ts.warnings, fmt.Sprintf("%s:%d: age skips this %s key (it encrypts only to ssh-ed25519 and ssh-rsa): its holder cannot read the secrets; give them an age1… recipient instead", shown, line, sshKeyType(s)))
+				continue
+			}
 		}
 		if !ok {
 			return 0, refused("%s:%d: not a recipient age encrypts to (an ssh-ed25519 or ssh-rsa key, or an age1… recipient)", shown, line)
@@ -251,7 +337,24 @@ func countRecipients(path, shown string) (int, error) {
 	if err := sc.Err(); err != nil {
 		return 0, err
 	}
+	if n == 0 {
+		return 0, refused("%s has no recipient: its first is the box's key (hotserve box key prints it)", shown)
+	}
 	return n, nil
+}
+
+// unsupportedSSHKey reports whether s is an SSH public key that age reads
+// but does not encrypt to — an sk- key, an ECDSA one — which age skips
+// in a recipients file with a warning.
+func unsupportedSSHKey(s string) bool {
+	k, _, _, _, err := ssh.ParseAuthorizedKey([]byte(s))
+	return err == nil && k.Type() != ssh.KeyAlgoED25519 && k.Type() != ssh.KeyAlgoRSA
+}
+
+// sshKeyType is s's key type, the line's first field.
+func sshKeyType(s string) string {
+	t, _, _ := strings.Cut(s, " ")
+	return proof.Bound(t)
 }
 
 // lines are describe's lines for the secrets.

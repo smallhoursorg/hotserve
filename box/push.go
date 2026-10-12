@@ -355,9 +355,10 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 }
 
 // respondResult answers with a result and step 8's status for its phase.
-// The secrets' names are held out of the filter with the ids: each is
-// `<app>/<VAR>` in its grammars (readResultFile), never a value, and a
-// variable's name can look as random as a key.
+// The secrets' names are held out of the filter with the ids: in the
+// added, changed and removed lists each is `<app>/<VAR>`, out of band an
+// app name, each in its grammar (readResultFile) and never a value — and
+// a variable's name can look as random as a key.
 func respondResult(w http.ResponseWriter, res *result) error {
 	safe := append([]string{res.ID, res.Commit, res.BoxWebhook}, res.Named...)
 	for _, names := range [][]string{res.SecretsAdded, res.SecretsChanged, res.SecretsRemoved, res.SecretsOutOfBand} {
