@@ -313,7 +313,7 @@ func TestBoxSecretSet(t *testing.T) {
 	// On a Mac's disk two names that differ in case are one file: the
 	// second would overwrite the first.
 	r.write("deploy.example.com/secrets/example/Database_URL.age", "x")
-	if out, code := r.secrets("", "v", "set", app...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example/Database_URL.age differs from DATABASE_URL.age only in case: on a Mac's default disk they are one file") {
+	if out, code := r.secrets("", "v", "set", app...); code != 1 || !strings.Contains(out, "deploy.example.com/secrets/example holds two files whose names differ only in case (database_url.age): on a Mac's default disk they are one file") {
 		t.Errorf("a case twin: exit %d\n%s", code, out)
 	}
 	if r.read("deploy.example.com/secrets/example/Database_URL.age") != "x" {
@@ -672,6 +672,45 @@ func TestBoxSecretsRefuseLinks(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "theirs\n" {
 		t.Errorf("the file outside was written: %q", b)
+	}
+	if err := os.Remove(filepath.Join(r.dir, appDir, "B.age")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Anything but the layout the box reads, refused before a write:
+	// a move into a directory where a file belongs would nest it.
+	for _, c := range []struct {
+		make func()
+		undo string
+		want string
+	}{
+		{func() { r.remove(recipientsFile); r.write(recipientsFile+"/x", "") }, recipientsFile,
+			recipientsFile + " is not a regular file"},
+		{func() { r.write(appDir+"/B.age/x", "") }, appDir + "/B.age",
+			appDir + "/B.age is not a regular file"},
+		{func() { r.write(appDir+"/notes.txt", "") }, appDir + "/notes.txt",
+			appDir + "/notes.txt: an app's secrets directory holds only <VAR>.age files"},
+		{func() { r.write(appDir+"/1X.age", "") }, appDir + "/1X.age",
+			"a variable's name is letters, digits and _"},
+		{func() { r.write("deploy.example.com/secrets/Example/A.age", "") }, "deploy.example.com/secrets/Example",
+			"deploy.example.com/secrets/Example: a box's secrets directory holds the recipients file and one directory per app"},
+		{func() { r.write("deploy.example.com/secrets/blog", "") }, "deploy.example.com/secrets/blog",
+			"deploy.example.com/secrets/blog is not a directory"},
+	} {
+		c.make()
+		if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 1 || !strings.Contains(out, c.want) {
+			t.Errorf("want %q: exit %d\n%s", c.want, code, out)
+		}
+		if r.exists(appDir + "/C.age") {
+			t.Fatalf("written past %q", c.want)
+		}
+		r.remove(c.undo)
+		if c.undo == recipientsFile {
+			r.write(recipientsFile, rec)
+		}
+	}
+	if out, code := r.secrets("", "v", "set", "APP=example", "VAR=C"); code != 0 {
+		t.Errorf("the layout put back: exit %d\n%s", code, out)
 	}
 }
 
