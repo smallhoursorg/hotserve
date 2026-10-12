@@ -42,6 +42,9 @@ func TestMain(m *testing.M) {
 	if builtBin != "" {
 		_ = os.RemoveAll(filepath.Dir(builtBin))
 	}
+	if ageDir != "" {
+		_ = os.RemoveAll(ageDir)
+	}
 	os.Exit(code)
 }
 

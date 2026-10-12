@@ -18,7 +18,7 @@ and signs.
 |---|---|
 | `deploy.example.com/Caddyfile` | One box's whole config; becomes `/etc/hotserve/Caddyfile` on the box whose deploy host names the directory |
 | `.github/workflows/apply.yml` | `make check` on every push and pull request, with the latest stable hotserve (a `HOTSERVE_VERSION` repository variable pins another, such as a prerelease); on `main`, sends the commit to each box (`bin/apply`) |
-| `Makefile` | `make signer`, `make check`, `make wip` |
+| `Makefile` | `make signer`, `make check`, `make wip`; for secrets, `make secret`, `make secrets`, `make secret-show`, `make rekey`, `make secrets-import` |
 | `bin/` | What the Makefile and the workflow run |
 | `sudoers` | Creating and editing the apps' env files on the box, and nothing else |
 
@@ -176,8 +176,8 @@ what it runs.
      with `curl -i`. That is the webhook working: a deploy carries a
      token, and nothing without one gets further than this.
 
-The secrets of the apps are still a file on the box each, edited over
-SSH — see [Secrets](#secrets). Hardening the box — SSH by key only, the
+An app's secrets are commits too, encrypted so that only the box
+and its readers can read them: see [Secrets](#secrets). Hardening the box — SSH by key only, the
 SSH port shut, an optional administrator who is not root — is on
 [Hardening the box](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md).
 
@@ -245,6 +245,9 @@ adds Bob is signed by someone already listed:
 2. Alice, a signer: `git merge --squash bob-signer && git commit` —
    one commit, signed by her — and pushes `main`.
 3. Once it applies, Bob's own signed commits go through.
+4. If a box has secrets, Bob's `make signer` also made him a reader
+   ([Secrets](#secrets)): once a reader runs `make rekey` and pushes,
+   he can read what was there before.
 
 Removing someone is a commit that deletes their line, signed by
 someone else, since a box refuses a file that drops the key that
@@ -320,9 +323,118 @@ directory.
 
 ## Secrets
 
-They never go in this repo. Put each app's in a file on the box that
-only root and the `hotserve` user can read, and name it with
-`env_file` in the app's block. As root on the box:
+An app's secrets are commits too. Each value is a file of its own in
+this repo, encrypted on your laptop with [age](https://age-encryption.org)
+to the box's own key and to every reader's SSH key. The box decrypts
+them when it applies the push, and writes the app's env file. GitHub
+and the workflow only ever hold ciphertext, and nothing is typed onto
+the box.
+
+```
+deploy.example.com/secrets/recipients                who can read them: the box's key first, then each reader's
+deploy.example.com/secrets/example/DATABASE_URL.age  one value, encrypted to all of them
+```
+
+Once, on the laptop: `brew install age` (or `apt install age`).
+
+The box's first secret also needs the box's own key, which root
+prints on the box:
+
+```sh
+make secret APP=example VAR=DATABASE_URL BOX_KEY=$(ssh root@box.example.com hotserve box key)
+```
+
+```
+value for example DATABASE_URL (typing is not shown):
+secret: made deploy.example.com/secrets/recipients: this box (age1qpzr…7k2d), alice@example.com
+secret: deploy.example.com/secrets/example/DATABASE_URL.age, encrypted to 2 keys, added to the commit
+secret: example's block does not read its secrets yet; add this line to it:
+secret:     env_file /etc/hotserve/secrets/example.env
+```
+
+The value goes from the prompt straight into age, so it is never
+written to the laptop's disk or your shell's history; a pipe works too,
+from a password manager's command line, say. The prompt takes the line
+you paste or type exactly as it is. Typing is not shown, so it takes no
+edits: a Backspace or an arrow key refuses the value, and you paste or
+type it again. It reads the keys itself because a terminal's own line
+editing holds a line of at most 1024 bytes on a Mac (4096 on Linux),
+and past that a Mac drops the rest, Enter included, so a long pasted
+key would never arrive. Add the `env_file` line
+to the app's block, commit (signed) and push. The run names the
+variables the box added, changed or removed, never their values. The
+box writes `/etc/hotserve/secrets/example.env`, which only root and
+hotserve can read and no app can see, and hotserve reads it each time
+the app launches: a value reaches the app at its next launch, which is
+its next deploy of a new version, or a relaunch after a crash or a
+reboot.
+
+| To | Run |
+|---|---|
+| Set a value, or change one | `make secret APP=example VAR=DATABASE_URL` |
+| See the names, and who can read them | `make secrets` |
+| Read a value back | `make secret-show APP=example VAR=DATABASE_URL` |
+| Remove one | `git rm deploy.example.com/secrets/example/DATABASE_URL.age` |
+| Bring in an env file | `make secrets-import APP=example < example.env` |
+| Let a new reader read what is there, or move it all to a rebuilt box's key | `make rekey`, or `make rekey BOX_KEY=…` |
+
+With more than one box, name the one you mean: `BOX=deploy.example.com`.
+A pull request shows which variables changed, as file names, and never
+what they hold. A variable that is empty, or not secret, is an `env`
+line in the app's block instead. A Deno app also needs `--allow-env=`
+to name each variable it reads.
+
+**Who can read a value.** The box, and every key in its `recipients`
+file. `make signer` adds a signer's key there when age can encrypt to
+it: `ssh-ed25519`, or `ssh-rsa` of 2048 bits or more, so the people
+who sign are the people who read. A signing key age cannot use, such
+as a hardware `sk-` key or one an agent holds with no file beside it,
+reads with an age key of its own instead: make one (`age-keygen -o
+~/.config/age/hotserve.txt`, or `age-plugin-yubikey` or
+`age-plugin-se` for one held in hardware), put its `age1…` line in
+`recipients` under a `#` line naming you, have a reader run `make
+rekey`, and read with `make secret-show APP=… VAR=…
+IDENTITY=~/.config/age/hotserve.txt`. A plugin's key needs that plugin
+installed wherever someone encrypts to it.
+
+Whoever can get a signed commit onto `main` can read these files
+anyway: one site in the Caddyfile serves any file the `hotserve` user
+can read, env files included. A signer's key is the Caddyfile, and the
+Caddyfile is every app's secrets.
+
+**Removing a person** is their `signer` line out of each Caddyfile
+(see [Adding a signer](#adding-a-signer)), their key out of each
+`recipients`, then `make rekey`. They keep whatever they could already
+read, which is every value in this repo's history, so change those
+values too.
+
+**A rebuilt box** has a new key of its own: `make rekey
+BOX_KEY=$(ssh root@box.example.com hotserve box key)` encrypts every
+value again to it, as long as you are a reader.
+
+**An env file made on the box by hand** comes into this repo without
+passing through the laptop's disk:
+
+```sh
+ssh root@box.example.com cat /etc/hotserve/example.env | make secrets-import APP=example
+```
+
+(with `BOX_KEY=…` too, if it is the box's first secret). It reads the
+file as hotserve does: one `KEY=VALUE` a line, `#` comments, an
+optional `export `, and one pair of quotes around a value taken off.
+Then set `env_file /etc/hotserve/secrets/example.env` in the app's
+block, commit and push. Once the run names those variables as added,
+the box has written the new file and the old one is read no more:
+`rm /etc/hotserve/example.env` as root on the box removes it.
+
+The rest, from rotating a value to what GitHub and CI see, is on
+hotserve's [Secrets](https://github.com/smallhoursorg/hotserve/blob/main/docs/secrets.md)
+page.
+
+### An env file on the box, by hand
+
+An app's block can still name a file made on the box instead, outside
+this repo, as root:
 
 ```sh
 install -m 0640 -o root -g hotserve -T /dev/null /etc/hotserve/example.env   # once: empty, root:hotserve
@@ -351,11 +463,6 @@ groupadd hotserve-admin && usermod -aG adm,hotserve-admin alice
 A box set up from an earlier version of this template has `bin/push`'s
 lines in that file too, which let an administrator write the Caddyfile
 around the signed pushes: copy this one over it, as above.
-
-Whoever can get a signed commit onto `main` can read these files
-anyway: one site in the Caddyfile serves any file the `hotserve` user
-can read, env files included. A signer's key is the Caddyfile, and the
-Caddyfile is every app's secrets.
 
 The `adm` group reads the whole system journal — `journalctl -u
 hotserve`, an app's lines, `journalctl -u hotserve-box-apply` — not
