@@ -787,6 +787,77 @@ func TestApplySecretsNamesFromAConsoleFile(t *testing.T) {
 	}
 }
 
+// A directory a console puts at an env file's name after the transaction
+// read it is never removed with what it holds — not by the swap's
+// removal, not by a rollback's — and the push ends `unknown`, left as
+// found.
+func TestApplySecretsRacedDirectoryIsKept(t *testing.T) {
+	raceDir := func(b *testBox, app string) func(string) error {
+		return func(string) error {
+			if fi, err := os.Lstat(b.envPath(app)); err == nil && fi.IsDir() {
+				return nil // a retry: already raced
+			}
+			_ = os.Remove(b.envPath(app))
+			if err := os.Mkdir(b.envPath(app), 0o750); err != nil {
+				b.t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(b.envPath(app), "keep"), []byte("the console's"), 0o600); err != nil {
+				b.t.Fatal(err)
+			}
+			return nil
+		}
+	}
+	kept := func(b *testBox, app string) {
+		b.t.Helper()
+		if got, err := os.ReadFile(filepath.Join(b.envPath(app), "keep")); err != nil || string(got) != "the console's" {
+			b.t.Errorf("the console's directory at %s.env was not kept: %q %v", app, got, err)
+		}
+	}
+
+	t.Run("the swap's removal", func(t *testing.T) {
+		b, id := newSecretsBox(t)
+		before := b.repo.commitSecrets(b.v1, secrets{"example": {"KEY": encrypt(t, []byte("v"), id.Recipient())}}, &b.alice, b.base)
+		if r := b.pushOne(b.repo.bundleFiles(before, b.base)); r.Phase != phaseApplied {
+			t.Fatalf("setup: %+v", r)
+		}
+		head := b.repo.commitSecrets(b.v1, nil, &b.alice, before)
+		pushed := b.push(b.repo.bundleFiles(head, before))
+		race := raceDir(b, "example")
+		if err := b.run(hooks{fail: func(p string) error {
+			if p == "envfile:remove" {
+				return race(p)
+			}
+			return nil
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if r := b.result(pushed); r == nil || r.Phase != phaseUnknown || r.Error != fill(msgEnvChanged, "example") {
+			t.Fatalf("%+v", r)
+		}
+		kept(b, "example")
+	})
+
+	t.Run("the rollback's removal", func(t *testing.T) {
+		b, id := newSecretsBox(t)
+		head := b.repo.commitSecrets(boxFile(2, b.alice), secrets{"api": {"TOKEN": encrypt(t, []byte("t"), id.Recipient())}}, &b.alice, b.base)
+		pushed := b.push(b.repo.bundleFiles(head, b.base))
+		b.sd.reloads = []error{errReload}
+		race := raceDir(b, "api")
+		if err := b.run(hooks{fail: func(p string) error {
+			if p == "envfile:unlink" {
+				return race(p)
+			}
+			return nil
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if r := b.result(pushed); r == nil || r.Phase != phaseUnknown || r.Error != fill(msgEnvChanged, "api") {
+			t.Fatalf("%+v", r)
+		}
+		kept(b, "api")
+	})
+}
+
 // A console edit of an env file under the transaction is left as found,
 // `unknown`, in the catalogue's words for that file.
 func TestApplySecretsChangedDuringTransaction(t *testing.T) {

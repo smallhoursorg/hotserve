@@ -388,9 +388,38 @@ func (p *secretsPlan) into(t *txn) {
 // bytes renamed over the name, 0640 (rule 3), or the file removed.
 func (a *Applier) writeEnv(t *txn, e envEntry) error {
 	if e.NewSHA256 == "" {
-		return a.removeDurable("envfile:remove", a.envPath(e.App))
+		return a.unlinkDurable("envfile:remove", a.envPath(e.App))
 	}
 	return a.writeDurable("envfile:new", a.envPath(e.App), a.envTmp(e.App, t.rec.ID), t.nextEnv[e.App], 0o640)
+}
+
+// unlinkDurable removes one env file and fsyncs the directory. unlink(2)
+// refuses a directory, so whatever a console put at the name since the
+// transaction read it is never removed with what it holds: the write
+// fails, and the transaction then reads the file as at neither its prev
+// nor its new — the States table's `any` row, left as found. A missing
+// file is already removed; an unlink cannot fail for space, so a failure
+// is retried once, as removeDurable's is.
+func (a *Applier) unlinkDurable(point, path string) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if err = a.fail(point); err == nil {
+			if err = syscall.Unlink(path); errors.Is(err, fs.ErrNotExist) {
+				err = nil
+			}
+		}
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	a.crash(point)
+	return nil
 }
 
 // restoreEnv puts one env file back at its prev — its bytes, or no file
@@ -400,7 +429,7 @@ func (a *Applier) restoreEnv(t *txn, e envEntry) error {
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
 		if e.PrevSHA256 == "" {
-			err = a.removeDurable("envfile:unlink", a.envPath(e.App))
+			err = a.unlinkDurable("envfile:unlink", a.envPath(e.App))
 		} else {
 			err = a.writeDurable("envfile:prev", a.envPath(e.App), a.envTmp(e.App, t.rec.ID), e.Prev, 0o640)
 		}

@@ -659,7 +659,7 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	for _, f := range set {
 		if f.app != "" && !f.prev && t.env(f.app).PrevSHA256 != "" {
 			if err := a.restoreEnv(t, t.env(f.app)); err != nil {
-				return a.fullDisk(t, err, f.app)
+				return a.restoreFailed(t, f.app, err)
 			}
 		}
 	}
@@ -671,7 +671,7 @@ func (a *Applier) rollingBack(ctx context.Context, t *txn, recovering bool) erro
 	for _, f := range set {
 		if f.app != "" && !f.prev && t.env(f.app).PrevSHA256 == "" {
 			if err := a.restoreEnv(t, t.env(f.app)); err != nil {
-				return a.fullDisk(t, err, f.app)
+				return a.restoreFailed(t, f.app, err)
 			}
 		}
 	}
@@ -738,6 +738,19 @@ func (a *Applier) restore(t *txn) error {
 		return nil
 	}
 	return err
+}
+
+// restoreFailed settles an env file's write-back that failed: a console
+// put something at the name since the rollback read it — it now reads
+// as neither prev nor new, a directory say, which unlink refuses — and
+// it is left as found (the `any` row); otherwise the disk is full, and
+// the record stays for the next run.
+func (a *Applier) restoreFailed(t *txn, app string, err error) error {
+	if f, derr := a.state(t, app); derr == nil && !f.prev && !f.next {
+		a.changed(t, app)
+		return nil
+	}
+	return a.fullDisk(t, err, app)
 }
 
 // fullDisk is the one named full-disk end: the record and the entry
