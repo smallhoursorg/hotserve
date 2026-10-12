@@ -671,9 +671,11 @@ changes:
   nothing, so anyone with `contents:read` learns which apps have
   secrets, what they are called, how long each value is, and when it
   changed.
-- **New: harvest now, decrypt later.** The box's key is X25519 and so
-  are the readers' (SSH keys); age's post-quantum hybrid keys cannot
-  share a file with SSH-key recipients. Ciphertext kept for ever is
+- **New: harvest now, decrypt later.** The box's key is X25519, and
+  no reader key age takes from an SSH key is post-quantum either
+  (`ssh-ed25519` is wrapped through X25519, `ssh-rsa` with RSA-OAEP);
+  age's post-quantum hybrid keys cannot share a file with SSH-key
+  recipients. Ciphertext kept for ever is
   open to a future quantum computer; the path is every reader on an
   `age1pq` key and one rekey (box/DESIGN-box.md, Open questions).
 
@@ -1037,11 +1039,12 @@ does not isolate the runtime.
   choose knowingly.
 - **Secrets in the config repository are ciphertext for ever** (once
   built: box/DESIGN-box.md, "Secrets"). A reader's key file and a
-  clone decrypt every value in history, offline and unseen; removing a
+  clone decrypt every value ever encrypted to that key, offline and
+  unseen; removing a
   reader does not take back what was encrypted to them, so the remedy
   for a departure or a leak is new values. Names and lengths are
-  public to anyone who can read the repository. The keys are X25519,
-  not post-quantum. Each is the price of a repository-held secret that
+  public to anyone who can read the repository. No key involved is post-quantum
+  (X25519, and RSA for `ssh-rsa` readers). Each is the price of a repository-held secret that
   no CI and no service ever sees in plaintext.
 - **Sibling localhost ports** — closed for the contract: nothing
   hotserve runs listens on a port. Each instance binds a unix socket
@@ -1215,6 +1218,6 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-12 — Secrets through the config channel designed
   (box/DESIGN-box.md, "Secrets"): age files in the repository, root
   decrypts after every proof; new facts stated — a reader's key and a
-  clone decrypt all of history offline, names and lengths are public
-  to repository readers, X25519 is not post-quantum; the secrets
+  clone decrypt, offline, every value encrypted to it; names and
+  lengths are public to repository readers; no key is post-quantum; the secrets
   sudoers grant leaves when it is built.

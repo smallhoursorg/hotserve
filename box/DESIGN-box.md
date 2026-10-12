@@ -645,7 +645,7 @@ last. A set of the Caddyfile alone reads exactly as before.
 | record | `new_sha256` | applier | the incoming file's digest |
 | record | `secrets` | applier | one entry per env file in the set: `{app, prev, prev_sha256, new_sha256}` — `prev` the file's bytes before the push (base64; absent when there was no file), `prev_sha256` their digest (`""` when absent), `new_sha256` the rendered file's digest (`""` when the push removes it). The plaintext of I9's exception |
 | record | `secrets_tree`, `secrets_installed` | applier | HEAD's secrets tree id (`""` for none) and the `app → sha256` map of every env file the box manages once the push applies: what `applied.json` gets |
-| result | `secrets_added`, `secrets_changed`, `secrets_removed` | applier | the secrets the push adds, changes or removes, as `<app>/<VAR>`, sorted; never a value. A secret is changed when its value is, so a rekey that keeps the values lists none |
+| record, result | `secrets_added`, `secrets_changed`, `secrets_removed` | applier | the secrets the push adds, changes or removes, as `<app>/<VAR>`, sorted; never a value. In the record too, so a result recovery writes carries them A secret is changed when its value is, so a rekey that keeps the values lists none |
 | record, result | `secrets_edited_out_of_band` | applier | the apps whose env file root wrote or removed over bytes it had not installed — a digest differing from `applied.json`'s, a listed file gone, or a file it never installed for an app this push installs ("Values and the env file") |
 | record, result | `diff` | applier | unified diff, redacted (layers 3 and 4), capped per Caps |
 | record, result | `apps` | applier | app names from the incoming file's token walk: the global `liveswap` block's `app` lines whose name is in liveswap's app-name grammar (one outside it fails the load anyway), so a result's size stays under the handler's read cap |
@@ -1004,7 +1004,7 @@ Every numeric bound, in one place, with its reason.
 | one `systemctl is-active` | 30 s | PID 1 answers it from memory; past it the question is unanswered, never a state |
 | reload | hotserve.service's own 240 s; the applier's deadline on its `systemctl reload` is 300 s | the applier sets no shorter timeout: its own deadline only ends a `systemctl` that outlives the job it waits for |
 | `systemctl` output kept | 4 KiB | into the error text and nowhere else |
-| `txn.json` read back | 4 MiB today; 8 MiB with secrets *(proposed)* | `prev`'s 1 MiB is 1.4 MiB of base64, the diff's 64 KiB at most 384 KiB of JSON escapes, and the env files' previous bytes — a set holds at most 64 (32 apps written, 32 the previous push listed removed), each at most 65 KiB as root reads it, so 5.5 MiB of base64 — come to 7.3 MiB; only root writes it, so this is a bound, not a defence |
+| `txn.json` read back | 4 MiB today; 12 MiB with secrets *(proposed)* | the largest record root can write: `prev`'s 1 MiB is 1.4 MiB of base64; the diff's 64 KiB at most 384 KiB of JSON escapes; `apps`, names from a 1 MiB file, under 1 MiB; the env files' previous bytes — a set holds at most 64 (32 apps written, 32 the previous push listed removed), each at most 65 KiB as root reads it — 5.5 MiB of base64; the `secrets_*` names, 8192 at most of some 200 bytes, 1.6 MiB; the digests and framing, kilobytes. About 10 MiB in all, so every record root writes reads back; only root writes it, so this is a bound, not a defence |
 | diff handed to the redactor | 256 KiB (four times the diff's cap), cut at a line end | the cut after redaction never lands inside a token the redactor saw only half of |
 | line diff's edit distance | 512 | its memory is quadratic in the distance; past it the changed middle is one hunk, still a correct diff |
 | quoted input in a refusal | 300 bytes, quote-to-ASCII then rune-boundary cut | liveswap's `boundRefusal`, in that order; applies to every input-derived value without exception |
@@ -1180,9 +1180,10 @@ standard error. It holds an exclusive `flock` on `/etc/hotserve/age/`
 for its run, so two runs (postinstall and the console) never meet,
 and first removes any temporary a crashed run left — one may hold a
 private key nobody uses. It never overwrites: a new identity is
-written to a temporary in the same directory and linked to `identity`
-with `link(2)`, which fails if the name exists, then the temporary is
-removed and the directory fsynced. Over an existing identity it derives the recipient and
+written to a temporary in the same directory and fsynced, then linked
+to `identity` with `link(2)`, which fails if the name exists; then the
+temporary is removed and the directory fsynced (I8: a name never
+stands durable over bytes that are not). Over an existing identity it derives the recipient and
 rewrites `age.pub` only if it is missing or another key's. An identity
 that does not parse is refused and nothing is written ("Console
 commands").
@@ -1379,7 +1380,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `the Caddyfile this box runs lists no signer; hotserve init is the way back` | applier | fail |
 | 200 / poll | `no_change` | `the box already runs this Caddyfile` | applier | green |
 | 202 | `verified` | `verified; installing` | applier | poll, 30 min bound; then red naming `journalctl -u hotserve-box-apply` |
-| 200 / poll | `applied` | `loaded; running apps are not restarted` / `secrets installed; the Caddyfile is unchanged, nothing reloaded` (a set of env files alone) | applier | green |
+| 200 / poll | `applied` | `loaded; running apps are not restarted` / `secrets updated; the Caddyfile is unchanged, nothing reloaded` (a set of env files alone) | applier | green |
 | 422 / poll | `failed` | `the install failed before the Caddyfile changed: <error>; nothing changed` / `interrupted before the Caddyfile changed; nothing changed` / `the install failed before the box's files changed: <error>; nothing changed` / `interrupted before the box's files changed; nothing changed` (env files in the set) / `interrupted; the previous Caddyfile is on disk; hotserve is not running — systemctl reset-failed hotserve, then systemctl start hotserve, loads it` (the reset clears a `start-limit-hit`, which would refuse the start) / `the box has no record of this push; push again` | applier | red |
 | 422 / poll | `rolled_back` | `the reload failed; the previous Caddyfile is back and running — journalctl -u hotserve -n 50 on the box says why` / `a write after the first file changed failed; rolled back: the previous Caddyfile and env files are back` / `interrupted after the box's files changed; rolled back: the previous files are back` (env files in the set) / `the record could not be updated after a successful reload (disk full); rolled back to keep the file and the record consistent` / `the Caddyfile was swapped, then a write after the swap failed; rolled back: the previous Caddyfile is back and running` (the `swapped` record, or the swap's own `fsync`, failed; nothing was reloaded first) / `interrupted after the Caddyfile changed; rolled back: the previous Caddyfile is back and running` (recovery, after a crash past the swap) | applier | red |
 | 422 / poll | `unknown` | `the reload failed and so did the reload of the previous file; the previous file is on disk; journalctl -u hotserve` (the first reload failed) / `rolled back, but the reload of the previous file failed; the previous file is on disk; journalctl -u hotserve` (any other rollback) / `the Caddyfile changed during the transaction; it is left as found` / `the env file for <app> changed during the transaction; it is left as found` / `applied but the baseline could not be recorded; hotserve box baseline <sha> on the box records it (the next push then reports the file as edited out of band; it was not)` / `unchanged, but the baseline could not be recorded; push again, which records it` (a `no_change`: nothing changed, so the same chain verifies again) | applier | red; `box baseline` on the console, or for `unchanged` a push again |
@@ -1793,7 +1794,7 @@ sequenceDiagram
     A->>A: record applied, applied.json (secrets_tree, secrets), result applied, remove record and entry
 ```
 
-The run prints `secrets installed; the Caddyfile is unchanged, nothing
+The run prints `secrets updated; the Caddyfile is unchanged, nothing
 reloaded`, the variable that changed, and that the app reads it at its
 next launch.
 
@@ -1914,8 +1915,9 @@ disk is root's regardless); plain `crypto/sha1`; the guard of step 15
 checks presence, and reachability is the handler's alone; validate is a courtesy; a
 root-controlled environment can expand a value placeholder into
 anything; GitHub enforces nothing; a secret's name and length are
-the repository's to read; the box key is X25519, so ciphertext kept
-for ever is open to a future quantum computer (Open question 6).
+the repository's to read; no key a secret is encrypted to is
+post-quantum, so ciphertext kept for ever is open to a future quantum
+computer (Open question 6).
 
 ## Decisions and rejected alternatives
 
@@ -1939,7 +1941,7 @@ for ever is open to a future quantum computer (Open question 6).
 | age, through `filippo.io/age` | SOPS's Go library; SOPS's file format read by code of our own | Measured 2026-10-12 against `./cmd/hotserve`'s 176 modules: age adds 2 (`filippo.io/age` v1.3.2, `filippo.io/hpke` v0.4.0; `x/crypto` and `x/sys` are already linked), 16 packages. SOPS's library adds 80 (the AWS SDK's twenty, Vault, Google Cloud and Azure KMS, a Postgres and a MongoDB driver, PGP) to a binary root runs; its narrowest decrypt path, 79. A reader of SOPS's format of our own keeps the graph small but is a format we would track and do not control, and Debian 13 packages `age` (1.2.1), not `sops`. |
 | One age file per variable, names in the clear | One age file per app, names hidden | A pull request shows which variable was added, changed or removed; CI checks names and sizes before merge with no key; the template takes one value at a prompt that does not echo and pipes it to age, so plaintext never touches the laptop's disk, where a whole file would be edited as a plaintext temporary. Two branches that change different variables merge. The cost: names and lengths are the repository's to read. |
 | A classic X25519 box key | A post-quantum hybrid key (ML-KEM-768 + X25519, age v1.3's `age1pq`) | age refuses to mix a post-quantum recipient with SSH-key recipients in one file, and the readers are the signers' SSH keys. Open question 6. |
-| The previous bytes of each env file in the record | Hard-link each previous file aside in `secrets/` | One durable artifact recovery reasons from (I8), as the Caddyfile's `prev` already is; a second artifact would need crash rows of its own. The cost: the record's read cap, 8 MiB. |
+| The previous bytes of each env file in the record | Hard-link each previous file aside in `secrets/` | One durable artifact recovery reasons from (I8), as the Caddyfile's `prev` already is; a second artifact would need crash rows of its own. The cost: the record's read cap, 12 MiB. |
 | A set of env files alone reloads nothing | Reload anyway | hotserve reads an env file at an app's launch, never at a load ("Running apps are never restarted", after the trust chain). |
 | No relaunch after a secrets change | Relaunch each app whose secrets changed | liveswap refuses a deploy, and a rollback, to the running version, so it would be a liveswap feature of its own, and root asking the serving process for it would be root consuming its word (backups' D10). Open question 4. |
 | Readers per box, in each box's `recipients` | One list of readers for the repository | A person may read one box's secrets and not another's; signers must match across boxes because every commit is on every box's chain, and readers have no such cause. |
