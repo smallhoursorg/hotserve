@@ -27,15 +27,17 @@ license: Apache-2.0
 # gives that manager its runtime directory; without libpam-systemd it
 # cannot start at all. dbus: loginctl (lingering) needs the system bus.
 depends:
-  # No systemd version floor is declared even though the sandbox needs
-  # 256+ (Debian 13 ships 257): the per-app sandbox is probe-gated at
-  # runtime rather than at install, so a host that cannot deliver it
-  # still installs — and then refuses to start, naming what the host
-  # lacks; there is no setting that runs apps without the sandbox. A
-  # version floor here would refuse the install instead, which is the
-  # worse of the two — the probe, not the package manager, is what
-  # knows whether this kernel permits the namespaces
-  # (DESIGN-threat-model.md, "The shared-UID rule").
+  # Every app unit gets PrivatePIDs=, which systemd 257 added
+  # (systemd.exec(5)), and no setting runs an app without it. The floor
+  # lets apt refuse an older release (Debian 11 and 12, Ubuntu 24.04)
+  # at install. Without it such a box installs and serves the starter
+  # page, which leaves liveswap off. The failure would then come only
+  # when the box's own config first turns liveswap on, as `hotserve
+  # init`'s reload fails. A version is all apt can see. Whether the
+  # kernel permits the namespaces (a container, an LXC VPS, an LSM that
+  # refuses them) is still for the sandbox probe to measure when
+  # liveswap starts (liveswap/sandbox.go, probeSandboxCapability).
+  - systemd (>= 257)
   - libpam-systemd
   - dbus
   # The box applier and the box_webhook handler verify each commit's

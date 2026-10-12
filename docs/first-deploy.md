@@ -105,16 +105,23 @@ Check it:
 ```sh
 systemctl status hotserve          # active (running); type q to exit
 curl -s localhost                  # "hotserve is running. To serve your apps: hotserve init …"
+systemd-detect-virt --container    # none
 ```
+
+If it is not running, `journalctl -u hotserve -n 50` says why.
+
+The step 1 check happens here, in two parts. On a release older than
+Debian 13, `apt install` refuses: hotserve depends on
+`systemd (>= 257)`, the version each app's sandbox is built on. apt
+cannot see a container, so the last line checks for one: `none` means
+a virtual machine; `lxc`, `openvz` or any other name is a container,
+the kind of host step 1 warns about. Either way the fix is a different
+host, not a setting.
 
 (The deploy side, liveswap, is not running yet: the starter config
 leaves it commented out. It starts, and says so in the journal, in
-step 3, when the box's own config replaces the starter.)
-
-If it is not running, `journalctl -u hotserve -n 50` says why. A host
-that cannot deliver the sandbox is refused here, with the missing piece
-named; that is the step 1 check, and the fix is a different host, not
-a setting.
+step 3, when the box's own config replaces the starter. That start is
+where the sandbox is first tried for real.)
 
 ## 3. The box's config, in git
 
@@ -309,7 +316,10 @@ unreachable by its own channel — and a directory not named for that
 site. Otherwise it installs the file over the starter config and
 reloads hotserve. A file that does not load is put back, the starter
 keeps serving, and `init` says so; `journalctl -u hotserve -n 50` on
-the box says why. Fix it, commit, and run both lines again.
+the box says why. Fix it, commit, and run both lines again. The reload
+is also liveswap's first start, which tries the sandbox: on a host
+that cannot give one, the journal names what is missing, and the fix
+is a different host, not the file.
 
 **Push:**
 

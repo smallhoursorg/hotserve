@@ -15,7 +15,7 @@ import (
 
 // Per-app sandboxing (issue #35) is systemd's own per-unit sandboxing
 // on the user-manager runner: a user namespace (PrivateUsers=) plus a
-// PID namespace (PrivatePIDs=, systemd 256+) on top of the mount,
+// PID namespace (PrivatePIDs=, systemd 257+) on top of the mount,
 // device, cgroup, seccomp and capability set.
 //
 // The user namespace is what closes /proc/<pid>/{root,environ,cwd} of
@@ -482,7 +482,7 @@ func probeSandboxCapability(r runner) error {
 		err = attempt()
 	}
 	if err != nil {
-		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13 (systemd 257): PrivatePIDs= needs systemd 256 and both namespaces need a kernel that permits them", err)
+		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13: PrivatePIDs= needs systemd 257, and both namespaces need a kernel that permits them", err)
 	}
 	return nil
 }

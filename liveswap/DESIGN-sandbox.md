@@ -326,8 +326,11 @@ watcher, where no synchronous hook can see it.
 the systemd semantics so the invalidation is not reinvented.
 
 **Packaging.** `postinstall.sh` enables linger for the hotserve user so
-its manager runs without a session. Nothing else: there is no runtime
-dependency and no profile to install.
+its manager runs without a session. The `.deb` depends on
+`systemd (>= 257)`, the release that added `PrivatePIDs=`, so apt
+refuses an older release at install rather than letting it fail when
+liveswap first starts. That floor is not the check: the probe above
+still decides. There is no profile to install.
 
 ## Availability dependency
 

@@ -32,17 +32,21 @@ service running as the `hotserve` user, a starter config at
 user that stays up without anyone logging in — the thing your apps
 will run under.
 
-**Supported: Debian 13, on a real virtual machine.** hotserve installs
-on other systemd distributions, but nothing else is tested, and a host
-that cannot deliver the per-app sandbox — many LXC-based and other
-container-style servers — refuses to start rather than serving
-something weaker; [liveswap/README.md](liveswap/README.md#sandbox)
+**Supported: Debian 13, on a real virtual machine.** The package
+refuses to install where systemd is older than 257 (Debian 12, Ubuntu
+24.04): each app's sandbox needs it. It installs on other Debian-based
+distributions with systemd 257 or newer, but nothing else is tested.
+On a host that cannot deliver the per-app sandbox — many LXC-based and
+other container-style servers — hotserve refuses a config that runs
+apps rather than serving something weaker; [liveswap/README.md](liveswap/README.md#sandbox)
 has what a host has to provide.
 
-The package depends on `libpam-systemd` and `dbus`, both present on a
-stock Debian server: liveswap runs your apps as systemd units under
-the `hotserve` user's own service manager, which needs `pam_systemd`
-to start and `loginctl` to stay alive without a login.
+The package also depends on `libpam-systemd`, `dbus` and
+`openssh-client`, all present on a stock Debian server: liveswap runs
+your apps as systemd units under the `hotserve` user's own service
+manager, which needs `pam_systemd` to start and `loginctl` to stay
+alive without a login, and the box checks each config commit's SSH
+signature with `ssh-keygen`.
 
 <details>
 <summary><b>Without the package</b> — the raw binary, for other systemd hosts</summary>
