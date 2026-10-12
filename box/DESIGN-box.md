@@ -1281,7 +1281,7 @@ What root does with what is already there, per app:
 
 | On disk | HEAD has secrets for the app | HEAD has none for it |
 |---|---|---|
-| `<app>.env`, listed in `applied.json` at the digest it records | rewritten if the rendered bytes differ, or if its mode or owner is not the applier's (then named out of band too) | removed |
+| `<app>.env`, listed in `applied.json` at the digest it records | rewritten if the rendered bytes differ, or if its mode or owner is not the applier's (then named out of band too) | removed, and named out of band if its mode or owner is not the applier's |
 | `<app>.env` listed in `applied.json`, at another digest (a console edit, a disk fault) or absent | HEAD's bytes written, the app named in `secrets_edited_out_of_band`, as step 10's flag reports a Caddyfile edit | removed if a regular file, named the same way; a link at the name is not the box's and is left alone, named |
 | `<app>.env`, not listed in `applied.json` (a console made it) | overwritten with HEAD's bytes if they differ or its mode or owner is not the applier's, named the same way; listed from then on | left alone, never listed |
 | no file, none listed | written | — |

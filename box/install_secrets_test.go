@@ -858,6 +858,46 @@ func TestApplySecretsRacedDirectoryIsKept(t *testing.T) {
 	})
 }
 
+// The sweep of the env files' temporaries removes only the exact shape
+// root writes, a regular file, and nothing through a secretsDir that is
+// a link.
+func TestEnvTempSweep(t *testing.T) {
+	b, _ := newSecretsBox(t)
+	id := strings.Repeat("ab", 16)
+	ours := ".example.env.box-" + id
+	keep := []string{".notes.env.box-backup", ".Example.env.box-" + id, "example.env.box-" + id, ".x.env.box-" + strings.Repeat("A", 32)}
+	for _, n := range append([]string{ours}, keep...) {
+		if err := os.WriteFile(b.path(secretsDir+"/"+n), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.applier(hooks{}).removeEnvTemps("")
+	if _, err := os.Lstat(b.path(secretsDir + "/" + ours)); err == nil {
+		t.Error("the swap's temporary was left")
+	}
+	for _, n := range keep {
+		if _, err := os.Lstat(b.path(secretsDir + "/" + n)); err != nil {
+			t.Errorf("%s was removed", n)
+		}
+	}
+
+	// A link at secretsDir: nothing is removed through it.
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(elsewhere, ours), []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(b.path(secretsDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, b.path(secretsDir)); err != nil {
+		t.Fatal(err)
+	}
+	b.applier(hooks{}).removeEnvTemps("")
+	if _, err := os.Lstat(filepath.Join(elsewhere, ours)); err != nil {
+		t.Error("the sweep followed a link at secretsDir")
+	}
+}
+
 // A console edit of an env file under the transaction is left as found,
 // `unknown`, in the catalogue's words for that file.
 func TestApplySecretsChangedDuringTransaction(t *testing.T) {

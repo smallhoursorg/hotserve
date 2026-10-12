@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -290,7 +291,7 @@ func (a *Applier) planSecrets(s *proof.Secrets, base *applied, caddyfile string)
 		if err != nil {
 			return nil, err
 		}
-		if !cur.regular || digest(cur.data) != base.Secrets[app] {
+		if !cur.regular || digest(cur.data) != base.Secrets[app] || !cur.ours {
 			p.oob = append(p.oob, app)
 		}
 		if !cur.regular {
@@ -443,16 +444,33 @@ func (a *Applier) restoreEnv(t *txn, e envEntry) error {
 	return err
 }
 
-// removeEnvTemps removes the env files' temporaries matching pattern in
-// secretsDir: the swap's for one id, or every one a crash left. Not
-// writes recovery reasons from: their bytes are never read.
-func (a *Applier) removeEnvTemps(pattern string) {
-	names, err := filepath.Glob(filepath.Join(a.secretsPath(), pattern))
+// envTempName is the shape of the swap's temporary for an env file,
+// `.<app>.env.box-<id>` (envTmp): the app and the request id captured.
+var envTempName = regexp.MustCompile(`^\.(.+)\.env\.box-([0-9a-f]{32})$`)
+
+// removeEnvTemps removes the env files' temporaries in secretsDir — the
+// swap's for one id, or (id "") every one a crash left — and nothing
+// else (rule 1): only a regular file whose name is the temporary's exact
+// shape, an app in the grammar and a request id, is removed, so a name a
+// console made that merely looks like one stays. A secretsDir that is
+// not a directory — a link, say — is not root's store, and nothing is
+// removed through it. Not writes recovery reasons from: their bytes are
+// never read.
+func (a *Applier) removeEnvTemps(id string) {
+	dir := a.secretsPath()
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	for _, p := range names {
-		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	for _, e := range entries {
+		m := envTempName.FindStringSubmatch(e.Name())
+		if m == nil || !appName.MatchString(m[1]) || (id != "" && m[2] != id) || !e.Type().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			a.logger.Warn("box: could not remove a temporary", zap.String("error", proof.Bound(err.Error())))
 		}
 	}
