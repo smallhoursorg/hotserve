@@ -924,12 +924,9 @@ Notes that the table cannot hold:
 - `/etc/hotserve/age/` is 0700 so that the identity is root's alone
   whatever mode a console writes it with: the hotserve uid is every
   app's uid too ("The box's key").
-- Nothing is at `/etc/hotserve/Caddyfile.prev` or `Caddyfile.new`:
-  an earlier template's `bin/push` and its sudoers lines (`tee`,
-  `mv -f`, `rm -f` on exactly those names) wrote them, and on a box
-  that still has those lines an administrator could `tee` over a
-  temporary of that name in the window before the rename. The applier's temporary is
-  `.Caddyfile.box-<id>`, a name no sudoers line grants.
+- The applier's temporary, `.Caddyfile.box-<id>`, is beside the file,
+  so the rename over it is atomic; recovery removes a crash's by the
+  `.Caddyfile.box-` prefix (`sweepTemporaries`).
 - `/var/lib/hotserve-box` joins `sandboxHotservePaths`
   (liveswap/sandbox.go): never a bind source for an app.
 - The applier reaches `stage/` and anything the hotserve uid created

@@ -90,8 +90,10 @@ func (a *Applier) x(name string) string { return filepath.Join(a.root, exchangeD
 
 func (a *Applier) caddyfile() string { return filepath.Join(a.root, installedFile) }
 
-// caddyfileTmp is the swap's temporary, `.Caddyfile.box-<id>`: a name
-// no sudoers line of bin/push grants (DESIGN-box.md, Paths notes).
+// caddyfileTmp is the swap's temporary, `.Caddyfile.box-<id>`: beside
+// the file, so the rename over it is atomic, and a dot-name whose
+// prefix recovery sweeps after a crash (sweepTemporaries; DESIGN-box.md,
+// Paths notes).
 func (a *Applier) caddyfileTmp(id string) string {
 	return filepath.Join(filepath.Dir(a.caddyfile()), ".Caddyfile.box-"+id)
 }

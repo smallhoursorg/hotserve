@@ -1165,4 +1165,32 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("exit %d\n%s", code, out)
 		}
 	})
+
+	t.Run("a box's file is a regular file", func(t *testing.T) {
+		g := newApplyRig(t)
+		// An executable file is a regular one; a second box sharing the
+		// first's file through a symlink is named, and nothing is sent
+		// to it.
+		if err := os.Chmod(filepath.Join(g.dir, boxFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(g.dir, "deploy2.example.com"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../"+boxFile, filepath.Join(g.dir, "deploy2.example.com", "Caddyfile")); err != nil {
+			t.Fatal(err)
+		}
+		head := g.change("both")
+		second := newStandIn(t, head, nil)
+		g.route(map[string]*standIn{"deploy.example.com": g.box, "deploy2.example.com": second})
+		const said = "deploy2.example.com/Caddyfile is a symlink: a box's file is a regular file (the box refuses one; make check says the same)"
+		out, code := g.apply()
+		if code != 1 || !strings.Contains(out, said) || g.box.seen().baseline != head || second.seen().bundles != 0 {
+			t.Fatalf("exit %d\n%s", code, out)
+		}
+		// By directory, as an operator might type it.
+		if out, code := g.runArgs([]string{"deploy2.example.com"}); code != 1 || !strings.Contains(out, said) || second.seen().bundles != 0 {
+			t.Fatalf("by directory: exit %d\n%s", code, out)
+		}
+	})
 }

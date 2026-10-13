@@ -49,8 +49,11 @@ cd "$(dirname "$0")/.."
 HOTSERVE=${HOTSERVE:-hotserve}
 audience=${HOTSERVE_AUDIENCE:-hotserve}
 actions=${GITHUB_ACTIONS:-}
-# A request's bound. A push's is longer: the box answers a POST within
-# 30 s once it has the bundle, but checking a long chain takes longer.
+# A request's bound. A push's (post) is 600 s: before the box waits up
+# to 30 s for the first result, it checks the chain, validates and
+# adapts the file, bounded at 10 minutes, 120 s and 120 s
+# (box/DESIGN-box.md, Caps), though a legitimate push takes seconds. A
+# POST cut short is no answer, and the poll asks for its result.
 maxtime=60
 # How long a push is waited for, polled or held off by another pending
 # one: past root's worst case (box/DESIGN-box.md, Caps, "workflow poll").
@@ -358,6 +361,14 @@ once() {
 
 # send: one box, $box, from HEAD's $path.
 send() {
+	# A regular file, by its mode in the tree, as the box holds it
+	# (ProveFile): a symlink is a blob too, and its text is a path.
+	case $(git ls-tree --full-tree "$head" -- "$path" | cut -d ' ' -f 1) in
+	100644|100755) ;;
+	120000) red "$path is a symlink: a box's file is a regular file (the box refuses one; make check says the same)"; return 0 ;;
+	'') red "$path is not in HEAD"; return 0 ;;
+	*) red "$path is not a file: a box's file is a regular file"; return 0 ;;
+	esac
 	git cat-file blob "$head:$path" >"$tmpd/Caddyfile" || { red "$path is not in HEAD"; return 0; }
 	url=$("$HOTSERVE" box webhook "$tmpd/Caddyfile" 2>"$tmpd/err") || { red "$path: $(cat "$tmpd/err")"; return 0; }
 
@@ -543,6 +554,7 @@ if [ $# -gt 0 ]; then
 	esac
 	boxes=$d/Caddyfile
 else
+	# A symlink is a blob too: found here, and named by send().
 	boxes=$(git ls-tree --name-only HEAD | while read -r d; do
 		[ "$(git cat-file -t "HEAD:$d/Caddyfile" 2>/dev/null)" = blob ] && echo "$d/Caddyfile"
 	done || true)
