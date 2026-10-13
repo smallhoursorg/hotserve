@@ -2186,7 +2186,7 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-10 — PR 5 (the template): `examples/box` holds one
   `<host>/Caddyfile` and `bin/signer`, `bin/check`, `bin/apply` behind
   `make signer`, `make check` and the workflow; `bin/push` and its
-  sudoers lines are gone, the secrets lines stay until PR 7. Added
+  sudoers lines are gone. Added
   here: `hotserve box describe`, and the rule that every box in a
   repository lists the same signer keys.
 - 2026-10-11 — "Why 202 and a poll": the reload deadlock it gave as
@@ -2209,3 +2209,9 @@ Dated one-liners; the full text of each is in git.
   push of secrets alone reloads nothing; the box key made by
   postinstall, `init` and `hotserve box key`; age, not SOPS (measured);
   readers are the signers' SSH keys, per box.
+- 2026-10-13 — PR 7e2 (the template's side of secrets): `bin/apply`
+  sends the secrets' trees and blobs once it has compared the box's key
+  with `recipients`, and says what the box did with them; `make check`
+  reads `describe`'s secrets lines. The template's sudoers file and its
+  e2e suite are gone: secrets are commits, and an administrator is an
+  account in `adm`, for the journal alone.

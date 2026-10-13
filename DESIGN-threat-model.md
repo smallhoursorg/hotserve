@@ -559,10 +559,11 @@ the template, and with it the only account that could change config
 (a box that installed the earlier file keeps those lines until it is
 replaced, as the template's README says). The `HOTSERVE_SECRETS` half
 (a root `install` that creates `/etc/hotserve/<app>.env` 0640
-root:hotserve, and `sudoedit` of it) stays, for an administrator where
-one is set up, until secrets ride this channel (below); then it leaves
-the template too, and an administrator is an account for the journal
-alone. A leaked PAT, a
+root:hotserve, and `sudoedit` of it) is gone from the template too:
+secrets ride this channel (below), so no account on the box is given a
+way to write one, and an administrator is an account in `adm`, for the
+journal alone (a box that installed the earlier file keeps its lines
+until they are removed). A leaked PAT, a
 stolen GitHub session or an OAuth app with `contents:write` can push
 to `main` and cannot produce the signature, so it cannot change the
 box with anything a signer did not sign: its own commit is refused on
@@ -1219,5 +1220,7 @@ Dated one-liners; the full text of each is in git.
   (box/DESIGN-box.md, "Secrets"): age files in the repository, root
   decrypts after every proof; new facts stated — a reader's key and a
   clone decrypt, offline, every value encrypted to it; names and
-  lengths are public to repository readers; no key is post-quantum; the secrets
-  sudoers grant leaves when it is built.
+  lengths are public to repository readers; no key is post-quantum.
+- 2026-10-13 — The template's secrets grant is gone (box PR 7e2):
+  secrets are commits in the config repository, and an administrator
+  is an account in `adm`, for the journal alone.
