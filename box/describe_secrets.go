@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"filippo.io/age"
 	"filippo.io/age/agessh"
@@ -61,8 +62,11 @@ const (
 	warnSecretVars = proof.MaxSecretVars * 3 / 4
 	warnEnvFile    = maxEnvFile * 3 / 4
 	warnCiphertext = proof.MaxBundle * 3 / 4
-	// maxRecipientsFile bounds the recipients file as describe reads it.
-	maxRecipientsFile = 1 << 20
+	// age's own bounds on a recipients file (cmd/age, parseRecipientsFile):
+	// the file, a recipient's line, and any line, which its scanner reads.
+	maxRecipientsFile = 16 << 20
+	maxRecipientLine  = 8 << 10
+	maxScannedLine    = bufio.MaxScanTokenSize
 )
 
 // readTreeSecrets reads the secrets beside the Caddyfile at caddyfile, a
@@ -383,21 +387,36 @@ var agePluginLine = regexp.MustCompile(`^age1[a-z0-9]+1[qpzry9x8gf2tvdw0s3jn54kh
 
 // countRecipients reads a recipients file as age does — one recipient a
 // line, read as it is (no space trimmed), a line that is empty or starts
-// with `#` skipped — and counts the recipients. There must be one, and
-// the first must be the box's key, an X25519 recipient ("The box's
-// key"); every other an SSH key age encrypts to, or an age recipient.
+// with `#` skipped, within age's bounds on the file and its lines — and
+// counts the recipients. There must be one, and the first must be the
+// box's key, an X25519 recipient ("The box's key"); every other an SSH
+// key age encrypts to, or an age recipient.
 func countRecipients(path, shown string, ts *treeSecrets) (int, error) {
 	data, err := readFile(path, maxRecipientsFile, false)
-	if err != nil {
+	var big *tooLargeError
+	switch {
+	case errors.As(err, &big):
+		return 0, refused("%s is over %d bytes, more than age reads of a recipients file", shown, maxRecipientsFile)
+	case err != nil:
 		return 0, err
 	}
 	n := 0
 	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 0, 64<<10), maxRecipientsFile)
-	for line := 1; sc.Scan(); line++ {
+	sc.Buffer(make([]byte, 0, 4<<10), maxScannedLine)
+	line := 0
+	for sc.Scan() {
+		line++
 		s := sc.Text()
 		if s == "" || strings.HasPrefix(s, "#") {
 			continue
+		}
+		switch {
+		case !utf8.ValidString(s):
+			return 0, refused("%s:%d: not UTF-8, which age refuses in a recipients file", shown, line)
+		case len(s) > maxRecipientLine:
+			return 0, refused("%s:%d: over %d bytes, longer than age reads a recipient's line", shown, line, maxRecipientLine)
+		case strings.HasPrefix(s, "AGE-"):
+			return 0, refused("%s:%d: an age identity, a private key, not a recipient: remove it, and make a new key for whoever it was", shown, line)
 		}
 		// A line's CR is the scanner's to drop, as age's own scanner does;
 		// a space is the recipient's, which age then cannot parse.
@@ -431,6 +450,9 @@ func countRecipients(path, shown string, ts *treeSecrets) (int, error) {
 		n++
 	}
 	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return 0, refused("%s:%d: over %d bytes, longer than age reads a line", shown, line+1, maxScannedLine)
+		}
 		return 0, err
 	}
 	if n == 0 {

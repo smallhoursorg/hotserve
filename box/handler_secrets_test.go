@@ -235,6 +235,13 @@ func TestDescribeSecrets(t *testing.T) {
 		"a mistyped reader's key":          {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\n" + mistyped(reader.Recipient().String()) + "\n"), "example/KEY.age": enc("v")}, "recipients:2: not a recipient age encrypts to"},
 		"a trailing space":                 {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + " \n"), "example/KEY.age": enc("v")}, "recipients:1: a space or tab at the line's start or end"},
 		"a recipients file with none":      {reads, map[string][]byte{"recipients": []byte("# the box\n"), "example/KEY.age": enc("v")}, "secrets/recipients has no recipient"},
+		// age's own bounds on the file and its lines, and its refusal of
+		// a private key among the recipients
+		"an identity among them":        {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\n" + reader.String() + "\n"), "example/KEY.age": enc("v")}, "recipients:2: an age identity, a private key"},
+		"a recipient's line over 8 KiB": {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\nssh-ed25519 " + strings.Repeat("A", 9000) + "\n"), "example/KEY.age": enc("v")}, "recipients:2: over 8192 bytes"},
+		"a line over 64 KiB":            {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\n#" + strings.Repeat("x", 70000) + "\n"), "example/KEY.age": enc("v")}, "recipients:2: over 65536 bytes"},
+		"a line not UTF-8":              {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\n\xff\n"), "example/KEY.age": enc("v")}, "recipients:2: not UTF-8"},
+		"a file over 16 MiB":            {reads, map[string][]byte{"recipients": []byte(box.Recipient().String() + "\n" + strings.Repeat("#\n", 8<<20)), "example/KEY.age": enc("v")}, "secrets/recipients is over 16777216 bytes"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeTree(t, c.file, c.files)

@@ -1330,7 +1330,7 @@ now: a deploy of a new version. Open question 4.
 | the layout and the proof (step 13) | yes | the layout, read from the directory by the proof's own rules (`proof.SecretsLayout`, `proof.AppLayout`) | yes |
 | decryption and the value rules (15a) | no: it cannot read the key | sizes and counts only, from the ciphertext: a value's length to within 2 bytes | yes |
 | the consistency checks below | yes, a 422 | yes, exit 1, and each 75% warning as a `warning` line | no |
-| `recipients` parses, and its first recipient is an X25519 `age1…` | — | yes | — (never read) |
+| `recipients` parses as age reads it, within age's own bounds (16 MiB a file, 8 KiB a recipient's line, no identity among them), and its first recipient is an X25519 `age1…` | — | yes | — (never read) |
 | the box's key is `recipients`' first | — | — | — (the workflow, against `GET /`) |
 
 The consistency checks read the token walk of the new file (it already
