@@ -241,6 +241,9 @@ func describe(path string, w io.Writer) error {
 	if err := secretsFit(shape, ts.secrets, path); err != nil {
 		return err
 	}
+	if err := ts.measure(); err != nil {
+		return err
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "host %s\n", shape.Host)
 	for _, app := range shape.Apps {

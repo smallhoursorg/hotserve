@@ -9,6 +9,7 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"unicode/utf8"
 
 	"go.uber.org/zap"
@@ -97,8 +98,11 @@ const maxRecord = 16 << 20
 // carry.
 const maxSecretNames = proof.MaxBlobs
 
-// valid holds a record read back to the shape only the applier and
-// `init` write. One that is not is never acted on (recoverAll).
+// valid is the one validator of txn.json (DESIGN-box.md, "Record and
+// result fields": the relations F1–F9): writeRecord holds what root
+// writes to it, and readRecord what it reads back, so a record that
+// would not read is never written and one that does not read is never
+// acted on (recoverAll).
 func (r *record) valid() error {
 	switch {
 	case r.Origin != originApplier && r.Origin != originInit:
@@ -117,31 +121,27 @@ func (r *record) valid() error {
 	if _, err := proof.SplitPath(r.Path); err != nil {
 		return errors.New("path is not a repository path")
 	}
-	if err := r.validSecrets(); err != nil {
-		return err
-	}
+	changes := len(r.SecretsAdded) + len(r.SecretsChanged) + len(r.SecretsRemoved)
+	// F1: a record's phase; a no_change's set is empty. Recovery writes
+	// applied.json with new_sha256, which must then be the bytes that
+	// stand.
 	switch r.Phase {
 	case phaseNoChange:
-		// Buffers identical and no env file in the set, by definition:
-		// recovery writes applied.json with new_sha256, which must then
-		// be the bytes that stand.
 		if r.NewSHA256 != r.PrevSHA256 {
 			return errors.New("a no_change record whose digests differ")
 		}
-		if len(r.Secrets) > 0 {
+		if len(r.Secrets) > 0 || changes > 0 {
 			return errors.New("a no_change record with env files in its set")
 		}
-		return nil
 	case phaseInstalling, phaseSwapped, phaseApplied, phaseRollingBack:
-		return nil
+	default:
+		return errors.New("phase is not a record's")
 	}
-	return errors.New("phase is not a record's")
-}
-
-// validSecrets is valid for the record's secrets: each entry an app in
-// the grammar, once, in order, its prev the bytes its digest names, and
-// a change in it; the rest in their grammars and caps.
-func (r *record) validSecrets() error {
+	// F2: init's set is the Caddyfile alone.
+	if r.Origin == originInit && (len(r.Secrets) > 0 || changes > 0) {
+		return errors.New("an init record with env files in its set")
+	}
+	// F3, F4: the set's env files.
 	if len(r.Secrets) > 2*proof.MaxSecretApps {
 		return errors.New("more env files than a set holds")
 	}
@@ -157,34 +157,58 @@ func (r *record) validSecrets() error {
 			return errors.New("an env file's digest is not 64 hex")
 		}
 	}
-	if r.SecretsTree != "" && !proof.IsID(r.SecretsTree) {
-		return errors.New("secrets_tree is not 40 hex")
-	}
-	if err := validInstalled(r.SecretsInstalled); err != nil {
+	// F5, F6: what applied.json will get.
+	if err := validManaged(r.SecretsTree, r.SecretsInstalled); err != nil {
 		return err
 	}
+	// F7: what applied.json will list agrees with the set — recovery
+	// writes applied.json from secrets_installed, so a record in which
+	// they disagree never reaches the baseline.
+	for _, e := range r.Secrets {
+		if d, listed := r.SecretsInstalled[e.App]; listed != (e.NewSHA256 != "") || (listed && d != e.NewSHA256) {
+			return errors.New("secrets_installed disagrees with the set's env files")
+		}
+	}
+	// F8: a value changes only in a file the set writes or removes, and
+	// new values only for an app HEAD has.
+	inSet := make(map[string]bool, len(r.Secrets))
+	for _, e := range r.Secrets {
+		inSet[e.App] = true
+	}
+	for i, names := range [][]string{r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved} {
+		for _, n := range names {
+			app, _, _ := strings.Cut(n, "/")
+			if !inSet[app] || (i < 2 && r.SecretsInstalled[app] == "") {
+				return errors.New("a secret named for an app whose env file the set does not change")
+			}
+		}
+	}
+	// F9.
 	if !validNameLists(r.SecretsAdded, r.SecretsChanged, r.SecretsRemoved, r.SecretsOutOfBand) {
 		return errors.New("the secrets' names are not <app>/<VAR>, or the apps out of band not app names")
 	}
 	return nil
 }
 
-// validNameLists holds a record's or a result's secrets fields to what
-// root writes: the added, changed and removed lists each within its cap
-// and each name `<app>/<VAR>`; the apps out of band app names, at most
-// a set's worth.
-func validNameLists(added, changed, removed, oob []string) bool {
-	for _, names := range [][]string{added, changed, removed} {
-		if !validSecretNames(names) {
-			return false
-		}
+// valid is the one validator of applied.json (F5, F6), held by
+// readApplied to what it reads and by putApplied to what root writes —
+// the applier's, init's, baseline's and recovery's writes alike.
+func (a *applied) valid() error {
+	if !proof.IsID(a.SHA) {
+		return errors.New("sha is not a 40-hex commit id")
 	}
-	return len(oob) <= 2*proof.MaxSecretApps && !slices.ContainsFunc(oob, func(s string) bool { return !appName.MatchString(s) })
+	return validManaged(a.SecretsTree, a.Secrets)
 }
 
-// validInstalled holds an app → digest map of managed env files, as
-// the record and applied.json carry it, to the grammar and the cap.
-func validInstalled(m map[string]string) error {
+// validManaged holds a secrets tree and the app → digest map of the env
+// files the box manages, as the record and applied.json carry them: the
+// tree "" or 40 hex; at most 32 apps in the grammar, each at a digest
+// (F5); and env files listed only beside a tree (F6), since they come
+// only from a commit with secrets.
+func validManaged(tree string, m map[string]string) error {
+	if tree != "" && !proof.IsID(tree) {
+		return errors.New("secrets_tree is not 40 hex")
+	}
 	if len(m) > proof.MaxSecretApps {
 		return errors.New("more env files listed than apps may have secrets")
 	}
@@ -193,7 +217,23 @@ func validInstalled(m map[string]string) error {
 			return errors.New("an env file listed is not an app and a digest")
 		}
 	}
+	if len(m) > 0 && tree == "" {
+		return errors.New("env files listed with no secrets_tree")
+	}
 	return nil
+}
+
+// validNameLists holds a record's or a result's secrets fields to what
+// root writes (F9): the added, changed and removed lists each within its
+// cap and each name `<app>/<VAR>`; the apps out of band app names, at
+// most a set's worth.
+func validNameLists(added, changed, removed, oob []string) bool {
+	for _, names := range [][]string{added, changed, removed} {
+		if !validSecretNames(names) {
+			return false
+		}
+	}
+	return len(oob) <= 2*proof.MaxSecretApps && !slices.ContainsFunc(oob, func(s string) bool { return !appName.MatchString(s) })
 }
 
 // validSecretNames reports whether names is a list root writes: within
@@ -284,7 +324,14 @@ func (t *txn) result(phase, msg string) result {
 	}
 }
 
+// writeRecord writes txn.json — only a record that reads back (valid):
+// one that would not is a write that failed, which every caller already
+// handles as the Failure-mode table says, never a record recovery could
+// not act on.
 func (a *Applier) writeRecord(rec *record) error {
+	if err := rec.valid(); err != nil {
+		return fmt.Errorf("the record would not read back: %w", err)
+	}
 	return a.writeDurable("record:"+rec.Phase, a.x("txn.json"), a.x(".txn.json.tmp"), encodeJSON(rec), 0o600)
 }
 
@@ -316,6 +363,9 @@ func (a *Applier) writeApplied(rec *record) error {
 // putApplied writes applied.json whole (I8): writeApplied's write, and
 // `hotserve box baseline`'s.
 func (a *Applier) putApplied(v applied) error {
+	if err := v.valid(); err != nil {
+		return fmt.Errorf("the baseline would not read back: %w", err)
+	}
 	return a.writeDurable("applied.json", a.x("applied.json"), a.x(".applied.json.tmp"), encodeJSON(v), 0o640)
 }
 

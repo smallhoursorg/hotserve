@@ -16,7 +16,7 @@ import (
 // initDir is the box's directory as the operator copies it over: file
 // as its Caddyfile, in a directory named for its host (or "box" for a
 // file that walks as no box's).
-func initDir(t *testing.T, file []byte) string {
+func initDir(t testing.TB, file []byte) string {
 	t.Helper()
 	name := "box"
 	if shape, err := Walk(file); err == nil {

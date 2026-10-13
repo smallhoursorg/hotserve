@@ -65,11 +65,27 @@ func refuseCode(code refusalCode, format string, args ...any) error {
 // a quoted name may look like an id and is not one (it stays filtered).
 type oid string
 
+// inCommit is " in <sha>" in a refusal of the layout of secrets, the
+// sha an id the refusal names as an oid is; empty, for a working tree
+// (`hotserve box describe`), it is "".
+type inCommit oid
+
+func (c inCommit) String() string {
+	if c == "" {
+		return ""
+	}
+	return " in " + string(c)
+}
+
 // idsIn is every oid argument in the id grammar, once each.
 func idsIn(args []any) []string {
 	var ids []string
 	for _, a := range args {
-		if s, ok := a.(oid); ok && IsID(string(s)) && !slices.Contains(ids, string(s)) {
+		s, ok := a.(oid)
+		if c, isIn := a.(inCommit); isIn {
+			s, ok = oid(c), true
+		}
+		if ok && IsID(string(s)) && !slices.Contains(ids, string(s)) {
 			ids = append(ids, string(s))
 		}
 	}
