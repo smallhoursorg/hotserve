@@ -2,7 +2,8 @@
 
 **Deploy from `git push` to a single cheap server, with zero downtime.**
 One binary that is your reverse proxy, your deploy pipeline, your rate
-limiter, and your page cache — for indie hackers, solo devs, and small
+limiter, and your page cache, with its config and secrets kept in git
+— for indie hackers, solo devs, and small
 businesses running real apps on cheap servers. No Docker, no
 Kubernetes, no SSH keys in CI. Powered by
 [Caddy](https://caddyserver.com).
@@ -17,6 +18,7 @@ Built in:
 |---|---|
 | **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that can listen on a unix socket — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (a restart budget and backoff bound the rate; it throttles rather than giving up). |
 | **[penaltybox](penaltybox/)** | Rate limiting driven by your app's `X-Rate-Limit-Level` hint headers — weighted sliding-window budgets, tiers, and a penalty box for clients that cross them. |
+| **[box](examples/box/)** | Config from git: the box's Caddyfile lives in a repository of its own, and each signed push to `main` reaches the box, which checks the commit's signature, validates the file, installs it as root, and rolls back a reload that fails. The apps' secrets ride along, encrypted to the box's own key. CI holds no SSH key. |
 | **cache** | HTTP page caching via [Souin](https://github.com/darkweak/souin) with in-memory [Otter](https://github.com/darkweak/storages) storage. |
 | everything Caddy has | Automatic HTTPS, HTTP/2 + HTTP/3, the Caddyfile, the admin API — hotserve *is* Caddy underneath, with the modules above compiled in. |
 
@@ -28,9 +30,11 @@ A `.deb` for amd64 and arm64 on the
 app, in four steps; [Upgrading](docs/upgrading.md) is every release
 after that. The package gives you `/usr/bin/hotserve`, a systemd
 service running as the `hotserve` user, a starter config at
-`/etc/hotserve/Caddyfile`, and a systemd instance for the `hotserve`
+`/etc/hotserve/Caddyfile`, a systemd instance for the `hotserve`
 user that stays up without anyone logging in — the thing your apps
-will run under.
+will run under — and, for a box whose config lives in a repository,
+the root applier that installs each signed push and the box's key
+for secrets.
 
 **Supported: Debian 13, on a real virtual machine.** The package
 refuses to install where systemd is older than 257 (Debian 12 and
@@ -55,10 +59,15 @@ The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
 hold the **raw binary** (plus LICENSE and a README), for other systemd
 hosts you wire up yourself — a NixOS-style distro, say. Prefer the
 packages where you can: going this way you take on what the package
-does for you, namely a dedicated `hotserve` user, a `Type=notify`
-unit, `loginctl enable-linger hotserve` (with `libpam-systemd`
-installed) so the user manager exists for your apps, and the config at
-`/etc/hotserve/Caddyfile`. The sandbox applies here too, so the host
+does for you, all of it in [packaging/](packaging/) (`nfpm.yaml` and
+`postinstall.sh` are the whole list): a dedicated `hotserve` user, the
+`Type=notify` unit `hotserve.service`, `loginctl enable-linger
+hotserve` (with `libpam-systemd` installed) so the user manager exists
+for your apps, the config at `/etc/hotserve/Caddyfile`, and, for config
+pushed from a box repository, the root applier's units
+(`hotserve-box-apply.path` and `.service`), its directories
+(`hotserve-box.tmpfiles`) and the box's key (`hotserve box key`, as
+root). The sandbox applies here too, so the host
 needs systemd 257 or newer and has to deliver both namespaces — many
 container and LXC hosts cannot,
 and hotserve refuses to start rather than run your apps unprotected.
@@ -136,7 +145,7 @@ GitHub Actions with no stored secret.
 ## Security
 
 The threat model is [DESIGN-threat-model.md](DESIGN-threat-model.md);
-to report something, [SECURITY.md](SECURITY.md). Three properties it
+to report something, [SECURITY.md](SECURITY.md). Four properties it
 rests on:
 
 - **The admin API is not on localhost.** It listens on a unix socket
@@ -153,11 +162,18 @@ rests on:
   than run something weaker. What is shared by design is the network,
   for outbound calls; nothing hotserve runs listens on a port.
   Details: [liveswap/README.md](liveswap/README.md#sandbox).
-- **Deploys are authenticated without a shared secret.** A deploy
-  carries a short-lived token — an OIDC token from CI, verified
-  against the provider's public keys, or one signed by a local key
-  whose public half the box holds. Nothing an attacker can steal off
-  the box lets them deploy.
+- **Deploys are authenticated without a shared secret.** A deploy, and
+  a config push, carries a short-lived token — an OIDC token from CI,
+  verified against the provider's public keys, or one signed by a
+  local key whose public half the box holds. Nothing an attacker can
+  steal off the box lets them deploy.
+- **hotserve cannot change its own config.** The Caddyfile is the box's
+  policy — which repository may deploy each app, each runtime's
+  permission flags, who may sign the next change — and only root
+  writes it. A push from the box's repository reaches root through
+  hotserve, and root installs the file only if the commit descends
+  from the one the box runs and is signed by a key the running file
+  names. Details: [box/DESIGN-box.md](box/DESIGN-box.md).
 
 ## Roadmap
 
@@ -188,7 +204,7 @@ No local Go toolchain needed — everything runs in Docker:
 ```sh
 make test              # unit tests, all modules (race + coverage)
 make test-integration  # real deploys through caddytest, under a real systemd user manager
-make e2e               # full stack: both module suites against the shipped binary under systemd, then restart survival + crash recovery
+make e2e               # full stack: the liveswap and penaltybox suites against the shipped binary under systemd, restart survival + crash recovery, then signed box pushes
 make lint vet tidy     # golangci-lint (gofmt-gated), go vet, go mod tidy
 make tidy-check        # fails if go mod tidy would change a module's go.mod/go.sum; CI runs it on every PR
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
@@ -210,8 +226,13 @@ is developed and tested on a Mac: nothing here needs a Linux VM.
 
 The repo is a Go multi-module workspace: `liveswap/` and `penaltybox/`
 are lean, independently usable Caddy modules
-(`xcaddy build --with github.com/smallhoursorg/hotserve/liveswap`),
-and the root module builds the product binary from `cmd/hotserve`.
+(`xcaddy build --with github.com/smallhoursorg/hotserve/liveswap`).
+`box/` is a module of its own but part of the product only: it imports
+liveswap through a local `replace`, so it builds only from this repo,
+and it runs only with the package's applier units
+([box/DESIGN-box.md](box/DESIGN-box.md)). The root module
+builds the product binary from `cmd/hotserve`, and `packaging/` turns
+it into the `.deb`.
 
 ### Dependency policy
 
@@ -251,17 +272,18 @@ entirely. (Counts exclude the `govulncheck` tool dependency — a
 inherited by importers; it exists in go.mod so Dependabot can bump
 the scanner.)
 
-| Dependency | Pulls in (~modules) | hotserve | liveswap | penaltybox | Notes |
-|---|---|:-:|:-:|:-:|---|
-| [Caddy](https://github.com/caddyserver/caddy) | ~565 | ✓ | ✓ | ✓ | The foundation — hotserve *is* a Caddy distribution. Commercially sponsored, strong security track record. Nearly the entire dependency tree is Caddy's. |
-| [Souin](https://github.com/darkweak/souin) (`cache`) | +24 | ✓ | — | — | HTTP cache (RFC 7234). Solo-maintained; the e2e suite exercises it directly so drift is caught in CI. The riskiest dependency here, and still better than an in-house HTTP cache. |
-| [darkweak/storages/otter](https://github.com/darkweak/storages) | +6 | ✓ | — | — | In-memory storage backend for Souin, wrapping [maypok86/otter](https://github.com/maypok86/otter). |
-| [zap](https://github.com/uber-go/zap) | 0 (already in Caddy's tree) | ✓ | ✓ | ✓ | Caddy's module logging API is zap; not optional for a Caddy module. |
-| [go-humanize](https://github.com/dustin/go-humanize) | 0 (already in Caddy's tree) | ✓ | ✓ | — | A few formatting helpers in liveswap. |
-| [go-systemd](https://github.com/coreos/go-systemd) (`dbus`) + [godbus](https://github.com/godbus/dbus) | +1 | ✓ | ✓ | — | liveswap's runner: apps are transient units created over systemd's D-Bus API on the hotserve user's own manager (no polkit, no root). go-systemd was already in the workspace graph; godbus is its one dependency, pure Go. |
-| [go-oidc](https://github.com/coreos/go-oidc) + [go-jose](https://github.com/go-jose/go-jose) | 0 (already in Caddy's tree) | ✓ | ✓ | — | Deploy authentication (`deploy_trust`): OIDC discovery/JWKS verification and JWT signing/verification. Both were already transitive dependencies of Caddy; liveswap now requires them directly. Vetted and widely used — the deliberate alternative to hand-rolling JWT crypto. |
+| Dependency | Pulls in (~modules) | hotserve | liveswap | penaltybox | box | Notes |
+|---|---|:-:|:-:|:-:|:-:|---|
+| [Caddy](https://github.com/caddyserver/caddy) | ~565 | ✓ | ✓ | ✓ | ✓ | The foundation — hotserve *is* a Caddy distribution. Commercially sponsored, strong security track record. Nearly the entire dependency tree is Caddy's. |
+| [Souin](https://github.com/darkweak/souin) (`cache`) | +24 | ✓ | — | — | — | HTTP cache (RFC 7234). Solo-maintained; the e2e suite exercises it directly so drift is caught in CI. The riskiest dependency here, and still better than an in-house HTTP cache. |
+| [darkweak/storages/otter](https://github.com/darkweak/storages) | +6 | ✓ | — | — | — | In-memory storage backend for Souin, wrapping [maypok86/otter](https://github.com/maypok86/otter). |
+| [zap](https://github.com/uber-go/zap) | 0 (already in Caddy's tree) | ✓ | ✓ | ✓ | ✓ | Caddy's module logging API is zap; not optional for a Caddy module. |
+| [go-humanize](https://github.com/dustin/go-humanize) | 0 (already in Caddy's tree) | ✓ | ✓ | — | — | A few formatting helpers in liveswap. |
+| [go-systemd](https://github.com/coreos/go-systemd) (`dbus`) + [godbus](https://github.com/godbus/dbus) | +1 | ✓ | ✓ | — | — | liveswap's runner: apps are transient units created over systemd's D-Bus API on the hotserve user's own manager (no polkit, no root). go-systemd was already in the workspace graph; godbus is its one dependency, pure Go. |
+| [go-oidc](https://github.com/coreos/go-oidc) + [go-jose](https://github.com/go-jose/go-jose) | 0 (already in Caddy's tree) | ✓ | ✓ | — | — | Deploy authentication (`deploy_trust`): OIDC discovery/JWKS verification and JWT signing/verification. Both were already transitive dependencies of Caddy; liveswap now requires them directly, and box's pushes use the same verifier through liveswap. Vetted and widely used — the deliberate alternative to hand-rolling JWT crypto. |
+| [age](https://github.com/FiloSottile/age) (`filippo.io/age`) | +3 | ✓ | — | — | ✓ | Secrets: each value in the box repository is an age file encrypted to the box's own key, which root decrypts on the box into the app's env file. Chosen over SOPS, whose library measured 80 more modules in a binary root runs ([box/DESIGN-box.md](box/DESIGN-box.md), "Decisions and rejected alternatives"). |
 
-A ✓ in the liveswap and penaltybox columns means that module's own
+A ✓ in the liveswap, penaltybox and box columns means that module's own
 code requires the dependency. A "—" there is not "absent from that
 module's graph" — the rows marked "already in Caddy's tree" arrive via
 Caddy either way. The hotserve column is ✓ throughout: the product
@@ -283,5 +305,6 @@ above before it merges.
 ## License
 
 Apache-2.0. hotserve is powered by [Caddy](https://caddyserver.com),
-[Souin](https://github.com/darkweak/souin), and
-[Otter](https://github.com/darkweak/storages).
+[Souin](https://github.com/darkweak/souin),
+[Otter](https://github.com/darkweak/storages), and
+[age](https://github.com/FiloSottile/age).
