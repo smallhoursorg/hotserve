@@ -138,8 +138,8 @@ deploy.example.com {
 - `deploy_trust` is liveswap's grammar and verifier, unchanged
   (`deploytrust.Parse` and `Limiter.Authenticate`,
   liveswap/deploytrust/): GitHub, GitLab, generic OIDC and the local
-  key come for free, and the 401, the 429 and the `refused` journal
-  line are the same shape as a deploy's. A `box` token must carry a
+  key come for free, and the flat 401 and the `refused` journal line
+  are the same shape as a deploy's. A `box` token must carry a
   `sha` claim (GitHub's does; `hotserve deploy-token --claims sha=…`
   mints one); a source that cannot supply it is refused by name.
 - `signer <principal> <key-type> <base64>` is one person's SSH public
@@ -189,7 +189,8 @@ cross-references throughout.
    (liveswap/deploytrust/), which returns an `Identity` — the
    attribution string and, behind `Identity.Claim`, the verified
    claims — or the `Refusal` the handler writes. The flat 401, the
-   failure budgets and the 429, the `webhook auth failed` line with
+   failure budgets (which bound the journal, never the answer), the
+   `webhook auth failed` line with
    `refused` and the `could not consult a trust source` line are
    liveswap's; the budgets are shared across both webhooks.
 2. **Admission.** See "Admission". The request id (400) and the media
@@ -540,7 +541,7 @@ group map is one per request across nesting.
 |---|---|---|
 | `box_webhook` | reached | |
 | `subroute` | recursed, its routes in order | a site, `handle`, `route` and `handle_path` adapt to one |
-| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent and its answer comes back with the status and body it wrote: the first four touch only variables, a log field or a trace span; `headers` here edits response headers, never the status or the body the workflow reads; `request_body` and `timeouts` bound the read; `encode` compresses what the client asked for, `push` adds HTTP/2 pushes; `hint_penaltybox` answers 429 only to a client in its box, which the catalogue's 429 row retries |
+| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent and its answer comes back with the status and body it wrote: the first four touch only variables, a log field or a trace span; `headers` here edits response headers, never the status or the body the workflow reads; `request_body` and `timeouts` bound the read; `encode` compresses what the client asked for, `push` adds HTTP/2 pushes; `hint_penaltybox` answers 429 only to a client in its box, which the workflow reports red with its status and body: `box_webhook` itself never answers 429 |
 | `rewrite`; `headers` with a `request` section | refused: `<handler> changes the request first` | `rewrite` (also `uri`, `try_files` and `handle_path`'s strip) moves `/` away before `box_webhook` sees it; `request_header -Authorization` turns every push into a 401 with nothing in the answer to say why |
 | anything else — `static_response`, `reverse_proxy`, `file_server`, `error`, `authentication`, `acme_server`, `metrics`, `invoke`, `intercept`, `templates`, `liveswap_webhook`, a handler this table does not list | refused: `<handler> answers first` | fail-closed: a handler the table has not weighed is one that may answer; `invoke`'s named route is not followed; `intercept` lets `box_webhook` run and then replaces its answer with its own `handle_response`, and `templates` renders whatever types it is told to (`mime application/json` included) over a body whose `diff` is bundle-derived text — so the workflow never sees the result it is told to poll |
 
@@ -1389,7 +1390,6 @@ says. The workflow's action is in the last column.
 | Status | Phase / kind | Exact text | By | Workflow |
 |---|---|---|---|---|
 | 401 | auth | liveswap's flat 401 | handler | the 401 checklist, as deploy.sh; on a result poll after a push that changed `deploy_trust`, the push may have applied and dropped this workflow: `journalctl -u hotserve-box-apply` on the box |
-| 429 | auth | liveswap's | handler | retry later |
 | 400 | — | `result must be a 32-hex id` / `X-Box-Request-Id: 32 lowercase hex, chosen at random for each push, required` | handler | bug in the workflow |
 | 400 | — | `could not read the bundle: <error>` | handler | the connection broke during the upload; retry |
 | 409 | — | `duplicate request id: poll /?result=<id>` | handler | poll instead of retrying the POST |

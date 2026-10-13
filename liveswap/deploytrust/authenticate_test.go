@@ -56,18 +56,17 @@ func request(addr, token string) *http.Request {
 }
 
 // answered is what a Refusal writes: the status and body it hands the
-// caller's writer, and the headers it set first.
-func answered(t *testing.T, ref *Refusal) (code int, body map[string]string, header http.Header) {
+// caller's writer.
+func answered(t *testing.T, ref *Refusal) (code int, body map[string]string) {
 	t.Helper()
-	w := httptest.NewRecorder()
-	if err := ref.Write(w, func(c int, b any) error {
+	if err := ref.Write(func(c int, b any) error {
 		code = c
 		body, _ = b.(map[string]string)
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return code, body, w.Header()
+	return code, body
 }
 
 // TestAuthenticateOnTheSharedLimiter pins the preamble on the limiter
@@ -89,8 +88,8 @@ func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
 	if ref == nil || who.By != "" {
 		t.Fatalf("refused token: who = %+v, refusal = %+v; want a refusal and nobody", who, ref)
 	}
-	if code, body, h := answered(t, ref); code != http.StatusUnauthorized || body["error"] != unauthorizedMessage || len(h) != 0 {
-		t.Fatalf("a refusal writes %d %v with headers %v; want the flat 401 and no header", code, body, h)
+	if code, body := answered(t, ref); code != http.StatusUnauthorized || body["error"] != unauthorizedMessage {
+		t.Fatalf("a refusal writes %d %v; want the flat 401", code, body)
 	}
 	if !charged(key) {
 		t.Fatalf("a refusal through the shared limiter was not charged to it")
@@ -126,9 +125,9 @@ func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
 }
 
 // TestAuthenticateBudgetAndBound pins the preamble's budget on a
-// clocked limiter — ten failures logged, the eleventh a 429 whose
-// Retry-After is the window, the window draining it, a valid token
-// clearing it — and the bound on the caller's field: one line, the
+// clocked limiter — ten failures logged, the eleventh unlogged and
+// answered exactly as the first was, the window draining it, a valid
+// token clearing it — and the bound on the caller's field: one line, the
 // length of a refusal, whatever the caller put in it; a value with a
 // control byte reads Go-quoted; no key is no field.
 func TestAuthenticateBudgetAndBound(t *testing.T) {
@@ -145,23 +144,30 @@ func TestAuthenticateBudgetAndBound(t *testing.T) {
 		return ref
 	}
 
+	var first *Refusal
 	for i := range FailBudget {
-		if ref := call("not-a-jwt", "webhook", "box"); ref == nil || ref.Status != http.StatusUnauthorized {
+		ref := call("not-a-jwt", "webhook", "box")
+		if ref == nil || ref.Status != http.StatusUnauthorized {
 			t.Fatalf("failure %d: refusal = %+v; want 401", i+1, ref)
+		}
+		if first == nil {
+			first = ref
 		}
 	}
 	if got := logs.TakeAll(); len(got) != FailBudget+1 {
 		t.Fatalf("logged %d records for %d failures; want each, and the line saying the budget is spent", len(got), FailBudget)
 	}
+	// Past the budget the answer is the first refusal's, field for
+	// field: a caller cannot tell a spent budget from a fresh one.
 	ref := call("not-a-jwt", "webhook", "box")
-	if ref == nil || ref.Status != http.StatusTooManyRequests || ref.RetryAfter != FailWindow || ref.Message != throttledMessage {
-		t.Fatalf("past the budget: refusal = %+v; want 429 for the window", ref)
+	if ref == nil || *ref != *first {
+		t.Fatalf("past the budget: refusal = %+v; want %+v, the first one's", ref, first)
 	}
-	if code, body, h := answered(t, ref); code != http.StatusTooManyRequests || body["error"] != throttledMessage || h.Get("Retry-After") != strconv.Itoa(int(FailWindow.Seconds())) {
-		t.Errorf("a 429 writes %d %v with Retry-After %q; want the window in seconds", code, body, h.Get("Retry-After"))
+	if code, body := answered(t, ref); code != http.StatusUnauthorized || body["error"] != unauthorizedMessage {
+		t.Errorf("past the budget a refusal writes %d %v; want the flat 401", code, body)
 	}
 	if logs.Len() != 0 {
-		t.Fatalf("a throttled refusal was logged: %+v", logs.All())
+		t.Fatalf("a refusal past the budget was logged: %+v", logs.All())
 	}
 	clk.Advance(FailWindow)
 	if ref := call("not-a-jwt", "webhook", "box"); ref == nil || ref.Status != http.StatusUnauthorized {

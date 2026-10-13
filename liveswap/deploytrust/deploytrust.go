@@ -564,12 +564,12 @@ func Warm(verifierSets ...[]Verifier) {
 // source could not be consulted — its discovery or its key fetch
 // failed — so the token was never judged. label names the source.
 //
-// Authenticate charges it like any refusal. Whether a failure spends
-// the budget is measurable from outside (ten tokens, then one more:
-// 401 or 429), so it must not depend on which sources an app names —
-// the same app-existence leak the flat 401 closes. Charging costs a
-// deployer nothing real: the first valid token after the outage is
-// admitted from a throttled address. What an unavailable changes is
+// Authenticate charges it like any refusal: it answers the same flat
+// 401, and its "webhook auth failed" lines count against the same
+// budgets, so a CI loop retrying through an outage writes no more of
+// them than any other. Charging costs a deployer nothing real: the
+// first valid token after the outage is admitted from a throttled
+// address. What an unavailable changes is
 // the journal: one line per source per window naming it, written
 // however spent the budgets are (Limiter.outage) and whether or
 // not another source then accepted the token, so a CI loop retrying

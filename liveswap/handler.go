@@ -97,7 +97,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	}
 	who, refusal := h.limiter.Authenticate(r, verifiers, h.logger, "app", loggedAppName(name))
 	if refusal != nil {
-		return refusal.Write(w, func(code int, body any) error { return RespondJSON(w, code, body, nil) })
+		return refusal.Write(func(code int, body any) error { return RespondJSON(w, code, body, nil) })
 	}
 	if ma == nil {
 		return RespondJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("unknown app %q", name)}, nil)
@@ -551,7 +551,7 @@ func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, error) 
 // response filter (redact.go). r is the app's filter — every site
 // with the app in scope passes ma.redactorFor, the 405 included —
 // and nil only for the bodies written before an app is known (401,
-// 429, 404), where the shape and entropy layers still apply. When a
+// 404), where the shape and entropy layers still apply. When a
 // known secret was found the object gains a `redacted_env` field
 // naming the keys. The box webhook writes its bodies through it too,
 // with a filter from NewRedactor.

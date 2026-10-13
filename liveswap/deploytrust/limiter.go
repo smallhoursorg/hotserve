@@ -10,26 +10,27 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
-// The webhook's auth-failure throttle. Token forgery is infeasible (no
-// private key on the box), so failed authentications are not a
-// guessing oracle; what an unauthenticated caller can do with them is
-// make hotserve write a Warn per request, without bound — a
-// journal-fill primitive. The throttle bounds that: an address gets
-// FailBudget failures per FailWindow and is then answered 429
-// until its oldest failure ages out, and the process as a whole logs
-// at most FailGlobalBudget failures per window however many
-// addresses a flood comes from. The address budget counts failures
-// and decides the 429; the process budget decides what is logged —
-// every line, the once-per-window "budget spent" lines included, so
-// under a spent process budget an address is throttled silently. The
-// token is still verified for a
-// throttled address — a valid one is admitted and clears the address
-// — so nobody sharing an address with a flood (a NAT, a CI egress
-// pool, a proxy in front without trusted_proxies) is ever locked out
-// of deploying; the verification's cost is comparable to the TLS
-// handshake the request already paid and is not what the throttle is
-// for. Fixed, not configurable: a legitimate deployer fails a handful
-// of times while setting up, never ten times in a minute.
+// The webhook's auth-failure throttle samples the journal; it does not
+// limit requests. Token forgery is infeasible (no private key on the
+// box), so failed authentications are not a guessing oracle; what an
+// unauthenticated caller can do with them is make hotserve write a
+// Warn per request, without bound — a journal-fill primitive. The
+// throttle bounds that: an address's failures are logged up to
+// FailBudget per FailWindow, and further ones are not logged until its
+// oldest logged failure ages out; the process as a whole logs at most
+// FailGlobalBudget failures per window however many addresses a flood
+// comes from. Both budgets decide what is logged — every line, the
+// once-per-window "budget spent" lines included — and nothing else:
+// every refusal is answered the same flat 401 whatever the budgets
+// say, so a caller cannot see them, and a client never has a reason to
+// retry a refused token. The token is verified for every request — a
+// valid one is admitted and clears the address — so nobody sharing an
+// address with a flood (a NAT, a CI egress pool, a proxy in front
+// without trusted_proxies) is ever locked out of deploying; the
+// verification's cost is comparable to the TLS handshake the request
+// already paid and is not what the throttle is for. Fixed, not
+// configurable: a legitimate deployer fails a handful of times while
+// setting up, never ten times in a minute.
 //
 // A failure that is the box's — a trust source it could not consult
 // (unavailable, which says why) — is charged like any other and gets
@@ -111,12 +112,9 @@ func NewLimiter(c Clock) *Limiter {
 	}
 }
 
-// failVerdict is what the handler does with one failed authentication.
+// failVerdict is what the handler logs for one failed authentication;
+// the answer is the flat 401 whatever it says.
 type failVerdict struct {
-	// throttled: the address has spent its budget — answer 429 with
-	// retryAfter, and write nothing.
-	throttled  bool
-	retryAfter time.Duration
 	// log: this failure gets its Warn line (inside both budgets).
 	log bool
 	// trippedKey / trippedGlobal: this failure spent the last of the
@@ -142,8 +140,9 @@ func (l *Limiter) fail(key string) failVerdict {
 	fw.times = withinWindow(fw.times, now, l.window)
 	if len(fw.times) >= l.budget {
 		// Over budget: not recorded, so the window is exactly the
-		// budgeted failures and retryAfter is when the oldest ages out.
-		return failVerdict{throttled: true, retryAfter: fw.times[0].Add(l.window).Sub(now)}
+		// logged failures, and the next is logged once the oldest ages
+		// out.
+		return failVerdict{}
 	}
 	if len(fw.times) == 0 {
 		fw.tripped = false

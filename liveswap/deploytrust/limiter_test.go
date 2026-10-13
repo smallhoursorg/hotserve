@@ -21,39 +21,39 @@ func TestAuthLimiterWindow(t *testing.T) {
 	// Failures at t=0, 10s, 20s: the third spends the budget.
 	for i := range 3 {
 		v := l.fail("a")
-		if !v.log || v.throttled || v.trippedKey != (i == 2) {
+		if !v.log || v.trippedKey != (i == 2) {
 			t.Fatalf("failure %d: %+v", i+1, v)
 		}
 		if i < 2 {
 			clk.Advance(10 * time.Second)
 		}
 	}
-	v := l.fail("a")
-	if v.log || !v.throttled || v.retryAfter != 40*time.Second || v.trippedKey {
-		t.Fatalf("past the budget: %+v", v)
+	if v := l.fail("a"); v != (failVerdict{}) {
+		t.Fatalf("past the budget: %+v, want nothing logged", v)
 	}
 	// Another address is untouched.
-	if v := l.fail("b"); !v.log || v.throttled {
+	if v := l.fail("b"); !v.log {
 		t.Fatalf("a different address was affected: %+v", v)
 	}
 	// Over-budget failures are not recorded, so the window is exactly
-	// the budgeted ones and retryAfter counts down from the oldest.
+	// the logged ones: nothing more is logged until the oldest ages out.
 	clk.Advance(30 * time.Second) // t=50
-	if v := l.fail("a"); v.retryAfter != 10*time.Second {
-		t.Fatalf("retryAfter = %v, want the remainder of the window", v.retryAfter)
+	if v := l.fail("a"); v.log || len(l.keys["a"].times) != 3 {
+		t.Fatalf("t=50: %+v with %d recorded, want unlogged and 3", v, len(l.keys["a"].times))
 	}
 	// The window slides: once the oldest ages out one more is logged,
 	// and the budget is spent again — but "throttled" is said once per
 	// window, not once per refilled slot.
 	clk.Advance(11 * time.Second) // t=61: the t=0 failure has aged out
-	if v := l.fail("a"); !v.log || v.throttled || v.trippedKey {
+	if v := l.fail("a"); !v.log || v.trippedKey {
 		t.Fatalf("after the window slid: %+v", v)
 	}
-	if v := l.fail("a"); !v.throttled {
+	if v := l.fail("a"); v.log {
 		t.Fatalf("the refilled slot should have been the last: %+v", v)
 	}
 	// Once the window drains entirely the next spend says so again.
 	clk.Advance(2 * time.Minute)
+	var v failVerdict
 	for range 3 {
 		v = l.fail("a")
 	}
@@ -69,8 +69,9 @@ func TestAuthLimiterWindow(t *testing.T) {
 }
 
 // The process-wide budget holds however many addresses a flood comes
-// from: past it, failures are still counted per address (so a
-// throttled one still gets 429) but nothing is logged.
+// from: past it, failures are still counted per address (so a spent
+// address stays spent once the process budget refills) but nothing is
+// logged.
 func TestAuthLimiterGlobalBudget(t *testing.T) {
 	clk := trusttest.NewClock()
 	l := NewLimiter(clk)
@@ -94,12 +95,14 @@ func TestAuthLimiterGlobalBudget(t *testing.T) {
 		t.Fatalf("logged %d (want 5), tripped %d (want 1)", logged, tripped)
 	}
 	// Per-address accounting still runs while the global budget is
-	// spent: an address that exhausts its own is throttled, silently.
-	for range 3 {
-		l.fail("loud")
+	// spent: an address that exhausts its own stops being recorded.
+	for range 4 {
+		if v := l.fail("loud"); v.log {
+			t.Fatalf("logged under a spent global budget: %+v", v)
+		}
 	}
-	if v := l.fail("loud"); !v.throttled || v.log {
-		t.Fatalf("per-address throttle under a spent global budget: %+v", v)
+	if n := len(l.keys["loud"].times); n != 3 {
+		t.Fatalf("loud has %d failures recorded, want its budget of 3", n)
 	}
 	// The global window slides too.
 	clk.Advance(time.Minute + time.Second)
@@ -193,7 +196,7 @@ func TestAuthLimiterOutageOncePerWindowPerSource(t *testing.T) {
 		t.Fatalf("outages tracked %d addresses, want none", l.Size())
 	}
 	// And the address budget is untouched by them.
-	if v := l.fail("203.0.113.9"); !v.log || v.throttled || len(l.keys["203.0.113.9"].times) != 1 {
+	if v := l.fail("203.0.113.9"); !v.log || len(l.keys["203.0.113.9"].times) != 1 {
 		t.Fatalf("first failure after outages: %+v", v)
 	}
 }

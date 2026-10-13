@@ -120,11 +120,12 @@ names an app the box does not know, which answers the same 401. The
 step prints the values this run minted its token with; the box's
 journal (`journalctl -u hotserve`) names the app asked for and the
 check that refused it, within the box's budget for failed
-authentications: ten a minute from one address (past that, 429) and a
-hundred a minute in all (past that, 401), neither written until the
-minute passes — except that the box failing to consult the token's
-issuer is named once a minute whatever the budget, and a re-run once
-the issuer is back goes through.
+authentications: ten a minute from one address and a hundred a
+minute in all; past either, a failure is not written until the
+minute passes, and the answer stays the same 401 — except that the
+box failing to consult the token's issuer is named once a minute
+whatever the budget, and a re-run once the issuer is back goes
+through.
 
 What a first deploy that worked looks like, from the laptop:
 

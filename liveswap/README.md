@@ -799,8 +799,8 @@ presented identity can be anything the issuer signed; the reason
 comes before the identity, so the cut never takes it — after the
 source's label, which is your config and is not cut. The line count
 is bounded by the throttle below: past an address's ten failures a
-minute the answer is 429 and this line is not written; past the
-process's hundred, a 401 with this line not written. A source the box
+minute, or the process's hundred, this line is not written; the
+answer is the same 401 either way. A source the box
 could not consult has a line of its own outside those budgets:
 `webhook auth could not consult a trust source`, once a minute per
 source while it lasts, whether the token was then refused or another
@@ -887,13 +887,12 @@ The response is synchronous:
 |---|---|
 | 200 | Deployed; body is the app's status JSON. Also every streamed deploy (below), whatever its outcome |
 | 400 | The body could not be read, or is not valid JSON |
-| 401 | Bad or missing token — or an unknown app, until the token authenticates against the global sources. The same flat answer whatever the reason; the journal's `webhook auth failed` line says why (above) |
+| 401 | Bad or missing token — or an unknown app, until the token authenticates against the global sources. The same flat answer whatever the reason and however often the address has failed; the journal's `webhook auth failed` line says why (above), within the throttle's budgets ([Secrets and logs](#secrets-and-logs)) |
 | 404 | Unknown app, once authenticated against the global sources (unauthenticated, an unknown app is the 401 above) |
 | 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |
 | 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, a pre-flight refusal (the command or `pre_start` does not resolve inside the sandbox view, or is an executable built for another machine — the body names the box's architecture and the `runs-on` to build on), or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
-| 429 | This token failed, and the address has already failed 10 times this minute; `Retry-After` says when the oldest failure ages out. A *valid* token from the same address is never refused — see [Secrets and logs](#secrets-and-logs) |
 | 5xx | Deploy failed — **the old version, if there was one, is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
 
 Because the response is synchronous through the whole pipeline, the
@@ -1090,13 +1089,15 @@ What liveswap does for you:
   Nobody can guess a token — forging one needs a private key — so the
   throttle is not about guessing; it bounds what an unauthenticated
   flood can write to your journal. Per client address, 10 failures a
-  minute; further bad tokens from that address get `429` until the
+  minute are logged; further ones from that address are not, until the
   oldest failure ages out, and one line records that the address is
   throttled. Process-wide, 100 failures a minute
   are logged however many addresses a flood comes from, again with one
   line saying the budget is spent; that process budget governs every
   line about a refusal, so once it is spent an address is throttled
-  silently. The one line outside both budgets names a trust source
+  silently. The throttle never changes the answer: every refusal is
+  the same flat 401, so there is nothing for a client to wait out.
+  The one line outside both budgets names a trust source
   the box could not consult, once a minute per source: that is the
   box's failure, bounded by your config, not by callers. The
   address is Caddy's `client_ip`

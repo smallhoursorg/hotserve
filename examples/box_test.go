@@ -408,12 +408,11 @@ type standIn struct {
 	mints     int
 	bundles   int
 	onGet     string            // "": the baseline; "401"; "nobaseline"
-	onPost    []string          // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "front<code>", "throttled", "html409", "504", "502", "524", "lost", "sync"; then "": 202
+	onPost    []string          // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "front<code>", "html409", "504", "502", "524", "lost", "sync"; then "": 202
 	edited    bool              // results say the file was edited on the box
 	recipient string            // GET /'s box key; "" leaves it out, as a box without one does
 	secrets   map[string]string // the secrets the box runs: <app>/<VAR> → the value's blob
 	envEdited []string          // results say these apps' env files were edited on the box
-	throttle  int               // polls answered 429 before the result
 	pollGaps  []int             // polls answered, in order, by something in front of the box
 	mintFails int               // token requests that fail before one succeeds
 	audience  string            // the last token request's audience, decoded
@@ -502,11 +501,6 @@ func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !boxID.MatchString(id) || r.URL.RawQuery != "result="+id {
 			s.t.Errorf("a poll of %q", r.URL.RawQuery)
 		}
-		if s.throttle > 0 {
-			s.throttle--
-			reply(w, 429, map[string]string{"error": "too many failed requests"})
-			return
-		}
 		if len(s.pollGaps) > 0 {
 			code := s.pollGaps[0]
 			s.pollGaps = s.pollGaps[1:]
@@ -586,10 +580,6 @@ func (s *standIn) post(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		proxied(w, code)
-		return
-	}
-	if how == "throttled" {
-		reply(w, 429, map[string]string{"error": "too many failed requests"})
 		return
 	}
 	if how == "html409" { // something in front of the box, in its own words
@@ -900,8 +890,6 @@ func TestBoxApply(t *testing.T) {
 			"never,unread": "no answer from the box to the push; asking for its result",
 			// A 504 without the push's id is not the box's: sent again.
 			"proxy504": "no answer from the box to the push; asking for its result",
-			// Sent again, and throttled: not yet, as a throttled poll is.
-			"never,throttled": "no answer from the box to the push; asking for its result",
 		} {
 			t.Run(how, func(t *testing.T) {
 				t.Parallel()
@@ -947,6 +935,20 @@ func TestBoxApply(t *testing.T) {
 		g.box.set(func(s *standIn) { s.onPost = []string{"html409"} })
 		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 409: <html>conflict</html>") {
 			t.Fatalf("exit %d\n%s", code, out)
+		}
+	})
+
+	t.Run("a 429 is red, like any status the box does not send", func(t *testing.T) {
+		t.Parallel()
+		g := newApplyRig(t)
+		g.change("one")
+		g.box.set(func(s *standIn) { s.onPost = []string{"front429"} })
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 429: <html>Error 429</html>") {
+			t.Fatalf("a POST answered 429: exit %d\n%s", code, out)
+		}
+		g.box.set(func(s *standIn) { s.onPost, s.pollGaps = []string{"504"}, []int{429} })
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "HTTP 429: <html>Error 429</html>") {
+			t.Fatalf("a poll answered 429: exit %d\n%s", code, out)
 		}
 	})
 
@@ -1020,8 +1022,8 @@ func TestBoxApply(t *testing.T) {
 			"HOTSERVE_AUDIENCE=a&b c#d",
 		}
 		g.box.set(func(s *standIn) { s.onPost = []string{"504"} })
-		// A mint that fails is tried again; a throttled poll is "not yet".
-		g.box.set(func(s *standIn) { s.mintFails, s.throttle = 1, 2 })
+		// A mint that fails is tried again.
+		g.box.set(func(s *standIn) { s.mintFails = 1 })
 		out, code := g.apply(actions...)
 		if code != 0 || !strings.Contains(out, "::add-mask::minted-1\n") || g.box.seen().audience != "a&b c#d" || !strings.Contains(out, "::group::apply deploy.example.com\n") {
 			t.Fatalf("exit %d\n%s", code, out)

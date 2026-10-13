@@ -1,45 +1,35 @@
 package deploytrust
 
 import (
-	"math"
 	"net/http"
-	"strconv"
 	"strings"
-	"time"
 
 	"go.uber.org/zap"
 )
 
 // Refusal is what the preamble answers a refused request with, for the
-// caller to write (Write) through its own response filter: the status — 401
-// for every reason, so a caller learns neither which apps exist nor
-// what a source pins, or 429 once the address's budget is spent — and
-// the fixed body, with Retry-After for the 429. Nothing in it comes
-// from the request or from the reason; the reason went to the journal.
+// caller to write (Write) through its own response filter: the flat
+// 401 and its fixed body, the same whatever the reason and however
+// often the address has failed, so a caller learns neither which apps
+// exist, nor what a source pins, nor what the throttle's budgets say.
+// Nothing in it comes from the request or from the reason; the reason
+// went to the journal, if the budgets let it.
 type Refusal struct {
-	Status     int
-	Message    string
-	RetryAfter time.Duration // the 429's; zero for the 401
+	Status  int
+	Message string
 }
 
-// Write answers the refused request: Retry-After on a 429, then the
-// fixed body through write — the caller's filtered writer, so every
-// body a webhook sends passes its filter. The one way to answer a
-// Refusal: the header and the body cannot be split.
-func (ref *Refusal) Write(w http.ResponseWriter, write func(code int, body any) error) error {
-	if ref.RetryAfter > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(ref.RetryAfter.Seconds()))))
-	}
+// Write answers the refused request with the fixed body through write
+// — the caller's filtered writer, so every body a webhook sends passes
+// its filter.
+func (ref *Refusal) Write(write func(code int, body any) error) error {
 	return write(ref.Status, map[string]string{"error": ref.Message})
 }
 
-const (
-	// unauthorizedMessage is the flat 401: the same sentence whatever
-	// the reason, so a caller learns neither which apps exist nor what
-	// a source pins.
-	unauthorizedMessage = "invalid or missing deploy token (Authorization: Bearer <jwt>)"
-	throttledMessage    = "too many failed deploy authentications from this address; retry later"
-)
+// unauthorizedMessage is the flat 401: the same sentence whatever the
+// reason, so a caller learns neither which apps exist nor what a
+// source pins.
+const unauthorizedMessage = "invalid or missing deploy token (Authorization: Bearer <jwt>)"
 
 // bearerToken extracts the deploy JWT from `Authorization: Bearer
 // <jwt>`. Bearer is the only accepted transport: Caddy redacts the
@@ -75,9 +65,9 @@ func scopeField(fields []zap.Field, key, value string) []zap.Field {
 // refusal costs this limiter and the journal. An accepted token is who
 // it is (Identity), and the address's failures are forgotten. A
 // refused one is answered by the caller with the Refusal returned —
-// the flat 401 whatever the reason, or 429 once the address's budget
-// is spent — through the caller's own response filter, so every body
-// a webhook sends passes one. logger is the caller's; scopeKey and
+// the flat 401, whatever the reason and whatever the budgets say —
+// through the caller's own response filter, so every body a webhook
+// sends passes one. logger is the caller's; scopeKey and
 // scopeValue are the one field its lines carry besides the address
 // and the reason — liveswap names the app — bounded where a line is
 // written (scopeField); an empty key is no field. liveswap's webhook
@@ -102,23 +92,21 @@ func (l *Limiter) Authenticate(r *http.Request, verifiers []Verifier, logger *za
 		// (see Limiter): the count of lines, and — the scope and the
 		// refusal being request input, both logged bounded — the size
 		// of each. The refusal is for this journal only: the response
-		// stays the same flat 401 for every reason, so a caller learns
-		// neither which apps exist nor what a source pins.
+		// stays the same flat 401 for every reason and every verdict, so
+		// a caller learns neither which apps exist, nor what a source
+		// pins, nor whether its failures are still being logged.
 		v := l.fail(key)
 		if v.log {
 			logger.Warn("webhook auth failed",
 				append(scopeField(nil, scopeKey, scopeValue), zap.String("remote", key), zap.String("refused", refused.Error()))...)
 		}
 		if v.trippedKey {
-			logger.Warn("webhook auth failures from this address throttled: further ones are answered 429 and not logged",
+			logger.Warn("webhook auth failures from this address throttled: further ones are not logged",
 				zap.String("remote", key), zap.Int("failures", FailBudget), zap.Duration("window", FailWindow))
 		}
 		if v.trippedGlobal {
 			logger.Warn("webhook auth failures throttled process-wide: further ones are not logged",
 				zap.Int("failures", FailGlobalBudget), zap.Duration("window", FailWindow))
-		}
-		if v.throttled {
-			return Identity{}, &Refusal{Status: http.StatusTooManyRequests, Message: throttledMessage, RetryAfter: v.retryAfter}
 		}
 		return Identity{}, &Refusal{Status: http.StatusUnauthorized, Message: unauthorizedMessage}
 	}

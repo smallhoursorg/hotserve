@@ -123,7 +123,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, route string) (deploytrust.Identity, bool, error) {
 	ident, refusal := h.limiter.Authenticate(r, h.app.verifiers, h.logger, "box_request", route)
 	if refusal != nil {
-		return ident, false, refusal.Write(w, func(code int, body any) error { return respond(w, code, body) })
+		return ident, false, refusal.Write(func(code int, body any) error { return respond(w, code, body) })
 	}
 	return ident, true, nil
 }

@@ -11,7 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -200,9 +200,14 @@ func TestHandlerAuthenticates(t *testing.T) {
 		t.Run(q.method+" "+q.target, func(t *testing.T) {
 			r := newRig(t)
 			r.applied(t, sha)
+			var first *httptest.ResponseRecorder
 			for _, token := range []string{"", "not.a.jwt", trusttest.MintExpired(t, r.priv, "box1", nil), trusttest.Mint(t, r.priv, "another-box", nil)} {
 				q.token = token
-				wantError(t, r.do(t, q), http.StatusUnauthorized, unauthorized)
+				w := r.do(t, q)
+				wantError(t, w, http.StatusUnauthorized, unauthorized)
+				if first == nil {
+					first = w
+				}
 			}
 			if r.h.limiter.Size() != 1 {
 				t.Fatalf("failures not charged: %d addresses", r.h.limiter.Size())
@@ -210,10 +215,11 @@ func TestHandlerAuthenticates(t *testing.T) {
 			for range deploytrust.FailBudget {
 				r.do(t, q)
 			}
+			// Past the budget the answer is the first refusal's, byte for
+			// byte: a caller cannot see the budget.
 			w := r.do(t, q)
-			wantError(t, w, http.StatusTooManyRequests, "too many failed deploy authentications")
-			if ra, err := strconv.Atoi(w.Header().Get("Retry-After")); err != nil || ra < 1 {
-				t.Fatalf("Retry-After %q", w.Header().Get("Retry-After"))
+			if w.Code != first.Code || !reflect.DeepEqual(w.Header(), first.Header()) || w.Body.String() != first.Body.String() {
+				t.Fatalf("past the budget: %d %v %s; want the first refusal's %d %v %s", w.Code, w.Header(), w.Body, first.Code, first.Header(), first.Body)
 			}
 		})
 	}

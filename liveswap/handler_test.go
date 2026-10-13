@@ -387,24 +387,42 @@ func from(t *testing.T, h *Handler, remote, token string) *httptest.ResponseReco
 	return send(t, h, req)
 }
 
-// After the failure budget a client's bad tokens are answered 429
-// until the window slides — but a valid token from that address is
-// still admitted (and clears it): sharing an address with a flood
-// costs log lines, never a deploy.
+// After the failure budget a client's bad tokens are no longer
+// logged, and the answer does not change: the same status, headers and
+// body as the first refusal, so a caller cannot see the budget and has
+// no reason to retry. A valid token from that address is still
+// admitted (and clears it): sharing an address with a flood costs log
+// lines, never a deploy.
 func TestWebhookThrottlesAuthFailures(t *testing.T) {
 	h, rig := newTestHandler(t)
+	core, logs := observer.New(zap.WarnLevel)
+	h.logger = zap.New(core)
 	const attacker = "203.0.113.9:1"
-	for i := range deploytrust.FailBudget {
-		if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusUnauthorized {
-			t.Fatalf("failure %d: code = %d, want 401", i+1, w.Code)
+	type answer struct {
+		code   int
+		header http.Header
+		body   string
+	}
+	refuse := func() answer {
+		t.Helper()
+		w := from(t, h, attacker, "not-a-jwt")
+		return answer{w.Code, w.Header(), w.Body.String()}
+	}
+	first := refuse()
+	if first.code != http.StatusUnauthorized || strings.TrimSpace(first.body) != flat401 {
+		t.Fatalf("first failure: %d %s, want the flat 401", first.code, first.body)
+	}
+	for i := 1; i < deploytrust.FailBudget; i++ {
+		refuse()
+	}
+	logs.TakeAll()
+	for i := range 3 {
+		if got := refuse(); !reflect.DeepEqual(got, first) {
+			t.Fatalf("past the budget, refusal %d answered %+v; want the first refusal's %+v", i+1, got, first)
 		}
 	}
-	w := from(t, h, attacker, "not-a-jwt")
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("past the budget: code = %d, want 429", w.Code)
-	}
-	if ra, err := strconv.Atoi(w.Header().Get("Retry-After")); err != nil || ra < 1 || ra > int(deploytrust.FailWindow.Seconds()) {
-		t.Fatalf("Retry-After = %q, want seconds within the window", w.Header().Get("Retry-After"))
+	if logs.Len() != 0 {
+		t.Fatalf("failures past the budget were logged: %+v", logs.All())
 	}
 	// Another address is unaffected.
 	if w := from(t, h, "198.51.100.1:1", appToken(t)); w.Code != http.StatusOK {
@@ -415,18 +433,18 @@ func TestWebhookThrottlesAuthFailures(t *testing.T) {
 	if w := from(t, h, attacker, appToken(t)); w.Code != http.StatusOK {
 		t.Fatalf("a valid token from a throttled address: code = %d, want 200", w.Code)
 	}
-	for i := range deploytrust.FailBudget {
-		if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusUnauthorized {
-			t.Fatalf("after success, failure %d: code = %d, want 401", i+1, w.Code)
-		}
+	logs.TakeAll()
+	for range deploytrust.FailBudget + 1 {
+		refuse()
 	}
-	if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusTooManyRequests {
-		t.Fatalf("budget did not refill on success: code = %d", w.Code)
+	if got := logs.Len(); got != deploytrust.FailBudget+1 {
+		t.Fatalf("after success, logged %d records; want the full budget and the throttled line", got)
 	}
 	// And the window slides on its own.
+	logs.TakeAll()
 	rig.clock.Advance(deploytrust.FailWindow + time.Second)
-	if w := from(t, h, attacker, "not-a-jwt"); w.Code != http.StatusUnauthorized {
-		t.Fatalf("after the window: code = %d, want 401", w.Code)
+	if got := refuse(); !reflect.DeepEqual(got, first) || logs.Len() != 1 {
+		t.Fatalf("after the window: %+v and %d records; want the flat 401, logged", got, logs.Len())
 	}
 }
 
@@ -523,8 +541,8 @@ func TestWebhookAuthFailureSaysWhyInTheJournalOnly(t *testing.T) {
 }
 
 // A flood from many addresses runs into the process-wide budget: past
-// it, failures still 401 (and a throttled address still 429s) but the
-// journal gets one line saying so and nothing more.
+// it, failures still 401 but the journal gets one line saying so and
+// nothing more.
 func TestWebhookThrottleIsBoundedAcrossAddresses(t *testing.T) {
 	h, _ := newTestHandler(t)
 	core, logs := observer.New(zap.WarnLevel)
@@ -1137,9 +1155,9 @@ func TestWebhookDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 }
 
 // A trust source the box cannot reach is the box's failure, not the
-// caller's — but it is charged like any other, since whether a
-// failure spends the budget is measurable from outside and must not
-// depend on which sources an app names. What the outage changes is
+// caller's — but it is charged like any other: the same flat 401, and
+// its "webhook auth failed" lines count against the same budgets. What
+// the outage changes is
 // the journal: one line per source per window naming it, written
 // however spent the budgets are, so a CI loop retrying through an
 // issuer outage cannot leave the journal quiet about the cause. And
@@ -1183,11 +1201,11 @@ func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
 	if len(all) != deploytrust.FailBudget+2 { // the per-request lines, the address tripped, the outage
 		t.Fatalf("logged %d records, want the budget plus the tripped line plus the outage line: %+v", len(all), all)
 	}
-	// Past it: 429 as for any failure, and silent — the outage line
-	// for this window is already written.
+	// Past it: the flat 401 as for any failure, and silent — the
+	// outage line for this window is already written.
 	for i := range 5 {
-		if w := from(t, h, ci, token()); w.Code != http.StatusTooManyRequests {
-			t.Fatalf("request %d past the budget: code = %d, want 429", i+1, w.Code)
+		if w := from(t, h, ci, token()); w.Code != http.StatusUnauthorized || strings.TrimSpace(w.Body.String()) != flat401 {
+			t.Fatalf("request %d past the budget: %d %s; want the flat 401", i+1, w.Code, w.Body.String())
 		}
 	}
 	if got := logs.TakeAll(); len(got) != 0 {
@@ -1213,8 +1231,8 @@ func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
 	// its throttled request — silent as any other — still writes the
 	// outage line for the new window.
 	rig.clock.Advance(deploytrust.FailWindow - time.Second)
-	if w := from(t, h, ci, token()); w.Code != http.StatusTooManyRequests {
-		t.Fatalf("throttled during the outage: code = %d, want 429", w.Code)
+	if w := from(t, h, ci, token()); w.Code != http.StatusUnauthorized {
+		t.Fatalf("throttled during the outage: code = %d, want 401", w.Code)
 	}
 	if got := logs.TakeAll(); len(got) != 1 || outageLines(got) != 1 {
 		t.Fatalf("throttled request logged %+v, want the outage line alone", got)

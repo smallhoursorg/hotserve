@@ -188,13 +188,13 @@ Properties that matter to the model:
   an unauthenticated caller can do with failures is make hotserve
   write a Warn per request. Two sliding windows bound that, in one
   lock scope so a burst of concurrent requests cannot each see room:
-  per address, 10 failures a minute, after which further bad tokens
-  get 429 until the oldest ages out; process-wide, 100 failures a
-  minute are logged however many addresses a flood comes from. The
-  address budget decides the 429; the process budget decides what is
-  logged, the once-per-window "budget spent" lines included — so
-  under a spent process budget an address is throttled silently. The
-  logged `app` field is cut to
+  per address, 10 failures a minute are logged, and further ones are
+  not until the oldest ages out; process-wide, 100 failures a minute
+  are logged however many addresses a flood comes from. The budgets
+  decide what is logged, the once-per-window "budget spent" lines
+  included, and nothing else: every refusal answers the same flat 401
+  whatever they say, so a caller cannot see them and a client has no
+  reason to retry a refused token. The logged `app` field is cut to
   what a real name could be. The address is Caddy's `client_ip`
   (`trusted_proxies` honoured), IPv6 keyed by /64; the table is bounded
   at 4096 addresses (drained ones swept at most once a window, then an
@@ -416,8 +416,9 @@ same file), `RuntimeDirectoryMode=0750` owned by the service user
 cannot reach `/run/hotserve` at all (the path is not in its view), so
 the gate holds against apps and only hotserve itself can connect. The
 commented-out `deploy.example.com` example is a public TLS vhost with
-`liveswap_webhook` behind `deploy_trust`; the handler's own per-address
-auth-failure throttle is the only rate limiting in front.
+`liveswap_webhook` behind `deploy_trust`; nothing rate-limits requests
+in front of it, and the handler's own per-address auth-failure throttle
+bounds only what it writes to the journal.
 
 **penaltybox** is a response-phase rate-limit-hint enforcer; it touches
 untrusted input only narrowly (the client key defaults to
@@ -716,11 +717,11 @@ scope for the runtime model, in scope for release signing (roadmap).
 - **T4 — Unauthenticated network attacker** on the public webhook/proxy.
   Faces the token gate — forgery needs a private key, so there is no
   guessing oracle; the realer wins are log-amplification (bounded by
-  the auth-failure budgets: ten failures a minute per address, then
-  429, a hundred process-wide, then silence), the CPU cost of JWT/JWKS
-  verification (spent on every request before the budget answers —
-  the budget bounds the journal and the reply, not the work), and any
-  pre-auth proxy/Caddy surface.
+  the auth-failure budgets: ten failures a minute per address and a
+  hundred process-wide are logged, then silence; the answer is the
+  flat 401 throughout), the CPU cost of JWT/JWKS verification (spent
+  on every request — the budgets bound the journal, not the work),
+  and any pre-auth proxy/Caddy surface.
 - **T5 — RCE in the supervisor itself** (a Caddy or liveswap bug). Low
   probability, catastrophic: it *is* the `hotserve` user, so it already
   holds every asset short of root. No app-isolation design prevents
