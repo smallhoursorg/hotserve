@@ -41,9 +41,10 @@ mean: `BOX=deploy.example.com`.
 
 ## The box's key
 
-The package makes the box's key when it is installed, and `hotserve
-init` makes it if it is missing; a box upgraded from a release before
-secrets has its key after the upgrade. Root on the box prints it:
+The package makes the box's key when it is installed or upgraded on a
+running system, and `hotserve init` makes it if it is missing; so a
+box upgraded from a release before secrets has its key after the
+upgrade. Root on the box prints it:
 
 ```sh
 ssh root@box.example.com hotserve box key
@@ -319,12 +320,15 @@ prints a secrets count on each box's line:
 deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer, 2 secrets)
 ```
 
-It refuses, before anything is merged, what would never reach an app;
-the box refuses the same when a push arrives, and the run quotes the
+It refuses, before anything is merged, what the box would refuse; the
+box refuses the same when a push arrives, and the run quotes the
 reason. Each is in
 [box/DESIGN-box.md](../box/DESIGN-box.md#which-checks-run-where),
 "Which checks run where":
 
+- anything in `secrets/` other than `recipients` and app directories
+  of `<VAR>.age` files: a stray file, a link, a name outside the
+  grammar;
 - secrets for an app the Caddyfile does not declare;
 - an app with secrets whose `env_file` is not
   `/etc/hotserve/secrets/<app>.env`, or one whose `env_file` is that
@@ -334,17 +338,22 @@ reason. Each is in
 - a variable an `env` line in the app's block also sets (the `env` line
   would win, so the secret would never reach the app), and one named
   `SOCKET`, which hotserve sets itself;
-- values with no `recipients` file beside them.
+- a value that is not an age file the box reads (an ASCII-armored one,
+  say);
+- values with no `recipients` file beside them, or a `recipients` whose
+  first recipient is not the box's `age1…` key, or a line age does not
+  encrypt to.
 
 It warns about two names a case-insensitive disk would merge, such as
-`DATABASE_URL.age` and `database_url.age`: the box keeps both, but a
-Mac's checkout holds only one.
+`DATABASE_URL.age` and `database_url.age` (the box keeps both, but a
+Mac's checkout holds only one); about a reader's SSH key of a type age
+skips, whose holder cannot read the secrets; and about a name that
+starts with a dot, which it does not read and the box refuses if it is
+committed.
 
-The box checks the rest when a push arrives: that nothing in
-`secrets/` is other than `recipients` and app directories of
-`<VAR>.age` files (no links, no stray files), and, with its key, that
-each value is encrypted to it, decrypts whole, and is a value an env
-file can hold. The counts and sizes have limits — how many apps have
+The box alone checks what needs its key: that each value is encrypted
+to it, decrypts whole, and is a value an env file can hold. The counts
+and sizes have limits — how many apps have
 secrets, how many each app has, how large an app's env file may be —
 listed with their reasons in [Caps](../box/DESIGN-box.md#caps); `make
 check` warns at three quarters of each, in the pull request, before a
