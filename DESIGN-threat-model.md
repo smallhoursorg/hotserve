@@ -1038,8 +1038,8 @@ does not isolate the runtime.
   types, which the `signer` grammar accepts) reduces a laptop
   compromise to "cannot sign without a touch". Stated so operators
   choose knowingly.
-- **Secrets in the config repository are ciphertext for ever** (once
-  built: box/DESIGN-box.md, "Secrets"). A reader's key file and a
+- **Secrets in the config repository are ciphertext for ever**
+  (box/DESIGN-box.md, "Secrets"). A reader's key file and a
   clone decrypt every value ever encrypted to that key, offline and
   unseen; removing a
   reader does not take back what was encrypted to them, so the remedy
