@@ -1095,14 +1095,19 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("a recipients file with CRLF endings: exit %d\n%s", code, out)
 		}
 
-		// Removed, and the Caddyfile changed in the same push.
+		// One of two removed, and the Caddyfile changed in the same push,
+		// over an env file edited on the box: the file is rewritten with
+		// the value left, not removed.
+		g.box.set(func(s *standIn) { s.envEdited = []string{"example"} })
 		g.remove("deploy.example.com/secrets/example/COPY.age")
 		head = g.change("three")
 		out, code = g.apply()
 		if code != 0 || !strings.Contains(out, "apply: deploy.example.com secrets: example: removed COPY\n") ||
-			!strings.Contains(out, "deploy.example.com at "+head[:7]+": loaded; running apps are not restarted") {
+			!strings.Contains(out, "deploy.example.com at "+head[:7]+": loaded; running apps are not restarted") ||
+			!strings.Contains(out, "this push replaced the edit with deploy.example.com/secrets/example/ at "+head[:7]) {
 			t.Fatalf("a removal: exit %d\n%s", code, out)
 		}
+		g.box.set(func(s *standIn) { s.envEdited = nil })
 
 		// An env file edited on the box: said, and on the job page.
 		g.box.set(func(s *standIn) { s.envEdited = []string{"example"} })
