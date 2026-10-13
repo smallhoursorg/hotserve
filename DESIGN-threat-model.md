@@ -40,7 +40,7 @@ Windows, and macOS-as-a-server are out of scope by product design.
    each launch warn when the mode admits everyone (`warnEnvFileModeOf`,
    liveswap/app.go). Owner and group are not checked. Where the box's
    config repository carries an app's secrets (box/DESIGN-box.md,
-   "Secrets": designed, not yet built), the env file is
+   "Secrets"), the env file is
    `/etc/hotserve/secrets/<app>.env`, written 0640 by the `box` applier
    into a setgid `root:hotserve` directory, and the values also exist
    encrypted in that repository's history, which the box's key for
@@ -499,8 +499,8 @@ not a plan.
 The second authenticated entry point, and the only one whose outcome
 is a root-owned file. [box/DESIGN-box.md](box/DESIGN-box.md) is
 authoritative for its behaviour; this section places it. Status:
-released in v0.3.0; the secrets it is designed to carry (below) are
-not yet built. On a box set up from the
+released in v0.3.0; the secrets it carries (below) are built, and
+not yet in a release. On a box set up from the
 template (`examples/box`; docs/first-deploy.md, step 3) root writes
 the file once, with `hotserve init`, and the config repository's
 signed pushes write it after that. A box with no `box` block has no
@@ -635,8 +635,8 @@ on the proof, not sha1dc. A signer's laptop is the operator; a
 software-held signing key makes its compromise total for the box,
 which a hardware-held (`sk-`) key reduces to "cannot sign unattended".
 
-**Secrets through the same channel** (designed in box/DESIGN-box.md,
-"Secrets"; not yet built). Each value is an age file in the config
+**Secrets through the same channel** (box/DESIGN-box.md, "Secrets").
+Each value is an age file in the config
 repository, `<host>/secrets/<app>/<VAR>.age`, encrypted on a laptop to
 the box's own X25519 key and to readers — the signers' SSH keys, or an
 age key of a person's own. The bundle carries the ciphertext; the

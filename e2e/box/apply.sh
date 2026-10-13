@@ -547,9 +547,13 @@ grep -qxF "SECRET=\"$V1\"" "$ENV" && pass "the env file holds the value, as hots
 settled "secret added"
 
 # A launch reads it: the crash release prints SECRET and exits, and the
-# deploy's answer names the variable it redacted, never the value.
+# deploy's answer names the variable it redacted, never the value. The
+# hand-made demo.env sets SECRET too, so it is moved aside for this
+# deploy: a launch that still read it would fail, not pass.
+mv /etc/hotserve/demo.env /etc/hotserve/demo.env.aside
 code=$(curl -s -o "$work/deploy" -w '%{http_code}' --max-time 60 -X POST -H "Authorization: Bearer $(cat /shared/deploy.token)" \
 	-d '{"url":"http://e2e-artifacts:8080/artifacts/demo-crash.tar.gz","version":"box-secrets-crash"}' http://localhost:8081/demo)
+mv /etc/hotserve/demo.env.aside /etc/hotserve/demo.env
 if grep -q '"redacted_env":\["SECRET"\]' "$work/deploy" && ! grep -qF "$V1" "$work/deploy"; then
 	pass "a launch read the box's env file: the release printed SECRET, and its answer redacted it"
 else
