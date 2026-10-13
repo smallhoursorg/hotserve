@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
 )
@@ -18,8 +19,10 @@ import (
 //  1. The identity is never overwritten: ensureIdentity links a new one
 //     into place, so one that exists stays, and one that does not parse
 //     is refused with nothing written.
-//  2. age.pub is rewritten only when it is missing or names another
-//     key: a temporary in /etc/hotserve, renamed over it, the directory
+//  2. age.pub is rewritten only when it is missing, names another key,
+//     or is not a 0644 file of root's (the handler could not read it, or
+//     another account could change it): a temporary in /etc/hotserve,
+//     renamed over it, the directory
 //     fsynced (I8), under the flock on /etc/hotserve/age/ that guards the
 //     identity, and from the identity as read under that lock — so two
 //     runs never write it from different keys; a temporary a crashed run
@@ -93,8 +96,10 @@ func (a *Applier) putAgePub(recipient string) error {
 		}
 	}
 	line := recipient + "\n"
-	if b, err := readFile(pub, maxAgePub, false); err == nil && string(b) == line {
-		return nil
+	if fi, err := os.Lstat(pub); err == nil && fi.Mode() == 0o644 && ownedByUs(fi) {
+		if b, err := readFile(pub, maxAgePub, false); err == nil && string(b) == line {
+			return nil
+		}
 	}
 	tmp, err := os.CreateTemp(dir, agePubTemp)
 	if err != nil {
@@ -118,6 +123,13 @@ func (a *Applier) putAgePub(recipient string) error {
 		return err
 	}
 	return syncDir(dir)
+}
+
+// ownedByUs reports whether fi is owned as a file this process makes is:
+// root:root on the box, where only root runs `box key`.
+func ownedByUs(fi fs.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Geteuid() && int(st.Gid) == os.Getegid()
 }
 
 // boxHost is the box_webhook host of the Caddyfile the box runs, for the

@@ -91,6 +91,28 @@ func TestBoxKey(t *testing.T) {
 		t.Errorf("age.pub not made again: %q", pub)
 	}
 
+	// The right line in a file the handler cannot read, or another
+	// account's, is written again: the mode and the owner a run makes.
+	drift := []func(string) error{func(p string) error { return os.Chmod(p, 0o600) }}
+	if os.Geteuid() == 0 {
+		drift = append(drift, func(p string) error { return os.Lchown(p, 1000, 1000) })
+	}
+	for i, change := range drift {
+		if err := change(b.path(agePubFile)); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := run(b, 0); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := os.Lstat(b.path(agePubFile))
+		if err != nil || fi.Mode() != 0o644 || !ownedByUs(fi) {
+			t.Errorf("drift %d: age.pub left as %v: %v", i, fi.Mode(), err)
+		}
+		if pub, _ := os.ReadFile(b.path(agePubFile)); string(pub) != recipient+"\n" {
+			t.Errorf("drift %d: age.pub %q", i, pub)
+		}
+	}
+
 	// An identity that does not read is refused and left as it is.
 	garbage := []byte("not a key\n")
 	if err := os.WriteFile(b.path(identityFile), garbage, 0o600); err != nil {

@@ -91,6 +91,19 @@ func FuzzRecord(f *testing.F) {
 			f.Add(encodeJSON(rec), uint8(0))
 		}
 	}
+	// Every record a transaction of each shape writes, and each one-field
+	// mutant of it (relations_test.go): the family of cross-field
+	// relations, not one instance.
+	generatedRecs, _ := generated(f)
+	for _, r := range generatedRecs {
+		f.Add(encodeJSON(r), uint8(0))
+		for _, m := range recordMutations {
+			mutant := cloneRecord(r)
+			if m.apply(&mutant) {
+				f.Add(encodeJSON(mutant), uint8(0))
+			}
+		}
+	}
 	f.Add([]byte("{"), uint8(0))
 	f.Fuzz(func(t *testing.T, data []byte, which uint8) {
 		b := newTestBox(t)

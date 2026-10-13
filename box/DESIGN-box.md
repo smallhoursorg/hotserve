@@ -216,7 +216,8 @@ cross-references throughout.
    bundle still in `in/`: 409 "duplicate request id", so one id is never
    answered two ways) — if HEAD equals the baseline, the bundled
    file's digest equals the installed file's, the bundle's secrets tree
-   is the one `applied.json` records and every env file `applied.json`
+   is the one `applied.json` records, its apps are exactly the ones
+   `applied.json` lists, and every env file `applied.json`
    lists reads back with its recorded digest, at the mode and owner root
    writes (one that cannot be read, or whose mode or owner drifted,
    counts as changed, never as an error: root writes it again), and the bundle passes the
@@ -664,6 +665,28 @@ touched does not stop their write-back.
 | `applied.json` | `secrets_tree`, `secrets` | applier; `init` and `baseline` keep them as they find them | the baseline's secrets tree id (`""`, or the field absent, for none) and the `app → sha256` map of the env files the box manages: the only ones it may remove, and the digests step 4's fast path and the out-of-band flag compare. Every write from a transaction, `no_change` included, sets both from HEAD — its secrets tree, and the digest of every env file of HEAD's apps as it stands once the transaction ends — so a rekey records its new tree, and a console-made file whose bytes are HEAD's becomes listed. Absent in a file a box without secrets wrote, which reads as none; env files listed with no `secrets_tree` are no state a write makes, and the file does not read |
 | marker | `posted` | handler | time of admission |
 
+**The relations between fields.** One validator per file holds every
+row below — `record.valid` for `txn.json`, `applied.valid` for
+`applied.json`, the name lists' check for a result — and every read and
+every write goes through it: root writes no record or baseline that
+would not read back, and acts on none that does not. Recovery,
+`advance`, `init` and `baseline` therefore meet one rule set. The test
+builds records and baselines from real transactions and mutates one
+field at a time; every mutant is refused unless it is listed there as a
+valid variant with its reason.
+
+| Id | File | Relation |
+|---|---|---|
+| F1 | record | `phase` is one of the five; `no_change` has `new_sha256 == prev_sha256`, no env file in `secrets`, and no secret added, changed or removed (its set is empty) |
+| F2 | record | `origin: init` has no env file in `secrets` and no secret named added, changed or removed: `init`'s set is the Caddyfile alone |
+| F3 | record | `secrets` holds at most 64 entries (32 written, 32 removed), apps in the app grammar, each once, in app-name order |
+| F4 | record | each entry: `prev_sha256 == ""` exactly when it has no `prev` (absent before); a `prev` is at most 65 KiB and hashes to `prev_sha256`; `new_sha256` is a digest or `""` (removed); not both `""` |
+| F5 | record, `applied.json` | `secrets_tree` is `""` or 40 hex; the `app → sha256` map (`secrets_installed`, `secrets`) has at most 32 apps in the grammar, each at a digest |
+| F6 | record, `applied.json` | a non-empty map has a non-empty `secrets_tree`: env files are listed only from a commit with a secrets tree |
+| F7 | record | an entry the push writes is in `secrets_installed` at its `new_sha256`; one it removes is not in it |
+| F8 | record | a secret named added, changed or removed is one of an app with an entry in `secrets` — a value changes only in a file the set writes or removes — and one named added or changed, of an app `secrets_installed` lists: only an app HEAD has gets new values |
+| F9 | record, result | the added, changed and removed lists each hold at most 8192 names, each `<app>/<VAR>` in its grammars and cap; `secrets_edited_out_of_band` holds at most 64 app names |
+
 A result carries what was established before its phase: a refusal at
 step 9 has `id`, `phase` and `error`; one past the bundle's parse adds
 `commit` and `path`; `signer`, `box_webhook`, `apps` and the out-of-band
@@ -868,7 +891,7 @@ an empty cell means nobody, by design.
 | `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d | `box key` | applier, `box key` | — |
 | `/etc/hotserve/age/identity` | 0600 | root:root | `box key` (run by postinstall, `init` and the console) | — (never rewritten) | applier (step 15a), `box key` | — (a console moves it aside) |
 | `/etc/hotserve/age/.identity.box-<random>` | 0600 | root:root | `box key` | `box key` | — | `box key` (linked to `identity`, then removed; or removed on failure; the next run removes a crash's) |
-| `/etc/hotserve/age.pub` | 0644 | root:root | `box key` | `box key` (only when missing or not the identity's) | handler (`GET /`) | — |
+| `/etc/hotserve/age.pub` | 0644 | root:root | `box key` | `box key` (only when missing, not the identity's, or not 0644 root:root) | handler (`GET /`) | — |
 | `/etc/hotserve/.age.pub.box-<random>` | 0644 | root:root | `box key` | `box key` | — | `box key` (renamed over `age.pub`, or removed on failure; the next run removes a crash's) |
 | `/etc/hotserve/secrets/` | 2750 | root:hotserve | tmpfiles.d | applier | hotserve, handler, applier | — |
 | `/etc/hotserve/secrets/<app>.env` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | hotserve (each launch of `<app>`, and its response filter), handler (step 4's digest), applier | applier (when `applied.json` lists the app and HEAD has no `secrets/<app>/`) |
@@ -1186,7 +1209,9 @@ written to a temporary in the same directory and fsynced, then linked
 to `identity` with `link(2)`, which fails if the name exists; then the
 temporary is removed and the directory fsynced (I8: a name never
 stands durable over bytes that are not). Over an existing identity it derives the recipient and
-rewrites `age.pub` only if it is missing or another key's. An identity
+rewrites `age.pub` only if it is missing, another key's, or not 0644
+root:root (the handler could not read it, or another account could
+change it). An identity
 that does not parse is refused and nothing is written ("Console
 commands").
 
@@ -1435,7 +1460,7 @@ says.
 | 1 | `box key` | `hotserve box key runs as root: it reads the box's key for secrets` | not root |
 | 1 | `box key` | `/etc/hotserve/age/identity is not an age identity: move it aside, run hotserve box key again, then make rekey BOX_KEY=<the new key> in the repository` | the identity does not parse, or holds other than one X25519 identity |
 | 1 | `box key` | the box's own error as the system words it | anything else; nothing is written over an identity that exists |
-| 0 | `box key` | stdout: `age1…`; stderr: `box key: made /etc/hotserve/age/identity; its key above is the first line of <host>/secrets/recipients` / `box key: this box's key for secrets` | made, or already there (`age.pub` rewritten if it was missing or another key's) |
+| 0 | `box key` | stdout: `age1…`; stderr: `box key: made /etc/hotserve/age/identity; its key above is the first line of <host>/secrets/recipients` / `box key: this box's key for secrets` | made, or already there (`age.pub` rewritten if it was missing, another key's, or not 0644 root:root) |
 | 0 | `init` | `init: secrets for this box encrypt to age1…; hotserve box key prints it again` / the warning `init: could not make the box's key for secrets: <error>; hotserve box key, as root, makes it` | after `applied` or `no_change` (a warning, not a red end: the install stands) |
 
 The remedy, `<sha>` filled in from the argument and `<dir>` with init's directory, absolute (the operator may read it after a one-shot `ssh … "cd … && hotserve init …"` and follow it from root's home):
