@@ -7,10 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/smallhoursorg/hotserve/liveswap"
 )
 
 // The box template's secrets commands — bin/secrets behind make secret,
@@ -944,40 +945,6 @@ func TestBoxSecretsNeedAge(t *testing.T) {
 	}
 }
 
-// envLines is hotserve's env-file parser (liveswap/app.go,
-// parseEnvLines), copied: make secrets-import must read a file as the
-// box would. Once liveswap exports it (ParseEnvFile), this test should
-// call that instead of a copy.
-func envLines(data string) ([]string, error) {
-	var vars []string
-	for i, line := range strings.Split(data, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		key, value, found := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
-		if !found || key == "" {
-			return nil, fmt.Errorf("line %d: not KEY=VALUE", i+1)
-		}
-		if !envKey.MatchString(key) {
-			return nil, fmt.Errorf("line %d: %q is not a valid name", i+1, key)
-		}
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 {
-			if (value[0] == '"' && value[len(value)-1] == '"') ||
-				(value[0] == '\'' && value[len(value)-1] == '\'') {
-				value = value[1 : len(value)-1]
-			}
-		}
-		vars = append(vars, key+"="+value)
-	}
-	return vars, nil
-}
-
-var envKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
 func TestBoxSecretsImport(t *testing.T) {
 	r := secretsRepo(t)
 	r.key("id_ed25519")
@@ -1009,7 +976,9 @@ func TestBoxSecretsImport(t *testing.T) {
 		"CR=line\r",
 		"",
 	}, "\n")
-	want, err := envLines(corpus)
+	// The box's own reading of an env file (liveswap.ParseEnvLines): make
+	// secrets-import must read a file as every launch does.
+	want, err := liveswap.ParseEnvLines("corpus", []byte(corpus))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1044,7 +1013,7 @@ func TestBoxSecretsImport(t *testing.T) {
 		{`EMPTY=""`, "line 2: EMPTY is empty"},
 	} {
 		input := "OK=1\n" + c.line + "\n"
-		if _, err := envLines(input); err == nil && !strings.Contains(c.want, "is empty") {
+		if _, err := liveswap.ParseEnvLines("input", []byte(input)); err == nil && !strings.Contains(c.want, "is empty") {
 			t.Errorf("%q: hotserve's parser takes it, the test expects a refusal", c.line)
 		}
 		out, code := r.secrets("", input, "import", "APP=other")
