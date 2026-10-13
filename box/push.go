@@ -21,13 +21,16 @@ package box
 //     journal is held to a grammar (the id) or passes proof.Bound.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"mime"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -355,17 +358,60 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request) error {
 }
 
 // respondResult answers with a result and step 8's status for its phase.
-// The secrets' names are held out of the filter with the ids: in the
+// The secrets' names are held out of the filter, as the ids are: in the
 // added, changed and removed lists each is `<app>/<VAR>`, out of band an
 // app name, each in its grammar (readResultFile) and never a value — and
-// a variable's name can look as random as a key.
+// a variable's name can look as random as a key. Not by the safe list,
+// which costs a pass over the body per string (16384 names over a
+// result of megabytes would cost a poll tens of gigabytes): the filter
+// reads the result without them, and they are added to what it wrote,
+// as the result's last fields, in its own bytes.
 func respondResult(w http.ResponseWriter, res *result) error {
 	safe := append([]string{res.ID, res.Commit, res.BoxWebhook}, res.Named...)
-	for _, names := range [][]string{res.SecretsAdded, res.SecretsChanged, res.SecretsRemoved, res.SecretsOutOfBand} {
-		safe = append(safe, names...)
+	bare := *res
+	bare.SecretsAdded, bare.SecretsChanged, bare.SecretsRemoved, bare.SecretsOutOfBand = nil, nil, nil, nil
+	whole, err := json.Marshal(res)
+	if err != nil {
+		return err
 	}
-	return respond(w, phaseStatus(res.Phase), res, safe...)
+	without, err := json.Marshal(&bare)
+	if err != nil {
+		return err
+	}
+	// The names' members, `,"secrets_added":[…],…}`, or `}` for none.
+	names, last := bytes.CutPrefix(whole, without[:len(without)-1])
+	if !last {
+		return errors.New("a result's secrets are not its last fields")
+	}
+	held := &heldResponse{header: w.Header()}
+	if err := respond(held, phaseStatus(res.Phase), &bare, safe...); err != nil {
+		return err
+	}
+	body := bytes.TrimSuffix(held.body.Bytes(), []byte("\n"))
+	// Only onto the result the filter passed: a body it withheld in its
+	// place (`{"error":…}`) gets no names.
+	if bytes.HasPrefix(body, []byte(`{"id":`)) && bytes.HasSuffix(body, []byte("}")) {
+		joined := slices.Concat(body[:len(body)-1], names)
+		if json.Valid(joined) {
+			body = joined
+		}
+	}
+	w.WriteHeader(held.code)
+	_, err = w.Write(append(body, '\n'))
+	return err
 }
+
+// heldResponse holds what the filter writes for respondResult to finish:
+// its headers are the real response's.
+type heldResponse struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (h *heldResponse) Header() http.Header         { return h.header }
+func (h *heldResponse) WriteHeader(code int)        { h.code = code }
+func (h *heldResponse) Write(b []byte) (int, error) { return h.body.Write(b) }
 
 // phaseStatus is step 8's status for a phase readResultFile accepted:
 // 202 for `verified`, 200 for the green ends, 422 for the red ones — a

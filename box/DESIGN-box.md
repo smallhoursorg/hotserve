@@ -1327,7 +1327,7 @@ now: a deploy of a new version. Open question 4.
 
 | Check | Handler (steps 5 and 6) | `hotserve box describe` (CI, `make check`) | Root |
 |---|---|---|---|
-| the layout and the proof (step 13) | yes | the layout, read from the directory | yes |
+| the layout and the proof (step 13) | yes | the layout, read from the directory by the proof's own rules (`proof.SecretsLayout`, `proof.AppLayout`) | yes |
 | decryption and the value rules (15a) | no: it cannot read the key | sizes and counts only, from the ciphertext: a value's length to within 2 bytes | yes |
 | the consistency checks below | yes, a 422 | yes, exit 1, and each 75% warning as a `warning` line | no |
 | `recipients` parses, and its first recipient is an X25519 `age1…` | — | yes | — (never read) |
@@ -1363,12 +1363,16 @@ as a token and never quoted back: it may hold a `{$VAR}`.
 Every answer passes liveswap's response filter (the shape and entropy
 layers) with the protocol's own fields on the safe list — `id`,
 `commit`, `sha256`, `box_webhook`, `phase`, `recipient`, each id in
-`named`, and each `<app>/<VAR>` in the `secrets_*` fields, names in
-their grammars, never a value — since a 32-hex id, a 40-hex commit, a
+`named` — since a 32-hex id, a 40-hex commit, a
 64-hex digest and a bech32 key are exactly what the entropy layer
 exists to catch, and a refusal that masked the
 commit it names (the baseline, the unsigned commit on the chain) would
-name nothing. Only `diff` and
+name nothing. The `secrets_*` fields, names in their grammars
+(`readResultFile`) and never a value, are held out too, but not by the
+safe list, which costs a pass over the body per string — up to 16384
+names over a result of megabytes: the filter reads the result without
+them, and they are added after it, as the result's last fields, onto
+the result it passed and never onto a body it withheld. Only `diff` and
 `error` text, which carry bundle-derived bytes, go through every layer;
 the applier redacted the `diff` with those same two layers before
 writing it — liveswap/redact.go's layers 3 (shape) and 4 (entropy);
@@ -1620,7 +1624,14 @@ working tree has it: `secret <app> <VAR> <bytes>` for each secret (the
 value's length, from the ciphertext alone), `recipients <n>`, and a
 `warning <text>` line for each cap past 75%; it refuses what the
 layout table and the consistency checks refuse ("Which checks run
-where").
+where"). It reads the directory as a commit of it would hold it —
+each entry with the mode git gives it, in a git tree's order — and
+feeds it to the proof's own layout code, so its first refusal is the
+one root would name: the layout and each file's size, then the
+consistency checks, then what 15a would refuse of the ciphertext, then
+the recipients file, which root never reads. A dot-name, which git
+usually ignores, is not read but named in a `warning` line; nor is a
+directory holding nothing but those, which git does not commit.
 
 **`box key`** is in "The box's key".
 

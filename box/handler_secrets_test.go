@@ -2,9 +2,13 @@ package box
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -123,6 +127,29 @@ func TestResultSecretNamesUnmasked(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), name) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
+
+	// Added after the filter, as the result's last fields: the answer
+	// is the result's own bytes when the filter masks nothing.
+	res := result{ID: randomID(t), Phase: phaseApplied, Commit: p.base, SecretsAdded: []string{name}, SecretsChanged: []string{"example/B"}, SecretsRemoved: []string{"api/C"}, SecretsOutOfBand: []string{"api"}}
+	p.writeResult(t, res)
+	w = p.get(t, "/?result="+res.ID, p.token(t, ""))
+	if want, _ := json.Marshal(res); w.Body.String() != string(want)+"\n" {
+		t.Fatalf("got %s\nwant %s", w.Body, want)
+	}
+
+	// The filter still reads the rest, beside the most names a push
+	// can report.
+	token := "ghp_" + strings.Repeat("aB3dE5fG7h", 4)[:36]
+	res = result{ID: randomID(t), Phase: phaseApplied, Commit: p.base, Diff: "+ " + token + "\n", SecretsOutOfBand: []string{"api"}}
+	for i := range maxSecretNames {
+		res.SecretsAdded = append(res.SecretsAdded, "example/K"+itoa(i))
+	}
+	p.writeResult(t, res)
+	w = p.get(t, "/?result="+res.ID, p.token(t, ""))
+	var got result
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusOK || strings.Contains(w.Body.String(), token) || !slices.Equal(got.SecretsAdded, res.SecretsAdded) || !slices.Equal(got.SecretsOutOfBand, res.SecretsOutOfBand) {
+		t.Fatalf("%d %v: %.300s", w.Code, err, w.Body)
+	}
 }
 
 // writeTree makes a box directory in a working tree: its Caddyfile and
@@ -197,10 +224,10 @@ func TestDescribeSecrets(t *testing.T) {
 	}{
 		"a directory for no app":           {reads, map[string][]byte{"other/KEY.age": enc("v")}, "secrets/other/ names no app in the new Caddyfile"},
 		"secrets the block does not read":  {secretsFile("", ""), map[string][]byte{"example/KEY.age": enc("v")}, "app example has secrets and no env_file"},
-		"a file that is not a secret":      {reads, map[string][]byte{"example/KEY": []byte("plain")}, "example/KEY is not a secret: a secret's file is <VAR>.age"},
-		"a variable name env cannot carry": {reads, map[string][]byte{"example/1KEY.age": enc("v")}, "1KEY is not an environment variable's name"},
+		"a file that is not a secret":      {reads, map[string][]byte{"example/KEY": []byte("plain")}, "example/KEY is not a secret: only <VAR>.age files are"},
+		"a variable name env cannot carry": {reads, map[string][]byte{"example/1KEY.age": enc("v")}, "1KEY is not a variable name an env file can carry"},
 		"an app name out of grammar":       {reads, map[string][]byte{"Example/KEY.age": enc("v")}, "secrets/Example is not an app's directory"},
-		"a stray file":                     {reads, map[string][]byte{"notes.txt": []byte("x")}, "secrets/notes.txt is not an app's directory: a file"},
+		"a stray file":                     {reads, map[string][]byte{"notes.txt": []byte("x")}, "secrets/notes.txt is not an app's directory: it is a file"},
 		"an armored value":                 {reads, map[string][]byte{"example/KEY.age": []byte("-----BEGIN AGE ENCRYPTED FILE-----\nx\n")}, "is ASCII-armored"},
 		"a plaintext value":                {reads, map[string][]byte{"example/KEY.age": []byte("hunter2\n")}, "does not decrypt: it is not an age file"},
 		"recipients without the box first": {reads, map[string][]byte{"recipients": []byte("ssh-ed25519 AAAA\n"), "example/KEY.age": enc("v")}, "recipients:1: the first recipient is not the box's key"},
@@ -294,7 +321,7 @@ func TestDescribeSecretsFirstRefusal(t *testing.T) {
 		files["example/K"+itoa(i)+".age"] = []byte("x")
 	}
 	err = describe(writeTree(t, secretsFile("\t\t\tenv_file /etc/hotserve/secrets/example.env\n", ""), files), &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "secrets/example/zz is not a secret: a directory") {
+	if err == nil || !strings.Contains(err.Error(), "secrets/example/zz is not a secret: it is a directory") {
 		t.Errorf("%v", err)
 	}
 
@@ -319,30 +346,244 @@ func mistyped(r string) string {
 	return r[:10] + string(c) + r[11:]
 }
 
-// describe lists the working tree in git's order: a directory sorts as
-// if its name ended in `/`, so api-v2 comes before api, as root walks the
-// commit's tree.
-func TestGitOrder(t *testing.T) {
+// describe lists the working tree as a commit of it would: in git's
+// order, where a directory sorts as if its name ended in `/` (so api-v2
+// comes before api) and a submodule's checkout does not; a directory of
+// dot-names alone, or of nothing, left out, its dot-names returned.
+func TestGitTree(t *testing.T) {
 	dir := t.TempDir()
-	for _, d := range []string{"api", "api-v2"} {
+	for _, d := range []string{"api", "api-v2", "sub", "sub-a", "empty", "dots"} {
 		if err := os.Mkdir(filepath.Join(dir, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "recipients"), nil, 0o644); err != nil {
+	for _, f := range []string{"api/K.age", "api-v2/K.age", "sub/.git", "sub-a/K.age", "dots/.DS_Store", "recipients", ".swp"} {
+		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("api", filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := gitOrder(dir)
+	entries, dots, err := gitTree(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got []string
 	for _, e := range entries {
-		got = append(got, e.Name())
+		got = append(got, e.name+":"+e.mode)
 	}
-	if want := "api-v2 api recipients"; strings.Join(got, " ") != want {
+	if want := "api-v2:40000 api:40000 link:120000 recipients:100644 sub:160000 sub-a:40000"; strings.Join(got, " ") != want {
 		t.Errorf("%v, want %s", got, want)
 	}
+	if want := ".swp dots/.DS_Store"; strings.Join(dots, " ") != want {
+		t.Errorf("dot-names %v, want %s", dots, want)
+	}
+}
+
+// node is one entry of a box directory in a test: a file, an
+// executable one, a symlink, or a submodule's checkout (a directory
+// holding .git); a directory is implied by the paths below it.
+type node struct {
+	kind byte   // 'f', 'x', 'l' or 's'
+	data []byte // a file's bytes, a link's target
+}
+
+// writeNodes makes nodes, paths from top, in a working tree.
+func writeNodes(t *testing.T, top string, nodes map[string]node) {
+	t.Helper()
+	for p, n := range nodes {
+		full := filepath.Join(top, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		switch n.kind {
+		case 'f':
+			err = os.WriteFile(full, n.data, 0o644)
+		case 'x':
+			err = os.WriteFile(full, n.data, 0o755)
+		case 'l':
+			err = os.Symlink(string(n.data), full)
+		case 's':
+			if err = os.Mkdir(full, 0o755); err == nil {
+				err = os.WriteFile(filepath.Join(full, ".git"), []byte("gitdir: ../.git/modules/x\n"), 0o644)
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// treeOfNodes is the tree git commits for nodes, with each tree under
+// it and each file's blob added to trees and blobs: written here from
+// git's rules, not from describe's, and held to them by
+// proof.ParseTree, which refuses a tree out of git's order.
+func treeOfNodes(nodes map[string]node, trees map[string][]byte, blobs map[string][]byte) []byte {
+	type entry struct{ mode, name, id string }
+	var entries []entry
+	below := map[string]map[string]node{}
+	for p, n := range nodes {
+		if first, rest, nested := strings.Cut(p, "/"); nested {
+			if below[first] == nil {
+				below[first] = map[string]node{}
+			}
+			below[first][rest] = n
+			continue
+		}
+		switch n.kind {
+		case 'f', 'x':
+			id := proof.ObjectID("blob", n.data)
+			blobs[id] = n.data
+			entries = append(entries, entry{map[byte]string{'f': "100644", 'x': "100755"}[n.kind], p, id})
+		case 'l':
+			entries = append(entries, entry{"120000", p, proof.ObjectID("blob", n.data)})
+		case 's':
+			entries = append(entries, entry{"160000", p, proof.ObjectID("commit", n.data)})
+		}
+	}
+	for name, inner := range below {
+		raw := treeOfNodes(inner, trees, blobs)
+		id := proof.ObjectID("tree", raw)
+		trees[id] = raw
+		entries = append(entries, entry{"40000", name, id})
+	}
+	key := func(e entry) string {
+		if e.mode == "40000" {
+			return e.name + "/"
+		}
+		return e.name
+	}
+	slices.SortFunc(entries, func(a, b entry) int { return strings.Compare(key(a), key(b)) })
+	var raw []byte
+	for _, e := range entries {
+		raw = append(raw, treeObject(e.mode, e.name, e.id)...)
+	}
+	return raw
+}
+
+// describe and root's proof hold the secrets to one layout: for a
+// working tree and the commit of it, each case of the layout table
+// ("Layout in the repository"), and the order in which a tree with
+// more than one fault is refused, describe's first refusal is the
+// proof's, less its " in <sha>"; and where the proof admits the tree,
+// describe reads the same apps and variables. (Dot-names, which
+// describe leaves out with a warning, are outside it: git commits them
+// unless they are ignored.)
+func TestDescribeRefusesAsTheProof(t *testing.T) {
+	f := func(s string) node { return node{'f', []byte(s)} }
+	link := node{'l', []byte("elsewhere")}
+	sub := node{'s', []byte("a submodule")}
+	value := f("age-encryption.org/v1\n")
+	many := func(n int, path func(i int) string) map[string]node {
+		nodes := map[string]node{}
+		for i := range n {
+			nodes[path(i)] = value
+		}
+		return nodes
+	}
+	with := func(nodes map[string]node, more map[string]node) map[string]node {
+		maps.Copy(nodes, more)
+		return nodes
+	}
+	cases := map[string]struct {
+		nodes  map[string]node
+		admits bool
+	}{
+		"apps, values and recipients":  {map[string]node{"secrets/recipients": f("age1…\n"), "secrets/example/DATABASE_URL.age": value, "secrets/example/STRIPE_KEY.age": value, "secrets/api/K.age": value}, true},
+		"recipients alone":             {map[string]node{"secrets/recipients": f("age1…\n")}, true},
+		"an executable value":          {map[string]node{"secrets/example/K.age": {'x', value.data}}, true},
+		"secrets as a file":            {map[string]node{"secrets": f("x")}, false},
+		"secrets as a symlink":         {map[string]node{"secrets": link}, false},
+		"secrets as a submodule":       {map[string]node{"secrets": sub}, false},
+		"a file in secrets/":           {map[string]node{"secrets/README": f("x")}, false},
+		"a symlink in secrets/":        {map[string]node{"secrets/example": link}, false},
+		"a submodule in secrets/":      {map[string]node{"secrets/example": sub}, false},
+		"recipients as a directory":    {map[string]node{"secrets/recipients/K.age": value}, false},
+		"recipients as a symlink":      {map[string]node{"secrets/recipients": link}, false},
+		"an app name out of grammar":   {map[string]node{"secrets/Example/K.age": value}, false},
+		"_backup, held for later":      {map[string]node{"secrets/_backup/K.age": value}, false},
+		"a directory in an app's":      {map[string]node{"secrets/example/deeper/K.age": value}, false},
+		"a symlinked value":            {map[string]node{"secrets/example/K.age": link}, false},
+		"a submodule as a value":       {map[string]node{"secrets/example/K.age": sub}, false},
+		"a value without .age":         {map[string]node{"secrets/example/DATABASE_URL": value}, false},
+		"a variable name from a digit": {map[string]node{"secrets/example/1X.age": value}, false},
+		"a variable name with a dash":  {map[string]node{"secrets/example/my-var.age": value}, false},
+		"a variable name with a space": {map[string]node{"secrets/example/A B.age": value}, false},
+		"a variable name over its cap": {map[string]node{"secrets/example/" + strings.Repeat("A", proof.MaxVarName+1) + ".age": value}, false},
+		"a value over its cap":         {map[string]node{"secrets/example/K.age": f(strings.Repeat("x", proof.MaxSecretFile+1))}, false},
+		// past a cap an entry is only counted, its name never read
+		"apps past the cap":   {with(many(proof.MaxSecretApps+1, func(i int) string { return "secrets/app" + itoa(i) + "/K.age" }), map[string]node{"secrets/zBad/K.age": value}), false},
+		"values past the cap": {with(many(proof.MaxSecretVars+1, func(i int) string { return "secrets/example/K" + itoa(i) + ".age" }), map[string]node{"secrets/example/zz": value}), false},
+		// but its type is
+		"a directory past the cap": {with(many(proof.MaxSecretVars+1, func(i int) string { return "secrets/example/K" + itoa(i) + ".age" }), map[string]node{"secrets/example/zz/K.age": value}), false},
+		// the order of faults: git's order, every app's name before any
+		// app's values, and one app's values and sizes before the next's
+		"git's order of trees":               {map[string]node{"secrets/api/1BAD.age": value, "secrets/api-v2/2BAD.age": value}, false},
+		"secrets/ before an app's directory": {map[string]node{"secrets/aa/1BAD.age": value, "secrets/zz-file": f("x")}, false},
+		"an app's size before the next app":  {map[string]node{"secrets/aa/K.age": f(strings.Repeat("x", proof.MaxSecretFile+1)), "secrets/bb/1BAD.age": value}, false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			caddyfile := []byte("# the file\n")
+			// The commit, as git builds it.
+			trees, blobs := map[string][]byte{}, map[string][]byte{}
+			top := treeOfNodes(with(maps.Clone(c.nodes), map[string]node{"Caddyfile": {'f', caddyfile}}), trees, blobs)
+			r := newRepo(t)
+			head := r.commitSub(top, caddyfile, nil)
+			commit, err := proof.ParseCommit(r.objects[head])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range r.trees[head] {
+				trees[id] = r.objects[id]
+			}
+			parsed := map[string]*proof.Tree{}
+			for id, raw := range trees {
+				tr, err := proof.ParseTree(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parsed[id] = tr
+			}
+			proved, perr := proof.ProveSecrets(commit, parsed, blobs, testPath, secretNames)
+
+			// The working tree.
+			work := t.TempDir()
+			writeNodes(t, filepath.Join(work, "box1"), with(maps.Clone(c.nodes), map[string]node{"Caddyfile": {'f', caddyfile}}))
+			t.Chdir(work)
+			read, derr := readTreeSecrets(testPath)
+
+			var want, got string
+			if perr != nil {
+				var r *proof.Refusal
+				if !errors.As(perr, &r) || strings.HasPrefix(r.Msg, "bundle:") {
+					t.Fatalf("the proof: %v", perr)
+				}
+				want = strings.ReplaceAll(r.Msg, " in "+head, "")
+			}
+			if derr != nil {
+				got = derr.Error()
+			}
+			switch {
+			case (perr == nil) != c.admits:
+				t.Fatalf("the proof: %v", perr)
+			case got != want:
+				t.Fatalf("describe: %q\nthe proof: %q", got, want)
+			case perr == nil && !sameNames(proved, read.secrets):
+				t.Fatalf("describe read %+v, the proof %+v", read.secrets, proved)
+			}
+		})
+	}
+}
+
+// sameNames reports whether a and b name the same apps and variables, in
+// the same order.
+func sameNames(a, b *proof.Secrets) bool {
+	return slices.EqualFunc(a.Apps, b.Apps, func(x, y proof.SecretApp) bool {
+		return x.Name == y.Name && slices.EqualFunc(x.Vars, y.Vars, func(v, w proof.SecretVar) bool { return v.Name == w.Name })
+	})
 }
 
 // The caps past 75% are warnings in describe's output, before a push
