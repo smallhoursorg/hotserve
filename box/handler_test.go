@@ -57,6 +57,7 @@ func newRig(t testing.TB) *rig {
 		installed: r.installed,
 		dir:       r.dir,
 		secrets:   filepath.Join(tmp, "secrets"),
+		agePub:    filepath.Join(tmp, "age.pub"),
 		slot:      make(chan struct{}, 1),
 	}
 	if err := os.MkdirAll(r.dir, 0o755); err != nil {

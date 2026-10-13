@@ -662,7 +662,7 @@ touched does not stop their write-back.
 | result | `named` | handler, applier | the object ids a refusal's `error` names — HEAD, the baseline, a commit on the chain, a tree — each in the id grammar, at most 8; a result that breaks either rule does not read. An id the bundle itself spelled (a `parent` header) is the pusher's own, so naming it back reveals nothing of the box's |
 | record | `error` | applier | in a `rolling_back` record, the catalogue text its `rolled_back` result will carry, so recovery reports the reason the live run would have |
 | `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline; this box's path (`<host>/Caddyfile`, as `init` derived it); the digest of the file the last apply installed (`baseline` keeps `path` and `sha256` as it finds them); who verified — a principal, or `init` or `baseline` for the console; when |
-| `applied.json` | `secrets_tree`, `secrets` | applier; `init` and `baseline` keep them as they find them | the baseline's secrets tree id (`""`, or the field absent, for none) and the `app → sha256` map of the env files the box manages: the only ones it may remove, and the digests step 4's fast path and the out-of-band flag compare. Every write from a transaction, `no_change` included, sets both from HEAD — its secrets tree, and the digest of every env file of HEAD's apps as it stands once the transaction ends — so a rekey records its new tree, and a console-made file whose bytes are HEAD's becomes listed. Absent in a file a box without secrets wrote, which reads as none; env files listed with no `secrets_tree` are no state a write makes, and the file does not read |
+| `applied.json` | `secrets_tree`, `secrets` | applier; `init` and `baseline` keep them as they find them | the baseline's secrets tree id (`""`, or the field absent, for none) and the `app → sha256` map of the env files the box manages: the only ones it may remove, and the digests step 4's fast path and the out-of-band flag compare. Every write from the applier's transaction, `no_change` included, sets both from HEAD — its secrets tree, and the digest of every env file of HEAD's apps as it stands once the transaction ends — so a rekey records its new tree, and a console-made file whose bytes are HEAD's becomes listed. Absent in a file a box without secrets wrote, which reads as none; env files listed with no `secrets_tree` are no state a write makes, and the file does not read |
 | marker | `posted` | handler | time of admission |
 
 **The relations between fields.** One validator per file holds every
@@ -824,6 +824,7 @@ refusing every push at admission — scores severity 1.
 | A crash or shutdown between the swap and the reload's outcome, for a file that validates but does not load: hotserve starts on it at boot and fails, and recovery puts the previous bytes back on a hotserve that stays down (`failed`, "hotserve is not running") | States, `swapped` and `rolling_back` | 4 | 2 | 1 | 8; red, and the result names the commands that start hotserve on the previous file |
 | What a console put at an env file's name that is not root's own is not put back as it was by a rollback: a link reads as no file, so the push replaces it and the rollback removes the push's file; a file at another mode or owner gets its bytes back at 0640 `root:hotserve` | "Values and the env file" | 2 | 2 | 3 | 12; two independent faults (a console's own entry in root's directory, then a failed push), and the push is red and named |
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
+| A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4: a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
 
 ## Admission
 
@@ -1327,17 +1328,18 @@ now: a deploy of a new version. Open question 4.
 
 | Check | Handler (steps 5 and 6) | `hotserve box describe` (CI, `make check`) | Root |
 |---|---|---|---|
-| the layout and the proof (step 13) | yes | the layout, read from the directory | yes |
+| the layout and the proof (step 13) | yes | the layout, read from the directory by the proof's own rules (`proof.SecretsLayout`, `proof.AppLayout`) | yes |
 | decryption and the value rules (15a) | no: it cannot read the key | sizes and counts only, from the ciphertext: a value's length to within 2 bytes | yes |
 | the consistency checks below | yes, a 422 | yes, exit 1, and each 75% warning as a `warning` line | no |
-| `recipients` parses, and its first recipient is an X25519 `age1…` | — | yes | — (never read) |
+| `recipients` parses as age reads it, within age's own bounds (16 MiB a file, 8 KiB a recipient's line, no identity among them), and its first recipient is an X25519 `age1…` | — | yes | — (never read) |
 | the box's key is `recipients`' first | — | — | — (the workflow, against `GET /`) |
 
 The consistency checks read the token walk of the new file (it already
 sees each `app` block, box/tokens.go) and the secrets tree. They catch
 a signer's mistakes and guard nothing — root installs what a signer
 signed — so root does not repeat them. `env_file`'s value is compared
-as a token and never quoted back: it may hold a `{$VAR}`.
+as a path, after `filepath.Clean`, and never quoted back: it may hold a
+`{$VAR}`.
 
 | Condition | Refused as |
 |---|---|
@@ -1363,12 +1365,16 @@ as a token and never quoted back: it may hold a `{$VAR}`.
 Every answer passes liveswap's response filter (the shape and entropy
 layers) with the protocol's own fields on the safe list — `id`,
 `commit`, `sha256`, `box_webhook`, `phase`, `recipient`, each id in
-`named`, and each `<app>/<VAR>` in the `secrets_*` fields, names in
-their grammars, never a value — since a 32-hex id, a 40-hex commit, a
+`named` — since a 32-hex id, a 40-hex commit, a
 64-hex digest and a bech32 key are exactly what the entropy layer
 exists to catch, and a refusal that masked the
 commit it names (the baseline, the unsigned commit on the chain) would
-name nothing. Only `diff` and
+name nothing. The `secrets_*` fields, names in their grammars
+(`readResultFile`) and never a value, are held out too, but not by the
+safe list, which costs a pass over the body per string — up to 16384
+names over a result of megabytes: the filter reads the result without
+them, and they are added after it, as the result's last fields, onto
+the result it passed and never onto a body it withheld. Only `diff` and
 `error` text, which carry bundle-derived bytes, go through every layer;
 the applier redacted the `diff` with those same two layers before
 writing it — liveswap/redact.go's layers 3 (shape) and 4 (entropy);
@@ -1620,7 +1626,14 @@ working tree has it: `secret <app> <VAR> <bytes>` for each secret (the
 value's length, from the ciphertext alone), `recipients <n>`, and a
 `warning <text>` line for each cap past 75%; it refuses what the
 layout table and the consistency checks refuse ("Which checks run
-where").
+where"). It reads the directory as a commit of it would hold it —
+each entry with the mode git gives it, in a git tree's order — and
+feeds it to the proof's own layout code, so its first refusal is the
+one root would name: the layout and each file's size, then the
+consistency checks, then what 15a would refuse of the ciphertext, then
+the recipients file, which root never reads. A dot-name, which git
+usually ignores, is not read but named in a `warning` line; nor is a
+directory holding nothing but those, which git does not commit.
 
 **`box key`** is in "The box's key".
 
