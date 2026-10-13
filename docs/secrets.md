@@ -219,9 +219,11 @@ encrypts every value again, to the new key in place of the old one.
 Commit and push, **before the app's first deploy to the new box**:
 `init` installs no secrets, so until this push applies the box has no
 env file for the app, and a launch that reads a missing one fails.
-Until then the workflow also goes red before it sends anything, naming
-the box's new key, since the values in the repository are encrypted to
-the old one.
+Until then the workflow also stops before it sends anything, since the
+values in the repository are encrypted to the old key, and names the
+new one: `the box's key is <age1…>, but the first recipient in
+deploy.example.com/secrets/recipients is <age1…>: a rebuilt box has a
+new key. …` ([What is checked, and where](#what-is-checked-and-where)).
 
 ### A box cloned from a snapshot
 
@@ -301,14 +303,25 @@ the app's last deploy again does not: the box refuses a deploy, and a
 rollback, to the version that is already running.
 
 An env file edited or deleted on the box by hand is put back by the
-next push, which names the app in its output, as a hand edit of the
-Caddyfile is: the repository is the truth.
+next push, as a hand edit of the Caddyfile is: the repository is the
+truth. The run says so, as a warning:
 
-## What the box refuses
+```
+apply: example's env file on the box had been edited there since the last apply; this push replaced the edit with deploy.example.com/secrets/example/ at 9be0d44
+```
 
-The checks run in the pull request's check run (`make check`), so
-most mistakes are caught before anything is merged; the box makes them
-again when a push arrives, and the run quotes the reason. Each is in
+## What is checked, and where
+
+`make check`, which the workflow runs on every push and pull request,
+prints a secrets count on each box's line:
+
+```
+deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer, 2 secrets)
+```
+
+It refuses, before anything is merged, what would never reach an app;
+the box refuses the same when a push arrives, and the run quotes the
+reason. Each is in
 [box/DESIGN-box.md](../box/DESIGN-box.md#which-checks-run-where),
 "Which checks run where":
 
@@ -321,15 +334,36 @@ again when a push arrives, and the run quotes the reason. Each is in
 - a variable an `env` line in the app's block also sets (the `env` line
   would win, so the secret would never reach the app), and one named
   `SOCKET`, which hotserve sets itself;
-- anything in `secrets/` that is not `recipients` or an app's
-  directory of `<VAR>.age` files.
+- values with no `recipients` file beside them.
 
-The box alone checks what needs its key: that each value is encrypted
-to it, decrypts whole, and is a value an env file can hold. The counts
-and sizes have limits — how many apps have secrets, how many each app
-has, how large an app's env file may be — listed with their reasons in
-[Caps](../box/DESIGN-box.md#caps); `make check` warns at three quarters
-of each, in the pull request, before a push meets the limit.
+It warns about two names a case-insensitive disk would merge, such as
+`DATABASE_URL.age` and `database_url.age`: the box keeps both, but a
+Mac's checkout holds only one.
+
+The box checks the rest when a push arrives: that nothing in
+`secrets/` is other than `recipients` and app directories of
+`<VAR>.age` files (no links, no stray files), and, with its key, that
+each value is encrypted to it, decrypts whole, and is a value an env
+file can hold. The counts and sizes have limits — how many apps have
+secrets, how many each app has, how large an app's env file may be —
+listed with their reasons in [Caps](../box/DESIGN-box.md#caps); `make
+check` warns at three quarters of each, in the pull request, before a
+push meets the limit.
+
+Before it sends anything, the workflow compares the box's key with the
+first line of `recipients`, and stops, with nothing sent, on:
+
+- another key on the box: `the box's key is <age1…>, but the first
+  recipient in <host>/secrets/recipients is <age1…>: a rebuilt box has
+  a new key. Confirm it with ssh root@<host> hotserve box key, then
+  make rekey BOX_KEY=<age1…>, commit and push; nothing was sent`
+  ([A rebuilt box](#a-rebuilt-box));
+- no key on the box: `the box names no key for secrets (no recipient in
+  GET /): upgrade hotserve there to a release that installs secrets, or
+  run hotserve box key as root on it; nothing was sent`;
+- values with no recipients file: `<host>/secrets holds values but no
+  recipients file names a key: make secret APP=… VAR=… BOX_KEY=$(ssh
+  root@<host> hotserve box key) makes one; nothing was sent`.
 
 ## Who can read what
 
