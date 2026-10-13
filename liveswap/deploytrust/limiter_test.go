@@ -36,7 +36,7 @@ func TestAuthLimiterWindow(t *testing.T) {
 		t.Fatalf("a different address was affected: %+v", v)
 	}
 	// Over-budget failures are not recorded, so the window is exactly
-	// the logged ones: nothing more is logged until the oldest ages out.
+	// the budgeted ones: nothing more counts until the oldest ages out.
 	clk.Advance(30 * time.Second) // t=50
 	if v := l.fail("a"); v.log || len(l.keys["a"].times) != 3 {
 		t.Fatalf("t=50: %+v with %d recorded, want unlogged and 3", v, len(l.keys["a"].times))

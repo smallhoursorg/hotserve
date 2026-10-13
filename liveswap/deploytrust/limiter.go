@@ -15,11 +15,12 @@ import (
 // box), so failed authentications are not a guessing oracle; what an
 // unauthenticated caller can do with them is make hotserve write a
 // Warn per request, without bound — a journal-fill primitive. The
-// throttle bounds that: an address's failures are logged up to
-// FailBudget per FailWindow, and further ones are not logged until its
-// oldest logged failure ages out; the process as a whole logs at most
-// FailGlobalBudget failures per window however many addresses a flood
-// comes from. Both budgets decide what is logged — every line, the
+// throttle bounds that: an address's failures are counted up to
+// FailBudget per FailWindow, and further ones are neither counted nor
+// logged until its oldest counted failure ages out; the process as a
+// whole logs at most FailGlobalBudget failures per window however many
+// addresses a flood comes from, so a failure inside its address's
+// budget still goes unlogged once the process's is spent. Both budgets decide what is logged — every line, the
 // once-per-window "budget spent" lines included — and nothing else:
 // every refusal is answered the same flat 401 whatever the budgets
 // say, so a caller cannot see them, and a client never has a reason to
@@ -72,9 +73,9 @@ type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now() }
 
-// Limiter is a sliding window of logged authentication failures
-// per client address, plus one for the process. Expiry happens on the
-// touches themselves; there is nothing to clean up.
+// Limiter is a sliding window of counted authentication failures
+// per client address, plus one of logged ones for the process. Expiry
+// happens on the touches themselves; there is nothing to clean up.
 type Limiter struct {
 	budget       int
 	globalBudget int
@@ -93,7 +94,8 @@ type Limiter struct {
 	outages map[outageKey]time.Time
 }
 
-// failWindow is the failures logged inside the window, oldest first,
+// failWindow is the failures counted inside the window, oldest first
+// (logged or not: the process budget decides that after they count),
 // and whether the line saying the budget is spent has been written
 // for this window (the window drains before it is written again).
 type failWindow struct {
@@ -140,8 +142,8 @@ func (l *Limiter) fail(key string) failVerdict {
 	fw.times = withinWindow(fw.times, now, l.window)
 	if len(fw.times) >= l.budget {
 		// Over budget: not recorded, so the window is exactly the
-		// logged failures, and the next is logged once the oldest ages
-		// out.
+		// budgeted failures, and the next is counted once the oldest
+		// ages out.
 		return failVerdict{}
 	}
 	if len(fw.times) == 0 {
