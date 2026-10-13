@@ -92,11 +92,14 @@ type repo struct {
 	objects map[string][]byte // id → raw, by kind below
 	files   map[string][]byte // commit id → the file at testPath
 	trees   map[string][2]string
-	when    int
+	// extra are bundle files a commit carries beyond the Caddyfile's
+	// path: its secrets' trees and blobs (commitSecrets).
+	extra map[string]map[string][]byte
+	when  int
 }
 
 func newRepo(t testing.TB) *repo {
-	return &repo{t: t, objects: map[string][]byte{}, files: map[string][]byte{}, trees: map[string][2]string{}}
+	return &repo{t: t, objects: map[string][]byte{}, files: map[string][]byte{}, trees: map[string][2]string{}, extra: map[string]map[string][]byte{}}
 }
 
 func treeObject(mode, name, id string) []byte {
@@ -107,8 +110,12 @@ func treeObject(mode, name, id string) []byte {
 // commit makes a commit of file at testPath with the given first
 // parent ("" for a root), signed by key unless key is nil.
 func (r *repo) commit(file []byte, key *testKey, parents ...string) string {
-	blob := proof.ObjectID("blob", file)
-	sub := treeObject("100644", "Caddyfile", blob)
+	return r.commitSub(treeObject("100644", "Caddyfile", proof.ObjectID("blob", file)), file, key, parents...)
+}
+
+// commitSub is commit with the box1 tree given whole: the Caddyfile's
+// entry and whatever stands beside it.
+func (r *repo) commitSub(sub, file []byte, key *testKey, parents ...string) string {
 	subID := proof.ObjectID("tree", sub)
 	root := treeObject("40000", "box1", subID)
 	rootID := proof.ObjectID("tree", root)
@@ -158,6 +165,9 @@ func (r *repo) bundleFiles(head, baseline string) map[string][]byte {
 	}
 	tr := r.trees[head]
 	files["trees/"+tr[0]], files["trees/"+tr[1]] = r.objects[tr[0]], r.objects[tr[1]]
+	for name, data := range r.extra[head] {
+		files[name] = data
+	}
 	n := 0
 	for c := r.firstParent(head); c != "" && c != baseline; c = r.firstParent(c) {
 		n++

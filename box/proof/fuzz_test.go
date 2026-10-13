@@ -173,6 +173,8 @@ func FuzzReadBundle(f *testing.F) {
 	f.Add(tgz(f, h.with("README", []byte("x"))))
 	f.Add(tgz(f, h.with("parents/0002", h.parent.Raw)))
 	f.Add(tgz(f, h.with("trees/"+h.root.ID, h.inner.Raw)))
+	f.Add(tgz(f, h.with("blobs/"+ObjectID("blob", []byte("age")), []byte("age"))))
+	f.Add(tgz(f, h.with("blobs/"+emptyBlob, []byte("not empty"))))
 	f.Add(tgz(f, map[string][]byte{}))
 	f.Add([]byte("not gzip"))
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -198,9 +200,70 @@ func FuzzReadBundle(f *testing.F) {
 				t.Fatalf("parent %s", c.ID)
 			}
 		}
+		if len(b.Trees) > MaxTrees || len(b.Blobs) > MaxBlobs {
+			t.Fatalf("%s: over a count cap", b)
+		}
 		for id, tr := range b.Trees {
 			if tr.ID != id || ObjectID("tree", tr.Raw) != id {
 				t.Fatalf("tree %s filed as %s", tr.ID, id)
+			}
+		}
+		for id, data := range b.Blobs {
+			if len(data) > MaxSecretFile || ObjectID("blob", data) != id {
+				t.Fatalf("blob filed as %s", id)
+			}
+		}
+	})
+}
+
+// FuzzProveSecrets builds a commit whose secrets tree and one app tree
+// are the fuzzer's, and holds what ProveSecrets returns to its rules:
+// only refusals as errors, and anything it accepts made of names in the
+// grammars and blobs the trees name.
+func FuzzProveSecrets(f *testing.F) {
+	val := []byte("age-encryption.org/v1 value")
+	app := treeObject(Entry{ModeFile, "K.age", ObjectID("blob", val)})
+	f.Add(treeObject(Entry{ModeDir, "example", ObjectID("tree", app)}, Entry{ModeFile, "recipients", emptyBlob}), app, val)
+	f.Add(treeObject(Entry{ModeFile, "recipients", emptyBlob}), app, val)
+	f.Add(treeObject(Entry{ModeDir, "Bad", ObjectID("tree", app)}), app, val)
+	f.Add(treeObject(Entry{ModeDir, "example", ObjectID("tree", app)}), treeObject(Entry{ModeSymlink, "K.age", ObjectID("blob", val)}), val)
+	f.Add([]byte("junk"), app, val)
+	f.Fuzz(func(t *testing.T, secretsRaw, appRaw, blob []byte) {
+		st, err := ParseTree(secretsRaw)
+		if err != nil {
+			return
+		}
+		trees := map[string]*Tree{st.ID: st}
+		if at, err := ParseTree(appRaw); err == nil {
+			trees[at.ID] = at
+		}
+		host, _ := ParseTree(treeObject(Entry{ModeFile, "Caddyfile", emptyBlob}, Entry{ModeDir, "secrets", st.ID}))
+		root, _ := ParseTree(treeObject(Entry{ModeDir, "h", host.ID}))
+		trees[host.ID], trees[root.ID] = host, root
+		c, err := ParseCommit(commitObject(root.ID, nil, nil, "m\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		blobs := map[string][]byte{ObjectID("blob", blob): blob}
+		s, err := ProveSecrets(c, trees, blobs, "h/Caddyfile", Names{App: func(s string) bool { return s != "" && !strings.ContainsAny(s, "ABC/\x00") }, Var: func(s string) bool { return s != "" && !strings.Contains(s, "-") }})
+		if err != nil {
+			var r *Refusal
+			if !asRefusal(err, &r) {
+				t.Fatalf("not a refusal: %v", err)
+			}
+			return
+		}
+		if s.Tree != st.ID || len(s.Apps) > MaxSecretApps {
+			t.Fatalf("%+v", s)
+		}
+		for _, a := range s.Apps {
+			if a.Name == "" || strings.ContainsAny(a.Name, "ABC") || len(a.Vars) == 0 || len(a.Vars) > MaxSecretVars {
+				t.Fatalf("app %+v", a)
+			}
+			for _, v := range a.Vars {
+				if v.Name == "" || strings.Contains(v.Name, "-") || len(v.Name) > MaxVarName || ObjectID("blob", v.Data) != v.Blob {
+					t.Fatalf("var %+v", v)
+				}
 			}
 		}
 	})

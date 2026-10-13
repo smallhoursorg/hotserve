@@ -38,7 +38,14 @@ Windows, and macOS-as-a-server are out of scope by product design.
    file's owner and group it is the file's mode that keeps them (0640
    root:hotserve as documented; root reads anything); config load and
    each launch warn when the mode admits everyone (`warnEnvFileModeOf`,
-   liveswap/app.go). Owner and group are not checked.
+   liveswap/app.go). Owner and group are not checked. Where the box's
+   config repository carries an app's secrets (box/DESIGN-box.md,
+   "Secrets": designed, not yet built), the env file is
+   `/etc/hotserve/secrets/<app>.env`, written 0640 by the `box` applier
+   into a setgid `root:hotserve` directory, and the values also exist
+   encrypted in that repository's history, which the box's key for
+   secrets (`/etc/hotserve/age/identity`, root 0600 in a 0700 root
+   directory) and each reader's key decrypt.
 5. **The box's configuration at rest** — `/etc/hotserve/Caddyfile`:
    which repository may deploy each app, each app's command and
    flags, which hosts are served, and who may change the file itself.
@@ -477,7 +484,8 @@ by any:
 
 No account gains a read it did not already have: the file is
 root:hotserve 0640 by the tutorial's install line (nothing in hotserve
-enforces that), `/run/user` — the manager's socket and the transient
+enforces that), or, for a file the `box` applier writes, by the
+applier's own mode and the setgid directory it writes into, `/run/user` — the manager's socket and the transient
 file alike — is outside every view (`sandboxNeverReachable`,
 liveswap/sandbox.go), and the PID namespace hides the process from
 siblings. Stated because the manager's two copies are not obvious from
@@ -491,7 +499,8 @@ not a plan.
 The second authenticated entry point, and the only one whose outcome
 is a root-owned file. [box/DESIGN-box.md](box/DESIGN-box.md) is
 authoritative for its behaviour; this section places it. Status:
-built on main, not yet in a release. On a box set up from the
+released in v0.3.0; the secrets it is designed to carry (below) are
+not yet built. On a box set up from the
 template (`examples/box`; docs/first-deploy.md, step 3) root writes
 the file once, with `hotserve init`, and the config repository's
 signed pushes write it after that. A box with no `box` block has no
@@ -551,7 +560,9 @@ the template, and with it the only account that could change config
 replaced, as the template's README says). The `HOTSERVE_SECRETS` half
 (a root `install` that creates `/etc/hotserve/<app>.env` 0640
 root:hotserve, and `sudoedit` of it) stays, for an administrator where
-one is set up. A leaked PAT, a
+one is set up, until secrets ride this channel (below); then it leaves
+the template too, and an administrator is an account for the journal
+alone. A leaked PAT, a
 stolen GitHub session or an OAuth app with `contents:write` can push
 to `main` and cannot produce the signature, so it cannot change the
 box with anything a signer did not sign: its own commit is refused on
@@ -623,6 +634,53 @@ on the proof, not sha1dc. A signer's laptop is the operator; a
 software-held signing key makes its compromise total for the box,
 which a hardware-held (`sk-`) key reduces to "cannot sign unattended".
 
+**Secrets through the same channel** (designed in box/DESIGN-box.md,
+"Secrets"; not yet built). Each value is an age file in the config
+repository, `<host>/secrets/<app>/<VAR>.age`, encrypted on a laptop to
+the box's own X25519 key and to readers — the signers' SSH keys, or an
+age key of a person's own. The bundle carries the ciphertext; the
+handler and root prove it against the signed commit as they prove the
+Caddyfile; root alone decrypts it, after every signature on the chain
+has verified, and writes `/etc/hotserve/secrets/<app>.env`. What
+changes:
+
+- **Nothing new for the hotserve uid or root.** T5 reads every env file
+  now, as it reads every hand-made one, and cannot read the box's key
+  (root 0600, in a 0700 root directory). It can answer the workflow's
+  `GET /` with any key; the workflow only compares that answer with
+  the repository's `recipients`, and the remedy it names, `make
+  rekey`, is a person's after reading the key from root over SSH —
+  and a substituted key would gain T5 only values it reads already.
+  Root decrypts nothing a listed signer did not commit, so a T5 bundle
+  dropped into `in/` cannot have root open hostile age input.
+- **Nothing new for a signer**, either: a signed commit could already
+  add a site that serves any file the hotserve uid reads, env files
+  included (examples/box/README.md, "Secrets").
+- **New: the values leave the box, encrypted.** GitHub, every clone and
+  every fork hold them for ever. A reader's private key with read
+  access to the repository decrypts every value encrypted to it, in
+  all of history, offline, and nothing on the box or at GitHub sees it
+  beyond the clone. The template makes every signer whose key age can
+  use a reader (box/DESIGN-box.md, "Layout in the repository"), so a
+  signer's software key now yields the values without a push. A
+  reader removed from `recipients` keeps what was encrypted to them:
+  age has no revocation, so a person leaving, or a leaked key, means
+  new values, not only new ciphertext.
+- **New: names and lengths are public to repository readers.** The
+  layout puts each variable's name in a file name, and age pads
+  nothing, so anyone with `contents:read` learns which apps have
+  secrets, what they are called, how long each value is, and when it
+  changed.
+- **New: harvest now, decrypt later.** The box's key is X25519, and
+  no reader key age takes from an SSH key is post-quantum either
+  (`ssh-ed25519` is wrapped through X25519, `ssh-rsa` with RSA-OAEP);
+  age's post-quantum hybrid keys cannot share a file with SSH-key
+  recipients. Ciphertext kept for ever is
+  open to a future quantum computer; the path is every reader on an
+  `age1pq` key and one rekey, which protects only new ciphertext: the
+  old stays in history, so a value that must stay secret is changed
+  too (box/DESIGN-box.md, Open questions).
+
 ### Install-time — `packaging/postinstall.sh`
 
 Runs as root at install; creates the `hotserve` user, chowns
@@ -684,6 +742,10 @@ scope for the runtime model, in scope for release signing (roadmap).
   present only what a signer signed, in order, for this box, including
   `HEAD` again after a console edit; the third is the operator, bounded
   only by a hardware key's touch. Faces `box/` ("Config webhook").
+  Once secrets ride the channel, the asset widens to asset 4's values:
+  any of the three that can read the repository learns the secrets'
+  names and lengths, and the third, or anyone holding a reader's key
+  file, decrypts them.
 
 For **T2**: deploy-arbitrary-code (a push is contained by nothing but
 the claim scope; a pull additionally by the allowlist); deliberate
@@ -701,7 +763,8 @@ closed). For **T6**: a push credential gets a red run and a stalled
 landed early; an OIDC holder gets a replay of `HEAD` (a `no_change`,
 or the undoing of a console edit), one bundle in `in/` at a time with
 no age-out and one in root's hands, and the handler's validate on a
-signer's file; a signer's software key gets the box.
+signer's file; a signer's software key gets the box, and — with secrets
+in the repository — every value encrypted to it, offline.
 
 ## The shared-UID rule
 
@@ -976,6 +1039,15 @@ does not isolate the runtime.
   types, which the `signer` grammar accepts) reduces a laptop
   compromise to "cannot sign without a touch". Stated so operators
   choose knowingly.
+- **Secrets in the config repository are ciphertext for ever** (once
+  built: box/DESIGN-box.md, "Secrets"). A reader's key file and a
+  clone decrypt every value ever encrypted to that key, offline and
+  unseen; removing a
+  reader does not take back what was encrypted to them, so the remedy
+  for a departure or a leak is new values. Names and lengths are
+  public to anyone who can read the repository. No key involved is post-quantum
+  (X25519, and RSA for `ssh-rsa` readers). Each is the price of a repository-held secret that
+  no CI and no service ever sees in plaintext.
 - **Sibling localhost ports** — closed for the contract: nothing
   hotserve runs listens on a port. Each instance binds a unix socket
   in a directory of its own (`<root>/<app>/run/<nonce>/app.sock`, the
@@ -1145,3 +1217,9 @@ Dated one-liners; the full text of each is in git.
   up the config repository on day 0, an administrator is optional and
   holds only the secrets grant, and root keeps key-only SSH as the way
   back.
+- 2026-10-12 — Secrets through the config channel designed
+  (box/DESIGN-box.md, "Secrets"): age files in the repository, root
+  decrypts after every proof; new facts stated — a reader's key and a
+  clone decrypt, offline, every value encrypted to it; names and
+  lengths are public to repository readers; no key is post-quantum; the secrets
+  sudoers grant leaves when it is built.
