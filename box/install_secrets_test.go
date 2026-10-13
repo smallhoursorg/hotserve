@@ -22,7 +22,7 @@ import (
 // newSecretsBox is a test box whose applier installs secrets: the
 // secrets directory as tmpfiles.d makes it (2750, owned as the exchange
 // tree is), the key's directory, and the box's key.
-func newSecretsBox(t *testing.T) (*testBox, *age.X25519Identity) {
+func newSecretsBox(t testing.TB) (*testBox, *age.X25519Identity) {
 	t.Helper()
 	b := newTestBox(t)
 	b.secretsDirAs(0o750 | os.ModeSetgid)
@@ -396,6 +396,10 @@ func TestApplySecretsFailures(t *testing.T) {
 		{name: "a secret not encrypted to this box", phase: phaseRefused, setup: func(b *testBox, _ *age.X25519Identity) secrets {
 			return one(newIdentity(b.t.(*testing.T)), b.t)
 		}},
+		{name: "is-active unanswered after 15a", phase: phaseFailed, msg: "~the install failed before the box's files changed: ", setup: func(b *testBox, id *age.X25519Identity) secrets {
+			b.sd.stateErr = errors.New("dbus: no reply")
+			return one(id, b.t)
+		}},
 		{name: "a directory at the env file's name", phase: phaseFailed, msg: fill(msgEnvNotRegular, "example"), setup: func(b *testBox, id *age.X25519Identity) secrets {
 			if err := os.Mkdir(b.envPath("example"), 0o750); err != nil {
 				b.t.Fatal(err)
@@ -453,7 +457,7 @@ func TestApplySecretsNeedNoKeyWithout(t *testing.T) {
 	old := rendered(t, "KEY=old")
 	b.putEnv("example", old, 0o640)
 	a := b.applied()
-	a.Secrets = map[string]string{"example": digest(old)}
+	a.SecretsTree, a.Secrets = strings.Repeat("e", 40), map[string]string{"example": digest(old)}
 	b.writeApplied(a)
 	head = b.repo.commitSecrets(b.v1, nil, &b.alice, b.base)
 	r := b.pushOne(b.repo.bundleFiles(head, b.base))
@@ -481,7 +485,7 @@ func TestApplySecretsRollBack(t *testing.T) {
 	old := rendered(t, "KEY=old")
 	b.putEnv("example", old, 0o640)
 	a := b.applied()
-	a.Secrets = map[string]string{"example": digest(old)}
+	a.SecretsTree, a.Secrets = strings.Repeat("e", 40), map[string]string{"example": digest(old)}
 	b.writeApplied(a)
 	head := b.repo.commitSecrets(boxFile(2, b.alice), secrets{"example": {"KEY": enc("new")}, "api": {"TOKEN": enc("t")}}, &b.alice, b.base)
 	b.sd.reloads = []error{errReload}
@@ -536,6 +540,7 @@ func TestFailureModesSecrets(t *testing.T) {
 	}
 	failed := "~the install failed before the box's files changed: "
 	rows := []row{
+		{name: "result verified/crash after", holds: "I1 I2 I3", scen: "change", crash: "result:verified", crashN: 1, state: 1, phase: phaseFailed, msg: msgInterruptedFiles},
 		{name: "first env file/write fails", holds: "I1", scen: "change", fail: failNth("envfile:new", 1), state: 1, phase: phaseFailed, msg: failed + "envfile:new: no space"},
 		{name: "first env file/crash after", holds: "I1 I5", scen: "change", crash: "envfile:new", crashN: 1, state: 1, phase: phaseRolledBack, msg: msgRolledBackInterruptedFiles, reloads2: 1},
 		{name: "second env file/write fails", holds: "I1", scen: "change", fail: failNth("envfile:new", 2), state: 1, phase: phaseRolledBack, msg: msgRolledBackUnrecordedFiles, reloads2: 1},
@@ -858,6 +863,46 @@ func TestApplySecretsRacedDirectoryIsKept(t *testing.T) {
 	})
 }
 
+// The sweep of the env files' temporaries removes only the exact shape
+// root writes, a regular file, and nothing through a secretsDir that is
+// a link.
+func TestEnvTempSweep(t *testing.T) {
+	b, _ := newSecretsBox(t)
+	id := strings.Repeat("ab", 16)
+	ours := ".example.env.box-" + id
+	keep := []string{".notes.env.box-backup", ".Example.env.box-" + id, "example.env.box-" + id, ".x.env.box-" + strings.Repeat("A", 32)}
+	for _, n := range append([]string{ours}, keep...) {
+		if err := os.WriteFile(b.path(secretsDir+"/"+n), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.applier(hooks{}).removeEnvTemps("")
+	if _, err := os.Lstat(b.path(secretsDir + "/" + ours)); err == nil {
+		t.Error("the swap's temporary was left")
+	}
+	for _, n := range keep {
+		if _, err := os.Lstat(b.path(secretsDir + "/" + n)); err != nil {
+			t.Errorf("%s was removed", n)
+		}
+	}
+
+	// A link at secretsDir: nothing is removed through it.
+	elsewhere := t.TempDir()
+	if err := os.WriteFile(filepath.Join(elsewhere, ours), []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(b.path(secretsDir)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, b.path(secretsDir)); err != nil {
+		t.Fatal(err)
+	}
+	b.applier(hooks{}).removeEnvTemps("")
+	if _, err := os.Lstat(filepath.Join(elsewhere, ours)); err != nil {
+		t.Error("the sweep followed a link at secretsDir")
+	}
+}
+
 // A console edit of an env file under the transaction is left as found,
 // `unknown`, in the catalogue's words for that file.
 func TestApplySecretsChangedDuringTransaction(t *testing.T) {
@@ -915,6 +960,10 @@ func TestRecordSecretsValid(t *testing.T) {
 		"a no_change with env files": func(r *record) {
 			r.Phase, r.NewSHA256 = phaseNoChange, r.PrevSHA256
 		},
+		"a written file listed at another digest": func(r *record) { r.SecretsInstalled["api"] = digest([]byte("other")) },
+		"a written file not listed":               func(r *record) { delete(r.SecretsInstalled, "api") },
+		"a removed file still listed":             func(r *record) { r.SecretsInstalled["example"] = digest([]byte("old")) },
+		"env files listed with no tree":           func(r *record) { r.SecretsTree = "" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := ok
@@ -925,6 +974,24 @@ func TestRecordSecretsValid(t *testing.T) {
 				t.Error("accepted")
 			}
 		})
+	}
+}
+
+// applied.json listing env files with no secrets tree is no state a
+// write makes: it does not read, and a push is the box's error, never a
+// removal of what the list names.
+func TestAppliedSecretsNeedATree(t *testing.T) {
+	b, _ := newSecretsBox(t)
+	b.putEnv("example", rendered(t, "KEY=v"), 0o640)
+	a := b.applied()
+	a.Secrets = map[string]string{"example": digest(rendered(t, "KEY=v"))}
+	b.writeApplied(a)
+	if _, err := readApplied(b.x("")); err == nil || !strings.Contains(err.Error(), "env files listed with no secrets_tree") {
+		t.Fatalf("%v", err)
+	}
+	head := b.repo.commitSecrets(b.v1, nil, &b.alice, b.base)
+	if r := b.pushOne(b.repo.bundleFiles(head, b.base)); r.Phase != phaseFailed || b.env("example") == nil {
+		t.Fatalf("%+v; env %q", r, b.env("example"))
 	}
 }
 
@@ -1003,5 +1070,17 @@ func TestUnchangedSecrets(t *testing.T) {
 	other.SecretsTree = strings.Repeat("0", 40)
 	if unchanged(bundle, b.v1, &other, at(want, nil)) {
 		t.Error("another secrets tree: unchanged")
+	}
+	// A baseline whose listed apps are not the tree's goes to root.
+	for name, list := range map[string]map[string]string{
+		"none listed":     {},
+		"another listed":  {"other": want},
+		"one more listed": {"example": want, "other": want},
+	} {
+		odd := *base
+		odd.Secrets = list
+		if unchanged(bundle, b.v1, &odd, at(want, nil)) {
+			t.Errorf("%s: unchanged", name)
+		}
 	}
 }

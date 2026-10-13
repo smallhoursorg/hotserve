@@ -13,19 +13,20 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"filippo.io/age"
 	"filippo.io/age/agessh"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
-	"github.com/smallhoursorg/hotserve/liveswap"
 )
 
 // `hotserve box describe`'s reading of the secrets beside a Caddyfile
 // (DESIGN-box.md, "`box describe`", "Which checks run where"): the
-// working tree's `<dir>/secrets/`, held to the layout table as root holds
-// the commit's, without a key. Each value's length comes from its
+// working tree's `<dir>/secrets/`, held to the layout table by the code
+// that holds the commit's (proof.SecretsLayout, proof.AppLayout), so the
+// two refuse alike, and without a key. Each value's length comes from its
 // ciphertext alone — age pads nothing — to within the line break step
 // 15a strips; the caps past 75% are warnings, so a pull request's check
 // run shows a cliff before a push meets it.
@@ -39,10 +40,20 @@ import (
 
 // treeSecrets is a working tree's secrets as describe reads them.
 type treeSecrets struct {
+	shown      string           // the secrets directory, as a message names it
 	secrets    *proof.Secrets   // names only: what secretsFit reads
 	sizes      map[string]int64 // <app>/<VAR> → the value's length in bytes
 	recipients int              // recipient lines, -1 when there is no recipients file
 	warnings   []string
+	// files are the secrets' files, and recipientsFile the recipients
+	// file ("" when there is none): what measure reads.
+	files          []treeSecret
+	recipientsFile string
+}
+
+// treeSecret is one secret's file in the working tree.
+type treeSecret struct {
+	app, v, path, shown string
 }
 
 // Thresholds of the 75% warnings (DESIGN-box.md, Caps).
@@ -51,167 +62,246 @@ const (
 	warnSecretVars = proof.MaxSecretVars * 3 / 4
 	warnEnvFile    = maxEnvFile * 3 / 4
 	warnCiphertext = proof.MaxBundle * 3 / 4
-	// maxRecipientsFile bounds the recipients file as describe reads it.
-	maxRecipientsFile = 1 << 20
+	// age's own bounds on a recipients file (cmd/age, parseRecipientsFile):
+	// the file, a recipient's line, and any line, which its scanner reads.
+	maxRecipientsFile = 16 << 20
+	maxRecipientLine  = 8 << 10
+	maxScannedLine    = bufio.MaxScanTokenSize
 )
 
 // readTreeSecrets reads the secrets beside the Caddyfile at caddyfile, a
-// path in the working tree. No `secrets` beside it is none.
+// path in the working tree, as root's proof reads a commit's: each
+// entry in git's order through the proof's own layout rules
+// (proof.SecretsLayout, proof.AppLayout), app by app, then each
+// secret's size — so the first refusal is the one root would name. No
+// secret's file is opened here: the values' lengths and the recipients
+// are measure's, once secretsFit has passed, as root decrypts only at
+// step 15a and never reads the recipients. No `secrets` beside the
+// Caddyfile is none.
 func readTreeSecrets(caddyfile string) (*treeSecrets, error) {
-	dir := filepath.Join(filepath.Dir(caddyfile), "secrets")
-	shown := secretsShown(caddyfile)
-	ts := &treeSecrets{secrets: &proof.Secrets{}, sizes: map[string]int64{}, recipients: -1}
+	parent := filepath.Dir(caddyfile)
+	dir := filepath.Join(parent, "secrets")
+	ts := &treeSecrets{shown: secretsShown(caddyfile), secrets: &proof.Secrets{}, sizes: map[string]int64{}, recipients: -1}
 	fi, err := os.Lstat(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return ts, nil
 	case err != nil:
 		return nil, err
-	case !fi.IsDir():
-		return nil, refused("%s is not a directory", shown)
 	}
-	entries, err := gitOrder(dir)
+	mode, err := gitMode(parent, fs.FileInfoToDirEntry(fi))
 	if err != nil {
 		return nil, err
 	}
-	var ciphertext int64
+	layout := proof.NewSecretsLayout(ts.shown, "", secretNames)
+	if err := layout.Dir(mode); err != nil {
+		return nil, err
+	}
+	entries, err := ts.gitTree(dir, ts.shown)
+	if err != nil {
+		return nil, err
+	}
 	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			ts.warnings = append(ts.warnings, notCommitted(shown+"/"+proof.Bound(name)))
-			continue
+		if err := layout.Entry([]byte(e.mode), []byte(e.name), nil); err != nil {
+			return nil, err
 		}
-		if name == "recipients" {
-			if !e.Type().IsRegular() {
-				return nil, refused("%s/recipients is not a regular file", shown)
-			}
-			n, err := countRecipients(filepath.Join(dir, name), shown+"/recipients", ts)
-			if err != nil {
-				return nil, err
-			}
-			ts.recipients = n
-			continue
+		if e.name == "recipients" {
+			ts.recipientsFile = filepath.Join(dir, e.name)
 		}
-		if !e.IsDir() || e.Type()&fs.ModeSymlink != 0 {
-			return nil, refused("%s/%s is not an app's directory: %s", shown, proof.Bound(name), entryWhat(e))
-		}
-		if !appName.MatchString(name) {
-			return nil, refused("%s/%s is not an app's directory: %s is not an app name", shown, proof.Bound(name), proof.Bound(name))
-		}
-		app, n, err := readTreeApp(filepath.Join(dir, name), shown+"/"+name, ts)
+	}
+	if err := layout.Done(); err != nil {
+		return nil, err
+	}
+	for _, a := range layout.Apps {
+		app, err := ts.readTreeApp(filepath.Join(dir, a.Name), a)
 		if err != nil {
 			return nil, err
 		}
-		ciphertext += n
-		if len(app.Vars) == 0 {
-			continue // git tracks no empty directory: the commit has none
-		}
 		ts.secrets.Apps = append(ts.secrets.Apps, app)
-	}
-	if n := len(ts.secrets.Apps); n > proof.MaxSecretApps {
-		return nil, refused("%d apps have secrets; the cap is %d", n, proof.MaxSecretApps)
-	} else if n >= warnSecretApps {
-		ts.warnings = append(ts.warnings, fmt.Sprintf("%d apps have secrets; the cap is %d", n, proof.MaxSecretApps))
-	}
-	if ciphertext >= warnCiphertext {
-		ts.warnings = append(ts.warnings, fmt.Sprintf("%s holds %d bytes of ciphertext; a push's bundle is capped at %d", shown, ciphertext, proof.MaxBundle))
 	}
 	return ts, nil
 }
 
-// readTreeApp reads one app's directory: its secrets' names and each
-// value's length, and returns the ciphertext's bytes.
-func readTreeApp(dir, shown string, ts *treeSecrets) (proof.SecretApp, int64, error) {
-	app := proof.SecretApp{Name: filepath.Base(dir)}
-	entries, err := gitOrder(dir)
+// readTreeApp reads one app's directory through the proof's layout,
+// then holds each secret's file to its cap, as the proof holds each
+// blob.
+func (ts *treeSecrets) readTreeApp(dir string, a proof.LayoutRef) (proof.SecretApp, error) {
+	app := proof.SecretApp{Name: a.Name}
+	entries, err := ts.gitTree(dir, a.Shown)
 	if err != nil {
-		return app, 0, err
+		return app, err
 	}
-	var ciphertext, rendered int64
+	layout := proof.NewAppLayout(a.Name, a.Shown, "", secretNames)
 	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			ts.warnings = append(ts.warnings, notCommitted(shown+"/"+proof.Bound(name)))
-			continue
+		if err := layout.Entry([]byte(e.mode), []byte(e.name), nil); err != nil {
+			return app, err
 		}
-		v, isAge := strings.CutSuffix(name, ".age")
-		switch {
-		case !e.Type().IsRegular():
-			return app, 0, refused("%s/%s is not a secret: %s", shown, proof.Bound(name), entryWhat(e))
-		case !isAge:
-			return app, 0, refused("%s/%s is not a secret: a secret's file is <VAR>.age", shown, proof.Bound(name))
-		case len(v) > proof.MaxVarName:
-			return app, 0, refused("%s/%s is not a secret: its name is over %d bytes", shown, proof.Bound(name), proof.MaxVarName)
-		case !liveswap.ValidEnvKey(v):
-			return app, 0, refused("%s/%s is not a secret: %s is not an environment variable's name", shown, proof.Bound(name), proof.Bound(v))
+	}
+	if err := layout.Done(); err != nil {
+		return app, err
+	}
+	for _, v := range layout.Vars {
+		p := filepath.Join(dir, v.Name+".age")
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return app, err
 		}
-		size, n, err := secretFileLength(filepath.Join(dir, name))
+		if fi.Size() > proof.MaxSecretFile {
+			return app, refused("%s", proof.SecretFileTooLarge(v.Shown, fi.Size()))
+		}
+		app.Vars = append(app.Vars, proof.SecretVar{Name: v.Name})
+		ts.files = append(ts.files, treeSecret{app: a.Name, v: v.Name, path: p, shown: v.Shown})
+	}
+	return app, nil
+}
+
+// measure reads each secret's value length from its file's header, then
+// the recipients file — what root reads only at step 15a, and what it
+// never reads — and adds the warnings of the caps past 75%.
+func (ts *treeSecrets) measure() error {
+	var ciphertext int64
+	rendered := map[string]int64{}
+	for _, f := range ts.files {
+		size, n, err := secretFileLength(f.path)
 		var big *tooLargeError
 		var notAge *notAgeError
 		switch {
 		case errors.As(err, &big):
-			return app, 0, refused("%s/%s is %d bytes; the cap is %d", shown, name, size, proof.MaxSecretFile)
+			return refused("%s", proof.SecretFileTooLarge(f.shown, size))
 		case errors.As(err, &notAge):
-			return app, 0, refused("%s/%s does not decrypt: %s", shown, name, notAge.why)
+			return refused("%s does not decrypt: %s", f.shown, notAge.why)
 		case err != nil:
-			return app, 0, err
+			return err
 		}
-		app.Vars = append(app.Vars, proof.SecretVar{Name: v})
-		ts.sizes[app.Name+"/"+v] = n
+		ts.sizes[f.app+"/"+f.v] = n
 		ciphertext += size
-		rendered += int64(len(v)) + n + 4 // KEY="value"\n
+		rendered[f.app] += int64(len(f.v)) + n + 4 // KEY="value"\n
 	}
-	if n := len(app.Vars); n > proof.MaxSecretVars {
-		return app, 0, refused("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars)
-	} else if n >= warnSecretVars {
-		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars))
+	for _, app := range ts.secrets.Apps {
+		if n := len(app.Vars); n >= warnSecretVars {
+			ts.warnings = append(ts.warnings, fmt.Sprintf("app %s has %d secrets; the cap is %d", app.Name, n, proof.MaxSecretVars))
+		}
+		// A warning, not a refusal: the cap is step 15a's, and each
+		// value's length counts a line break (up to 2 bytes) that 15a may
+		// strip, so the box surely refuses only when the file is over
+		// even without them.
+		switch r := rendered[app.Name]; {
+		case r-2*int64(len(app.Vars)) > maxEnvFile:
+			ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes, over the cap of %d: the box will refuse the push", app.Name, r, maxEnvFile))
+		case r > maxEnvFile:
+			ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes, at or just over the cap of %d: the box refuses the push unless values end in the line break it strips", app.Name, r, maxEnvFile))
+		case r >= warnEnvFile:
+			ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes; the cap is %d", app.Name, r, maxEnvFile))
+		}
 	}
-	switch {
-	case rendered > maxEnvFile:
-		// A warning, not a refusal: the cap is step 15a's, and the
-		// lengths are right to within a line break a value.
-		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes, over the cap of %d: the box will refuse the push", app.Name, rendered, maxEnvFile))
-	case rendered >= warnEnvFile:
-		ts.warnings = append(ts.warnings, fmt.Sprintf("app %s's env file would be about %d bytes; the cap is %d", app.Name, rendered, maxEnvFile))
+	if n := len(ts.secrets.Apps); n >= warnSecretApps {
+		ts.warnings = append(ts.warnings, fmt.Sprintf("%d apps have secrets; the cap is %d", n, proof.MaxSecretApps))
 	}
-	return app, ciphertext, nil
+	if ciphertext >= warnCiphertext {
+		ts.warnings = append(ts.warnings, fmt.Sprintf("%s holds %d bytes of ciphertext; a push's bundle is capped at %d", ts.shown, ciphertext, proof.MaxBundle))
+	}
+	if ts.recipientsFile != "" {
+		n, err := countRecipients(ts.recipientsFile, ts.shown+"/recipients", ts)
+		if err != nil {
+			return err
+		}
+		ts.recipients = n
+	}
+	return nil
 }
 
-// entryWhat names what a directory entry is, for a refusal.
-func entryWhat(e fs.DirEntry) string {
-	switch t := e.Type(); {
-	case t&fs.ModeSymlink != 0:
-		return "a link"
-	case t.IsDir():
-		return "a directory"
-	case t.IsRegular():
-		return "a file"
-	}
-	return "not a regular file"
-}
+// treeEntry is a working tree's entry as a commit of it would hold it:
+// its name, and its mode as git writes it.
+type treeEntry struct{ name, mode string }
 
-// gitOrder lists dir as a git tree orders it: by name, a directory's
-// name read as if it ended in `/` — so `api-v2` comes before `api` —
-// and so in the order root walks the commit's.
-func gitOrder(dir string) ([]fs.DirEntry, error) {
-	entries, err := os.ReadDir(dir)
+// gitTree lists dir as a commit of it would (gitTree, the function),
+// and warns of each dot-name it leaves out, which describe does not
+// read: the commit may not have it, but the box refuses it if it does.
+func (ts *treeSecrets) gitTree(dir, shown string) ([]treeEntry, error) {
+	entries, dots, err := gitTree(dir)
 	if err != nil {
 		return nil, err
 	}
-	key := func(e fs.DirEntry) string {
-		if e.IsDir() {
-			return e.Name() + "/"
-		}
-		return e.Name()
+	for _, d := range dots {
+		ts.warnings = append(ts.warnings, notCommitted(shown+"/"+d))
 	}
-	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(key(a), key(b)) })
 	return entries, nil
 }
 
-// notCommitted is the warning for a dot-name in the working tree's
-// secrets — `.DS_Store`, an editor's swap file — which git usually
-// ignores: not read, since the commit may not have it, but the box
-// refuses it if it does.
+// gitTree lists dir as a commit of it would: each entry with the mode
+// git gives it (gitMode), in a git tree's order — by name, a tree's name
+// read as if it ended in `/`, so `api-v2` comes before `api` — the
+// order root walks the commit's. It leaves out every dot-name
+// (`.DS_Store`, an editor's swap file), which git usually ignores, and
+// every directory git would not commit, one that holds nothing but
+// those; it returns the dot-names it left out, each as its path from
+// dir, every part bounded.
+func gitTree(dir string) ([]treeEntry, []string, error) {
+	list, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var entries []treeEntry
+	var dots []string
+	for _, e := range list {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			dots = append(dots, proof.Bound(name))
+			continue
+		}
+		mode, err := gitMode(dir, e)
+		if err != nil {
+			return nil, nil, err
+		}
+		if mode == proof.ModeDir {
+			inner, innerDots, err := gitTree(filepath.Join(dir, name))
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(inner) == 0 { // git commits no empty tree
+				for _, d := range innerDots {
+					dots = append(dots, proof.Bound(name)+"/"+d)
+				}
+				continue
+			}
+		}
+		entries = append(entries, treeEntry{name, mode})
+	}
+	key := func(e treeEntry) string {
+		if e.mode == proof.ModeDir {
+			return e.name + "/"
+		}
+		return e.name
+	}
+	slices.SortFunc(entries, func(a, b treeEntry) int { return strings.Compare(key(a), key(b)) })
+	return entries, dots, nil
+}
+
+// gitMode is the mode git commits a working tree's entry with. A
+// directory holding `.git` is another repository, which git commits as
+// a link to it, a submodule's mode; what git cannot commit — a socket,
+// a device, a pipe — is "", which the layout refuses as neither a file
+// nor a directory.
+func gitMode(dir string, e fs.DirEntry) (string, error) {
+	switch t := e.Type(); {
+	case t&fs.ModeSymlink != 0:
+		return proof.ModeSymlink, nil
+	case t.IsRegular():
+		return proof.ModeFile, nil
+	case t.IsDir():
+		_, err := os.Lstat(filepath.Join(dir, e.Name(), ".git"))
+		switch {
+		case err == nil:
+			return proof.ModeSubmodule, nil
+		case errors.Is(err, fs.ErrNotExist):
+			return proof.ModeDir, nil
+		}
+		return "", err
+	}
+	return "", nil
+}
+
+// notCommitted is the warning for a dot-name describe left out.
 func notCommitted(path string) string {
 	return path + " is not a secret, and is not read here; the box refuses the push if it is committed"
 }
@@ -269,13 +359,23 @@ func valueLengthOf(r io.ReaderAt, size int64) (int64, error) {
 	if err != nil {
 		return 0, notAge("its header is not one age reads")
 	}
+	// Every chunk but the last is full; the last is never empty unless
+	// it is the only one (age's STREAM). So after the full frames comes
+	// either nothing, or a frame with a tag and at least one byte: a
+	// remainder of 1 to 16 bytes is a frame cut short.
 	const nonce, chunk, tag = 16, 64 << 10, 16
+	const frame = chunk + tag
 	q := size - int64(len(header)) - nonce
-	if q < tag {
+	full, rest := q/frame, q%frame
+	switch {
+	case q == tag: // the empty value: one empty chunk
+		return 0, nil
+	case q < tag, rest > 0 && rest <= tag:
 		return 0, notAge("its payload is cut short")
+	case rest == 0:
+		return full * chunk, nil
 	}
-	chunks := (q + chunk + tag - 1) / (chunk + tag)
-	return q - chunks*tag, nil
+	return full*chunk + rest - tag, nil
 }
 
 // agePluginLine is a plugin's age recipient, age1<name>1<data>
@@ -287,21 +387,36 @@ var agePluginLine = regexp.MustCompile(`^age1[a-z0-9]+1[qpzry9x8gf2tvdw0s3jn54kh
 
 // countRecipients reads a recipients file as age does — one recipient a
 // line, read as it is (no space trimmed), a line that is empty or starts
-// with `#` skipped — and counts the recipients. There must be one, and
-// the first must be the box's key, an X25519 recipient ("The box's
-// key"); every other an SSH key age encrypts to, or an age recipient.
+// with `#` skipped, within age's bounds on the file and its lines — and
+// counts the recipients. There must be one, and the first must be the
+// box's key, an X25519 recipient ("The box's key"); every other an SSH
+// key age encrypts to, or an age recipient.
 func countRecipients(path, shown string, ts *treeSecrets) (int, error) {
 	data, err := readFile(path, maxRecipientsFile, false)
-	if err != nil {
+	var big *tooLargeError
+	switch {
+	case errors.As(err, &big):
+		return 0, refused("%s is over %d bytes, more than age reads of a recipients file", shown, maxRecipientsFile)
+	case err != nil:
 		return 0, err
 	}
 	n := 0
 	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 0, 64<<10), maxRecipientsFile)
-	for line := 1; sc.Scan(); line++ {
+	sc.Buffer(make([]byte, 0, 4<<10), maxScannedLine)
+	line := 0
+	for sc.Scan() {
+		line++
 		s := sc.Text()
 		if s == "" || strings.HasPrefix(s, "#") {
 			continue
+		}
+		switch {
+		case !utf8.ValidString(s):
+			return 0, refused("%s:%d: not UTF-8, which age refuses in a recipients file", shown, line)
+		case len(s) > maxRecipientLine:
+			return 0, refused("%s:%d: over %d bytes, longer than age reads a recipient's line", shown, line, maxRecipientLine)
+		case strings.HasPrefix(s, "AGE-"):
+			return 0, refused("%s:%d: an age identity, a private key, not a recipient: remove it, and make a new key for whoever it was", shown, line)
 		}
 		// A line's CR is the scanner's to drop, as age's own scanner does;
 		// a space is the recipient's, which age then cannot parse.
@@ -335,6 +450,9 @@ func countRecipients(path, shown string, ts *treeSecrets) (int, error) {
 		n++
 	}
 	if err := sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return 0, refused("%s:%d: over %d bytes, longer than age reads a line", shown, line+1, maxScannedLine)
+		}
 		return 0, err
 	}
 	if n == 0 {

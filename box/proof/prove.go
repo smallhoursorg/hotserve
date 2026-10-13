@@ -2,6 +2,7 @@ package proof
 
 import (
 	"encoding/hex"
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -184,8 +185,9 @@ func ProveSecrets(c *Commit, trees map[string]*Tree, blobs map[string][]byte, pa
 	if !ok {
 		return &Secrets{}, nil
 	}
-	if e.Mode != ModeDir {
-		return nil, refuse("%s in %s is not a directory", shownDir, oid(c.ID))
+	layout := NewSecretsLayout(shownDir, c.ID, names)
+	if err := layout.Dir(e.Mode); err != nil {
+		return nil, err
 	}
 	// Every box repository has its own copy of the template's bin/apply,
 	// which an upgrade of the box does not touch; one from before
@@ -195,47 +197,25 @@ func ProveSecrets(c *Commit, trees map[string]*Tree, blobs map[string][]byte, pa
 	if !ok || st.ID != e.ID {
 		return nil, refuse("bundle: tree %s, needed for %s in %s, is not in the bundle; a bin/apply from before secrets sends only the Caddyfile's trees: update it from the template", oid(e.ID), shownDir, oid(c.ID))
 	}
-	// One scan over the tree's bytes, as everywhere in the proof: an
-	// entry's name becomes a string only once it is held to the layout,
-	// and only up to the cap, past which the scan just counts.
-	type ref struct{ name, id string }
-	var apps []ref
-	n := 0
+	// One scan over the tree's bytes, as everywhere in the proof, through
+	// the layout's one rule set (SecretsLayout).
 	var bad error
 	err = st.scan(func(mode, name, id []byte) bool {
-		if string(name) == "recipients" {
-			if m := string(mode); m != ModeFile && m != ModeExecutable {
-				bad = refuse("%s/recipients in %s is not an app's directory: recipients is the name of the recipients file, which is a regular file", shownDir, oid(c.ID))
-				return false
-			}
-			return true
-		}
-		if string(mode) != ModeDir {
-			bad = refuse("%s/%s in %s is not an app's directory: %s", shownDir, Bound(string(name)), oid(c.ID), modeWhat(string(mode)))
-			return false
-		}
-		if n++; n > MaxSecretApps {
-			return true
-		}
-		a := string(name)
-		if !names.App(a) {
-			bad = refuse("%s/%s in %s is not an app's directory: %s is not an app name", shownDir, Bound(a), oid(c.ID), Bound(a))
-			return false
-		}
-		apps = append(apps, ref{a, hex.EncodeToString(id)})
-		return true
+		bad = layout.Entry(mode, name, id)
+		return bad == nil
 	})
 	switch {
 	case err != nil:
 		return nil, err
 	case bad != nil:
 		return nil, bad
-	case n > MaxSecretApps:
-		return nil, refuse("%d apps have secrets; the cap is %d", n, MaxSecretApps)
+	}
+	if err := layout.Done(); err != nil {
+		return nil, err
 	}
 	out := &Secrets{Tree: st.ID}
-	for _, a := range apps {
-		app, err := proveSecretApp(c, trees, blobs, a.name, a.id, shownDir+"/"+a.name, names)
+	for _, a := range layout.Apps {
+		app, err := proveSecretApp(c, trees, blobs, a.Name, a.ID, shownDir+"/"+a.Name, names)
 		if err != nil {
 			return nil, err
 		}
@@ -251,59 +231,169 @@ func proveSecretApp(c *Commit, trees map[string]*Tree, blobs map[string][]byte, 
 	if err != nil {
 		return nil, err
 	}
-	type ref struct{ name, id, shown string }
-	var vars []ref
-	n := 0
+	layout := NewAppLayout(name, shown, c.ID, names)
 	var bad error
 	err = t.scan(func(mode, file, id []byte) bool {
-		if m := string(mode); m != ModeFile && m != ModeExecutable {
-			bad = refuse("%s/%s in %s is not a secret: %s", shown, Bound(string(file)), oid(c.ID), modeWhat(m))
-			return false
-		}
-		if n++; n > MaxSecretVars {
-			return true
-		}
-		f := string(file)
-		where := shown + "/" + Bound(f)
-		v, ok := strings.CutSuffix(f, ".age")
-		switch {
-		case !ok:
-			bad = refuse("%s in %s is not a secret: only <VAR>.age files are", where, oid(c.ID))
-		case len(v) > MaxVarName:
-			bad = refuse("%s in %s is not a secret: its name is over %d bytes", where, oid(c.ID), MaxVarName)
-		case !names.Var(v):
-			bad = refuse("%s in %s is not a secret: %s is not a variable name an env file can carry", where, oid(c.ID), Bound(v))
-		default:
-			vars = append(vars, ref{v, hex.EncodeToString(id), where})
-			return true
-		}
-		return false
+		bad = layout.Entry(mode, file, id)
+		return bad == nil
 	})
 	switch {
 	case err != nil:
 		return nil, err
 	case bad != nil:
 		return nil, bad
-	case n > MaxSecretVars:
-		return nil, refuse("app %s has %d secrets; the cap is %d", name, n, MaxSecretVars)
-	case n == 0:
-		return nil, refuse("%s in %s is not an app's directory: it holds no secret", shown, oid(c.ID))
+	}
+	if err := layout.Done(); err != nil {
+		return nil, err
 	}
 	app := &SecretApp{Name: name}
-	for _, v := range vars {
-		data, ok := blobs[v.id]
-		if !ok || ObjectID("blob", data) != v.id {
-			return nil, refuse("bundle: blob %s, needed for %s in %s, is not in the bundle", oid(v.id), v.shown, oid(c.ID))
+	for _, v := range layout.Vars {
+		data, ok := blobs[v.ID]
+		if !ok || ObjectID("blob", data) != v.ID {
+			return nil, refuse("bundle: blob %s, needed for %s in %s, is not in the bundle", oid(v.ID), v.Shown, oid(c.ID))
 		}
 		if len(data) > MaxSecretFile {
-			return nil, refuse("%s is %d bytes; the cap is %d", v.shown, len(data), MaxSecretFile)
+			return nil, refuse("%s", SecretFileTooLarge(v.Shown, int64(len(data))))
 		}
-		app.Vars = append(app.Vars, SecretVar{Name: v.name, Blob: v.id, Data: data})
+		app.Vars = append(app.Vars, SecretVar{Name: v.Name, Blob: v.ID, Data: data})
 	}
 	return app, nil
 }
 
-// modeWhat names what an entry is that the layout did not expect there.
+// SecretFileTooLarge is the refusal of a secret's file over its cap.
+func SecretFileTooLarge(shown string, size int64) string {
+	return fmt.Sprintf("%s is %d bytes; the cap is %d", shown, size, MaxSecretFile)
+}
+
+// The layout of a secrets directory and of an app's (DESIGN-box.md,
+// "Layout in the repository") is one rule set, fed one entry at a time
+// in git's order — by a commit's trees (ProveSecrets) and by a working
+// tree (`hotserve box describe`) alike — so the two refuse the same
+// entries, in the same words and in the same order. commit is where the
+// entries were read, for the refusals' " in <sha>": a commit's id, or ""
+// for a working tree. An entry's name becomes a string only once it is
+// held to the layout, and only up to the cap, past which an entry is
+// only counted (Caps: "tree entries materialised: none").
+
+// LayoutRef is an entry the layout admitted: its name, its object's id
+// from a commit ("" from a working tree), and how a refusal shows it.
+type LayoutRef struct {
+	Name, ID, Shown string
+}
+
+// SecretsLayout checks a secrets directory: `recipients` a regular
+// file, every other entry a directory named for an app, at most
+// MaxSecretApps of them.
+type SecretsLayout struct {
+	shown string
+	in    inCommit
+	names Names
+	n     int
+	// Apps are the app directories, in order.
+	Apps []LayoutRef
+}
+
+// NewSecretsLayout begins the check of the secrets directory shown, read
+// from commit ("" for a working tree).
+func NewSecretsLayout(shown, commit string, names Names) *SecretsLayout {
+	return &SecretsLayout{shown: shown, in: inCommit(commit), names: names}
+}
+
+// Dir holds the entry `secrets` itself to the layout: a directory.
+func (l *SecretsLayout) Dir(mode string) error {
+	if mode != ModeDir {
+		return refuse("%s%s is not a directory", l.shown, l.in)
+	}
+	return nil
+}
+
+// Entry holds one entry to the layout: mode as git writes it, the raw
+// object id or nil. The error is the layout's first refusal.
+func (l *SecretsLayout) Entry(mode, name, id []byte) error {
+	if string(name) == "recipients" {
+		if m := string(mode); m != ModeFile && m != ModeExecutable {
+			return refuse("%s/recipients%s is not an app's directory: recipients is the name of the recipients file, which is a regular file", l.shown, l.in)
+		}
+		return nil
+	}
+	if string(mode) != ModeDir {
+		return refuse("%s/%s%s is not an app's directory: %s", l.shown, Bound(string(name)), l.in, modeWhat(string(mode)))
+	}
+	if l.n++; l.n > MaxSecretApps {
+		return nil
+	}
+	a := string(name)
+	if !l.names.App(a) {
+		return refuse("%s/%s%s is not an app's directory: %s is not an app name", l.shown, Bound(a), l.in, Bound(a))
+	}
+	l.Apps = append(l.Apps, LayoutRef{Name: a, ID: hex.EncodeToString(id), Shown: l.shown + "/" + a})
+	return nil
+}
+
+// Done is the check once every entry is in: the cap.
+func (l *SecretsLayout) Done() error {
+	if l.n > MaxSecretApps {
+		return refuse("%d apps have secrets; the cap is %d", l.n, MaxSecretApps)
+	}
+	return nil
+}
+
+// AppLayout checks an app's directory: every entry a regular file
+// `<VAR>.age`, VAR a name an env file can carry within MaxVarName, at
+// most MaxSecretVars of them, and at least one.
+type AppLayout struct {
+	app, shown string
+	in         inCommit
+	names      Names
+	n          int
+	// Vars are the secrets, in order: Name is the variable's.
+	Vars []LayoutRef
+}
+
+// NewAppLayout begins the check of app's directory, shown, read from
+// commit ("" for a working tree).
+func NewAppLayout(app, shown, commit string, names Names) *AppLayout {
+	return &AppLayout{app: app, shown: shown, in: inCommit(commit), names: names}
+}
+
+// Entry holds one entry to the layout, as SecretsLayout.Entry does: the
+// type of every entry, the name of those within the cap.
+func (l *AppLayout) Entry(mode, file, id []byte) error {
+	if m := string(mode); m != ModeFile && m != ModeExecutable {
+		return refuse("%s/%s%s is not a secret: %s", l.shown, Bound(string(file)), l.in, modeWhat(m))
+	}
+	if l.n++; l.n > MaxSecretVars {
+		return nil
+	}
+	f := string(file)
+	where := l.shown + "/" + Bound(f)
+	v, ok := strings.CutSuffix(f, ".age")
+	switch {
+	case !ok:
+		return refuse("%s%s is not a secret: only <VAR>.age files are", where, l.in)
+	case len(v) > MaxVarName:
+		return refuse("%s%s is not a secret: its name is over %d bytes", where, l.in, MaxVarName)
+	case !l.names.Var(v):
+		return refuse("%s%s is not a secret: %s is not a variable name an env file can carry", where, l.in, Bound(v))
+	}
+	l.Vars = append(l.Vars, LayoutRef{Name: v, ID: hex.EncodeToString(id), Shown: where})
+	return nil
+}
+
+// Done is the check once every entry is in: the cap, and a directory
+// holding no secret.
+func (l *AppLayout) Done() error {
+	switch {
+	case l.n > MaxSecretVars:
+		return refuse("app %s has %d secrets; the cap is %d", l.app, l.n, MaxSecretVars)
+	case l.n == 0:
+		return refuse("%s%s is not an app's directory: it holds no secret", l.shown, l.in)
+	}
+	return nil
+}
+
+// modeWhat names what an entry is that the layout did not expect there:
+// git's five modes, and anything else a working tree can hold.
 func modeWhat(mode string) string {
 	switch mode {
 	case ModeFile, ModeExecutable:
@@ -312,6 +402,8 @@ func modeWhat(mode string) string {
 		return "it is a symlink"
 	case ModeSubmodule:
 		return "it is a submodule"
+	case ModeDir:
+		return "it is a directory"
 	}
-	return "it is a directory"
+	return "it is neither a file nor a directory"
 }
