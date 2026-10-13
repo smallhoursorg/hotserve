@@ -21,8 +21,9 @@ import (
 // no module beyond the standard library): what is typed is never
 // echoed; a paste longer than a terminal line (4096 bytes here, 1024 on
 // macOS) is taken whole; nothing is edited, so a Backspace, an arrow
-// key, a NUL or any other control character refuses the value; and the
-// terminal is left as it was, after Ctrl-C too.
+// key, a NUL or any other control character refuses the value; a paste
+// of more than one line is refused, and none of it is left for the shell;
+// and the terminal is left as it was, after Ctrl-C too.
 
 type pty struct{ master, slave *os.File }
 
@@ -72,8 +73,22 @@ func (r *boxRepo) typeAtPrompt(t *testing.T, keys string, env ...string) (string
 	return r.typeAtPromptOn(t, nil, keys, env...)
 }
 
-// typeAtPromptOn is typeAtPrompt on a terminal set first by set.
+// typeAtPromptOn is typeAtPrompt on a terminal set first by set. Nothing
+// typed may be left unread for the shell.
 func (r *boxRepo) typeAtPromptOn(t *testing.T, set func(*syscall.Termios), keys string, env ...string) (string, int) {
+	t.Helper()
+	out, code, left := r.pasteAtPrompt(t, set, 0, []string{keys}, env...)
+	if left != "" {
+		t.Errorf("left unread for the shell: %q", left)
+	}
+	return out, code
+}
+
+// pasteAtPrompt is typeAtPromptOn with the keys in writes gap apart (50
+// ms if 0), as a paste longer than one read reaches a terminal. It also
+// returns what was left unread in the terminal's input when it exited:
+// what the shell would read next, run, and keep in its history.
+func (r *boxRepo) pasteAtPrompt(t *testing.T, set func(*syscall.Termios), gap time.Duration, writes []string, env ...string) (string, int, string) {
 	t.Helper()
 	p := openPTY(t)
 	if set != nil {
@@ -116,9 +131,25 @@ func (r *boxRepo) typeAtPromptOn(t *testing.T, set func(*syscall.Termios), keys 
 			t.Fatalf("no prompt in 30 s")
 		}
 	}
-	if _, err := p.master.Write([]byte(keys)); err != nil {
-		t.Fatal(err)
+	// A write blocks while the terminal's input is full, so they go from
+	// a goroutine of their own: one the script stops reading cannot hang
+	// the test.
+	if gap == 0 {
+		gap = 50 * time.Millisecond
 	}
+	wrote := make(chan error, 1)
+	go func() {
+		for i, w := range writes {
+			if i > 0 {
+				time.Sleep(gap)
+			}
+			if _, err := p.master.Write([]byte(w)); err != nil {
+				wrote <- err
+				return
+			}
+		}
+		wrote <- nil
+	}()
 	code := 0
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()
@@ -129,7 +160,7 @@ func (r *boxRepo) typeAtPromptOn(t *testing.T, set func(*syscall.Termios), keys 
 		// Stopped (^Z) or waiting for more: either way, not done.
 		_ = cmd.Process.Kill()
 		<-waited
-		t.Fatalf("still running 30 s after the keys %q", keys)
+		t.Fatalf("still running 30 s after the keys %q", writes)
 	}
 	if err != nil {
 		var exit *exec.ExitError
@@ -151,9 +182,32 @@ func (r *boxRepo) typeAtPromptOn(t *testing.T, set func(*syscall.Termios), keys 
 	if after := p.termios(t); after != before {
 		t.Errorf("the terminal was left changed: lflag %#o, was %#o", after.Lflag, before.Lflag)
 	}
+	select {
+	case err := <-wrote:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("exited with keys still to take: the terminal's input was full")
+	}
+	// What is left in the terminal's input, read without waiting for a
+	// line or a byte, once the pseudoterminal has passed on the last
+	// write (it does so a moment after the write returns).
+	time.Sleep(100 * time.Millisecond)
+	tio := p.termios(t)
+	tio.Lflag &^= syscall.ICANON
+	tio.Cc[syscall.VMIN], tio.Cc[syscall.VTIME] = 0, 0
+	if err := ioctl(p.slave.Fd(), syscall.TCSETS, uintptr(unsafe.Pointer(&tio))); err != nil {
+		t.Fatal(err)
+	}
+	left := make([]byte, 1<<16)
+	n, err := syscall.Read(int(p.slave.Fd()), left)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	return shown.String(), code
+	return shown.String(), code, string(left[:n])
 }
 
 func TestBoxSecretPrompt(t *testing.T) {
@@ -222,6 +276,45 @@ func TestBoxSecretPrompt(t *testing.T) {
 		t.Fatalf("on an oddly set terminal: exit %d\n%s", code, out)
 	}
 	r.mustDecrypt(boxID, at("ODD"), wide)
+
+	// A paste of more than one line is refused, whether it arrives in
+	// one read or in several, and none of it is left for the shell to
+	// run and keep in its history once this exits: nor when its tail
+	// comes a second later, as over a slow link.
+	pem := []string{"-----BEGIN KEY-----\r", "SECRETBODY\r-----END KEY-----\r"}
+	for _, c := range []struct {
+		name   string
+		gap    time.Duration
+		writes []string
+	}{
+		{"PEM", 0, []string{strings.Join(pem, "")}},
+		{"PEM2", 0, pem},
+		{"SLOWTAIL", time.Second, []string{strings.Join(pem, ""), "MORE\r"}},
+	} {
+		out, code, left := r.pasteAtPrompt(t, nil, c.gap, c.writes, "APP=example", "VAR="+c.name)
+		if code != 1 || !strings.Contains(out, c.name+" has a line break in it") || r.exists(at(c.name)) || left != "" {
+			t.Errorf("%s: exit %d, left %q\n%s", c.name, code, left, out)
+		}
+	}
+	// One line in several reads arrives whole; so does a value whose
+	// Enter is CR LF (a terminal in newline mode). One past the cap is
+	// refused, with none of it left over either: one far past it, more
+	// than a pipe holds after the cap, so its end comes after the
+	// checker has seen enough.
+	part := strings.Repeat("b", 3000)
+	if out, code, left := r.pasteAtPrompt(t, nil, 0, []string{part, part, part + "\r"}, "APP=example", "VAR=CHUNKS"); code != 0 || left != "" {
+		t.Fatalf("CHUNKS: exit %d, left %q\n%s", code, left, out)
+	}
+	r.mustDecrypt(boxID, at("CHUNKS"), part+part+part)
+	if out, code := r.typeAtPrompt(t, "hunter2-crlf\r\n", "APP=example", "VAR=CRLF"); code != 0 {
+		t.Fatalf("CRLF: exit %d\n%s", code, out)
+	}
+	r.mustDecrypt(boxID, at("CRLF"), "hunter2-crlf")
+	over := strings.Repeat("c", 50000)
+	out, code, left := r.pasteAtPrompt(t, nil, 0, []string{over, over, over, over + "\r"}, "APP=example", "VAR=OVER")
+	if code != 1 || !strings.Contains(out, "OVER is too long") || r.exists(at("OVER")) || left != "" {
+		t.Errorf("OVER: exit %d, left %d bytes\n%.300s", code, len(left), out)
+	}
 
 	// Ctrl-C leaves, and leaves the terminal as it found it.
 	if out, code := r.typeAtPrompt(t, "abc\x03", "APP=example", "VAR=GONE"); code != 130 || r.exists(at("GONE")) {

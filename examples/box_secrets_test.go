@@ -951,12 +951,6 @@ func TestBoxSecretsNeedAge(t *testing.T) {
 	}
 }
 
-// envLines is hotserve's own env-file parser, the one every launch reads
-// a file with: make secrets-import must read a file as the box would.
-func envLines(data string) ([]string, error) {
-	return liveswap.ParseEnvLines("the corpus", []byte(data))
-}
-
 func TestBoxSecretsImport(t *testing.T) {
 	r := secretsRepo(t)
 	r.key("id_ed25519")
@@ -988,7 +982,9 @@ func TestBoxSecretsImport(t *testing.T) {
 		"CR=line\r",
 		"",
 	}, "\n")
-	want, err := envLines(corpus)
+	// The box's own reading of an env file (liveswap.ParseEnvLines): make
+	// secrets-import must read a file as every launch does.
+	want, err := liveswap.ParseEnvLines("corpus", []byte(corpus))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1023,7 +1019,7 @@ func TestBoxSecretsImport(t *testing.T) {
 		{`EMPTY=""`, "line 2: EMPTY is empty"},
 	} {
 		input := "OK=1\n" + c.line + "\n"
-		if _, err := envLines(input); err == nil && !strings.Contains(c.want, "is empty") {
+		if _, err := liveswap.ParseEnvLines("input", []byte(input)); err == nil && !strings.Contains(c.want, "is empty") {
 			t.Errorf("%q: hotserve's parser takes it, the test expects a refusal", c.line)
 		}
 		out, code := r.secrets("", input, "import", "APP=other")
