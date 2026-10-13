@@ -216,7 +216,8 @@ cross-references throughout.
    bundle still in `in/`: 409 "duplicate request id", so one id is never
    answered two ways) — if HEAD equals the baseline, the bundled
    file's digest equals the installed file's, the bundle's secrets tree
-   is the one `applied.json` records and every env file `applied.json`
+   is the one `applied.json` records, its apps are exactly the ones
+   `applied.json` lists, and every env file `applied.json`
    lists reads back with its recorded digest, at the mode and owner root
    writes (one that cannot be read, or whose mode or owner drifted,
    counts as changed, never as an error: root writes it again), and the bundle passes the
@@ -663,6 +664,28 @@ touched does not stop their write-back.
 | `applied.json` | `sha`, `path`, `sha256`, `signer`, `when` | applier, `init`, `baseline` | the baseline; this box's path (`<host>/Caddyfile`, as `init` derived it); the digest of the file the last apply installed (`baseline` keeps `path` and `sha256` as it finds them); who verified — a principal, or `init` or `baseline` for the console; when |
 | `applied.json` | `secrets_tree`, `secrets` | applier; `init` and `baseline` keep them as they find them | the baseline's secrets tree id (`""`, or the field absent, for none) and the `app → sha256` map of the env files the box manages: the only ones it may remove, and the digests step 4's fast path and the out-of-band flag compare. Every write from a transaction, `no_change` included, sets both from HEAD — its secrets tree, and the digest of every env file of HEAD's apps as it stands once the transaction ends — so a rekey records its new tree, and a console-made file whose bytes are HEAD's becomes listed. Absent in a file a box without secrets wrote, which reads as none; env files listed with no `secrets_tree` are no state a write makes, and the file does not read |
 | marker | `posted` | handler | time of admission |
+
+**The relations between fields.** One validator per file holds every
+row below — `record.valid` for `txn.json`, `applied.valid` for
+`applied.json`, the name lists' check for a result — and every read and
+every write goes through it: root writes no record or baseline that
+would not read back, and acts on none that does not. Recovery,
+`advance`, `init` and `baseline` therefore meet one rule set. The test
+builds records and baselines from real transactions and mutates one
+field at a time; every mutant is refused unless it is listed there as a
+valid variant with its reason.
+
+| Id | File | Relation |
+|---|---|---|
+| F1 | record | `phase` is one of the five; `no_change` has `new_sha256 == prev_sha256`, no env file in `secrets`, and no secret added, changed or removed (its set is empty) |
+| F2 | record | `origin: init` has no env file in `secrets` and no secret named added, changed or removed: `init`'s set is the Caddyfile alone |
+| F3 | record | `secrets` holds at most 64 entries (32 written, 32 removed), apps in the app grammar, each once, in app-name order |
+| F4 | record | each entry: `prev_sha256 == ""` exactly when it has no `prev` (absent before); a `prev` is at most 65 KiB and hashes to `prev_sha256`; `new_sha256` is a digest or `""` (removed); not both `""` |
+| F5 | record, `applied.json` | `secrets_tree` is `""` or 40 hex; the `app → sha256` map (`secrets_installed`, `secrets`) has at most 32 apps in the grammar, each at a digest |
+| F6 | record, `applied.json` | a non-empty map has a non-empty `secrets_tree`: env files are listed only from a commit with a secrets tree |
+| F7 | record | an entry the push writes is in `secrets_installed` at its `new_sha256`; one it removes is not in it |
+| F8 | record | a secret named added, changed or removed is one of an app with an entry in `secrets` — a value changes only in a file the set writes or removes — and one named added or changed, of an app `secrets_installed` lists: only an app HEAD has gets new values |
+| F9 | record, result | the added, changed and removed lists each hold at most 8192 names, each `<app>/<VAR>` in its grammars and cap; `secrets_edited_out_of_band` holds at most 64 app names |
 
 A result carries what was established before its phase: a refusal at
 step 9 has `id`, `phase` and `error`; one past the bundle's parse adds

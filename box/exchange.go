@@ -11,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/smallhoursorg/hotserve/box/proof"
 )
 
 // Where the box keeps its state (DESIGN-box.md, "Paths, owners, and
@@ -177,20 +175,8 @@ func readApplied(dir string) (*applied, error) {
 	if err := json.Unmarshal(b, &a); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if !proof.IsID(a.SHA) {
-		return nil, fmt.Errorf("%s: sha is not a 40-hex commit id", path)
-	}
-	if a.SecretsTree != "" && !proof.IsID(a.SecretsTree) {
-		return nil, fmt.Errorf("%s: secrets_tree is not a 40-hex tree id", path)
-	}
-	if err := validInstalled(a.Secrets); err != nil {
-		return nil, fmt.Errorf("%s: secrets: %w", path, err)
-	}
-	// Env files are listed only from a commit with a secrets tree: a
-	// list with none is no state a write makes, and the list decides
-	// what root may remove.
-	if len(a.Secrets) > 0 && a.SecretsTree == "" {
-		return nil, fmt.Errorf("%s: secrets listed with no secrets_tree", path)
+	if err := a.valid(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &a, nil
 }

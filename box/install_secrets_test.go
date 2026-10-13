@@ -22,7 +22,7 @@ import (
 // newSecretsBox is a test box whose applier installs secrets: the
 // secrets directory as tmpfiles.d makes it (2750, owned as the exchange
 // tree is), the key's directory, and the box's key.
-func newSecretsBox(t *testing.T) (*testBox, *age.X25519Identity) {
+func newSecretsBox(t testing.TB) (*testBox, *age.X25519Identity) {
 	t.Helper()
 	b := newTestBox(t)
 	b.secretsDirAs(0o750 | os.ModeSetgid)
@@ -986,7 +986,7 @@ func TestAppliedSecretsNeedATree(t *testing.T) {
 	a := b.applied()
 	a.Secrets = map[string]string{"example": digest(rendered(t, "KEY=v"))}
 	b.writeApplied(a)
-	if _, err := readApplied(b.x("")); err == nil || !strings.Contains(err.Error(), "secrets listed with no secrets_tree") {
+	if _, err := readApplied(b.x("")); err == nil || !strings.Contains(err.Error(), "env files listed with no secrets_tree") {
 		t.Fatalf("%v", err)
 	}
 	head := b.repo.commitSecrets(b.v1, nil, &b.alice, b.base)
@@ -1070,5 +1070,17 @@ func TestUnchangedSecrets(t *testing.T) {
 	other.SecretsTree = strings.Repeat("0", 40)
 	if unchanged(bundle, b.v1, &other, at(want, nil)) {
 		t.Error("another secrets tree: unchanged")
+	}
+	// A baseline whose listed apps are not the tree's goes to root.
+	for name, list := range map[string]map[string]string{
+		"none listed":     {},
+		"another listed":  {"other": want},
+		"one more listed": {"example": want, "other": want},
+	} {
+		odd := *base
+		odd.Secrets = list
+		if unchanged(bundle, b.v1, &odd, at(want, nil)) {
+			t.Errorf("%s: unchanged", name)
+		}
 	}
 }

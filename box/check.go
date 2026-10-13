@@ -166,8 +166,15 @@ func unchanged(b *proof.Bundle, installed []byte, base *applied, env func(app st
 		return false
 	}
 	s, err := provedSecrets(b)
-	if err != nil || s.Tree != base.SecretsTree {
+	if err != nil || s.Tree != base.SecretsTree || len(s.Apps) != len(base.Secrets) {
 		return false
+	}
+	// The tree's apps are the ones applied.json lists, each at its
+	// digest on disk: anything else goes to root, which decides.
+	for _, a := range s.Apps {
+		if _, listed := base.Secrets[a.Name]; !listed {
+			return false
+		}
 	}
 	for app, want := range base.Secrets {
 		if d, err := env(app); err != nil || d != want {
