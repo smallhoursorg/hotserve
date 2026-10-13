@@ -891,7 +891,7 @@ an empty cell means nobody, by design.
 | `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d | `box key` | applier, `box key` | — |
 | `/etc/hotserve/age/identity` | 0600 | root:root | `box key` (run by postinstall, `init` and the console) | — (never rewritten) | applier (step 15a), `box key` | — (a console moves it aside) |
 | `/etc/hotserve/age/.identity.box-<random>` | 0600 | root:root | `box key` | `box key` | — | `box key` (linked to `identity`, then removed; or removed on failure; the next run removes a crash's) |
-| `/etc/hotserve/age.pub` | 0644 | root:root | `box key` | `box key` (only when missing or not the identity's) | handler (`GET /`) | — |
+| `/etc/hotserve/age.pub` | 0644 | root:root | `box key` | `box key` (only when missing, not the identity's, or not 0644 root:root) | handler (`GET /`) | — |
 | `/etc/hotserve/.age.pub.box-<random>` | 0644 | root:root | `box key` | `box key` | — | `box key` (renamed over `age.pub`, or removed on failure; the next run removes a crash's) |
 | `/etc/hotserve/secrets/` | 2750 | root:hotserve | tmpfiles.d | applier | hotserve, handler, applier | — |
 | `/etc/hotserve/secrets/<app>.env` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | hotserve (each launch of `<app>`, and its response filter), handler (step 4's digest), applier | applier (when `applied.json` lists the app and HEAD has no `secrets/<app>/`) |
@@ -1209,7 +1209,9 @@ written to a temporary in the same directory and fsynced, then linked
 to `identity` with `link(2)`, which fails if the name exists; then the
 temporary is removed and the directory fsynced (I8: a name never
 stands durable over bytes that are not). Over an existing identity it derives the recipient and
-rewrites `age.pub` only if it is missing or another key's. An identity
+rewrites `age.pub` only if it is missing, another key's, or not 0644
+root:root (the handler could not read it, or another account could
+change it). An identity
 that does not parse is refused and nothing is written ("Console
 commands").
 
@@ -1458,7 +1460,7 @@ says.
 | 1 | `box key` | `hotserve box key runs as root: it reads the box's key for secrets` | not root |
 | 1 | `box key` | `/etc/hotserve/age/identity is not an age identity: move it aside, run hotserve box key again, then make rekey BOX_KEY=<the new key> in the repository` | the identity does not parse, or holds other than one X25519 identity |
 | 1 | `box key` | the box's own error as the system words it | anything else; nothing is written over an identity that exists |
-| 0 | `box key` | stdout: `age1…`; stderr: `box key: made /etc/hotserve/age/identity; its key above is the first line of <host>/secrets/recipients` / `box key: this box's key for secrets` | made, or already there (`age.pub` rewritten if it was missing or another key's) |
+| 0 | `box key` | stdout: `age1…`; stderr: `box key: made /etc/hotserve/age/identity; its key above is the first line of <host>/secrets/recipients` / `box key: this box's key for secrets` | made, or already there (`age.pub` rewritten if it was missing, another key's, or not 0644 root:root) |
 | 0 | `init` | `init: secrets for this box encrypt to age1…; hotserve box key prints it again` / the warning `init: could not make the box's key for secrets: <error>; hotserve box key, as root, makes it` | after `applied` or `no_change` (a warning, not a red end: the install stands) |
 
 The remedy, `<sha>` filled in from the argument and `<dir>` with init's directory, absolute (the operator may read it after a one-shot `ssh … "cd … && hotserve init …"` and follow it from root's home):
