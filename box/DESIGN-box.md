@@ -2005,7 +2005,9 @@ computer (Open question 6).
    age's hybrid keys cannot share a file with SSH-key readers, and
    Debian 13's age (1.2.1) cannot encrypt to them. Lean: when readers
    can move to `age1pq` keys, the box key moves with them in one
-   `make rekey`.
+   `make rekey`. That protects only new ciphertext: the old stays in
+   history, so the values that must stay secret are changed too, as
+   when a reader leaves ("The merge button, and the README's rules").
 
 ## Review checklist
 

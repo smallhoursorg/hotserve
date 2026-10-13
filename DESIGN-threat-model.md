@@ -677,7 +677,9 @@ changes:
   age's post-quantum hybrid keys cannot share a file with SSH-key
   recipients. Ciphertext kept for ever is
   open to a future quantum computer; the path is every reader on an
-  `age1pq` key and one rekey (box/DESIGN-box.md, Open questions).
+  `age1pq` key and one rekey, which protects only new ciphertext: the
+  old stays in history, so a value that must stay secret is changed
+  too (box/DESIGN-box.md, Open questions).
 
 ### Install-time — `packaging/postinstall.sh`
 
