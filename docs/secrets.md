@@ -39,6 +39,17 @@ age`) besides git and `make`. Every command below runs in a checkout of
 the box's repository. With more than one box in it, name the one you
 mean: `BOX=deploy.example.com`.
 
+## From an earlier template
+
+A box repository made from the template before secrets (v0.3.0's) has
+none of the commands below: its Makefile has only `check`, `signer`
+and `wip`. Copy these from the [template](../examples/box/) into
+yours: `Makefile`, `bin/secrets`, `bin/signer`, `bin/apply`,
+`bin/check` and `.gitattributes`; and delete `sudoers`, which the
+template no longer has. The Caddyfile stays yours: its commented
+`env_file` line names the old path, so add the line `make secret`
+prints instead.
+
 ## The box's key
 
 The package makes the box's key when it is installed or upgraded on a

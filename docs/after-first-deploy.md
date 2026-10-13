@@ -69,6 +69,8 @@ installed, and the SSH key you sign commits with. GitHub and the
 workflow only ever hold ciphertext, and nothing is typed onto the box.
 
 Once, on the laptop: `brew install age` (Debian: `apt install age`).
+A repository made from an earlier template needs
+[the new commands](secrets.md#from-an-earlier-template) first.
 The first secret also needs the box's key, which root prints:
 
 ```sh
