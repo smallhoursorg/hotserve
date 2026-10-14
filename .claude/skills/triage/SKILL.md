@@ -50,6 +50,10 @@ fix.
 | **Size** — what the fix adds to the code that runs | tightens lines already there: no new branch, state or file | one new branch, or about ten lines | a new state, lock or file, or more |
 | **Risk** — what the fix may break | the normal path behaves as before, and a new test proves the fix | anything between: the normal path changes under a test, new or existing, or it behaves as before with no new test proving the fix | the normal path changes, and no test covers it |
 
+A fix that changes no code that runs — prose, a comment — scores size
+1 and risk 2: no test can prove it, so it is made on the failure's
+score alone, and wording that misleads no one stays as it is.
+
 ## 4. Apply the rule
 
 In order:
