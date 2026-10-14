@@ -772,10 +772,10 @@ shows after recovery.
 
 ### Triage: which failures to defend
 
-The tables above say what each failure does; [DESIGN-triage.md](../DESIGN-triage.md)
-says which ones the code must handle and which are accepted: the
-scales, scoring the fix as well as the failure, and the rule. These
-are the box's examples for its scales:
+The tables above say what each failure does; the triage skill
+(`.claude/skills/triage/SKILL.md`) says which ones the code must handle
+and which are accepted: the scales, scoring the fix as well as the
+failure, and the rule. These are the box's examples for its scales:
 
 | Axis | 5 | 4 | 3 | 2 | 1 |
 |---|---|---|---|---|---|
@@ -810,7 +810,7 @@ can do both by other means.
 | A crash or shutdown between the swap and the reload's outcome, for a file that validates but does not load: hotserve starts on it at boot and fails, and recovery puts the previous bytes back on a hotserve that stays down (`failed`, "hotserve is not running") | States, `swapped` and `rolling_back` | 4 | 2 | 1 | 8; red, and the result names the commands that start hotserve on the previous file |
 | What a console put at an env file's name that is not root's own is not put back as it was by a rollback: a link reads as no file, so the push replaces it and the rollback removes the push's file; a file at another mode or owner gets its bytes back at 0640 `root:hotserve` | "Values and the env file" | 2 | 2 | 3 | 12; two independent faults (a console's own entry in root's directory, then a failed push), and the push is red and named |
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
-| A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4 (DESIGN-triage.md): a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
+| A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4 (the triage skill): a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
 
 ## Admission
 
@@ -2241,7 +2241,7 @@ Dated one-liners; the full text of each is in git.
   reads `describe`'s secrets lines. The template's sudoers file and its
   e2e suite are gone: secrets are commits, and an administrator is an
   account in `adm`, for the journal alone.
-- 2026-10-14 — The triage rule moves to DESIGN-triage.md, for every
-  subsystem, and scores the fix as well as the failure. "Triage: which
-  failures to defend" keeps the box's examples for the scales and its
-  accepted residuals.
+- 2026-10-14 — The triage rule moves to the triage skill
+  (`.claude/skills/triage/SKILL.md`), for every subsystem, and scores
+  the fix as well as the failure. "Triage: which failures to defend"
+  keeps the box's examples for the scales and its accepted residuals.
