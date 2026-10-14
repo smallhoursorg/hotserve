@@ -172,8 +172,9 @@ build:
 # fallback runner, so an Alpine/OpenRC package would install a hotserve
 # that serves but refuses any Caddyfile defining an app — see
 # packaging/nfpm.yaml. The packages carry the systemd unit, the starter
-# /etc/hotserve/Caddyfile and the data dirs; postinstall creates the
-# hotserve system user.
+# config (in /usr/share/hotserve) and the data dirs; postinstall creates
+# the hotserve system user and installs the starter at
+# /etc/hotserve/Caddyfile.
 #
 # clean-debs runs before build, so a run that fails anywhere leaves no
 # .deb behind for install-test to certify in place of this one.

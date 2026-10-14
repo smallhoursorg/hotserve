@@ -16,7 +16,9 @@
 # 3c that an upgrade restart the new binary refuses is reported. Stage
 # 1b runs the box applier's units as shipped, with a stub for the
 # applier and then with the real one, and stages 3 to 5 follow its path
-# unit through upgrade, removal and an install after removal.
+# unit through upgrade, removal and an install after removal. Stage 5b
+# follows the starter config through upgrades: none asks, a stock file
+# follows the starter, and no other file is touched.
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -89,6 +91,29 @@ for d in /var/lib/hotserve /var/lib/liveswap; do
 	[ "$got" = "hotserve:hotserve 750" ] || die "$d is '$got', want 'hotserve:hotserve 750'"
 done
 echo "user/group and data dir ownership OK"
+
+# The starter config is no conffile, so no upgrade can ask about it:
+# postinstall installs it from /usr/share and records its digest where
+# only root can write (stage 5 follows it through upgrades).
+STARTER=/usr/share/hotserve/Caddyfile
+CONFIG=/etc/hotserve/Caddyfile
+RECORD=/var/lib/hotserve-package/starter.sha256
+sha() { sha256sum <"$1" | cut -d' ' -f1; }
+conffiles=$(dpkg-query -W -f='${Conffiles}' hotserve)
+[ -z "$conffiles" ] || die "the package lists conffiles, which an upgrade can ask about: $conffiles"
+for f in "$STARTER" "$CONFIG" "$RECORD"; do
+	got=$(stat -c '%U:%G %a %F' "$f")
+	[ "$got" = "root:root 644 regular file" ] || die "$f is '$got', want 'root:root 644 regular file'"
+done
+cmp -s "$STARTER" "$CONFIG" || die "a fresh install's $CONFIG is not the starter"
+got=$(stat -c '%U:%G %a' "${RECORD%/*}")
+[ "$got" = "root:root 700" ] || die "${RECORD%/*} is '$got', want 'root:root 700'"
+[ "$(cat "$RECORD")" = "$(sha "$STARTER")" ] || die "the record is not the starter's sha256: $(cat "$RECORD")"
+runuser -u hotserve -- sh -c ": >>$RECORD" 2>/dev/null \
+	&& die "the hotserve user can write the record: a compromised hotserve could make an upgrade overwrite the box's config"
+runuser -u hotserve -- touch "${RECORD%/*}/smoke" 2>/dev/null \
+	&& die "the hotserve user can create files beside the record"
+echo "starter installed, no conffiles, the record root's alone"
 
 /usr/bin/hotserve version
 for m in liveswap http.handlers.liveswap_webhook \
@@ -472,8 +497,8 @@ hotserve deploy-keygen --out /etc/hotserve/deploy.key
 mgr_pid=$(systemctl show -p MainPID --value "user@$uid.service")
 [ -n "$mgr_pid" ] && [ "$mgr_pid" != "0" ] || die "no MainPID for user@$uid.service"
 
-# Overwriting the packaged conffile doubles as the modification marker
-# for the stage-3 config|noreplace assertion.
+# Overwriting the starter makes this a configured box, whose file
+# stages 3 and 5 prove no upgrade touches.
 cat > /etc/hotserve/Caddyfile <<'EOF'
 {
 	admin unix//run/hotserve/admin.sock
@@ -807,7 +832,7 @@ status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after hotserve's automatic restart"
 echo "SIGKILL: systemd restarted hotserve (NRestarts=1); app pid $pid_live reattached"
 
-stage "stage 3: reinstall — upgrade path, conffile preservation, app survival"
+stage "stage 3: reinstall — upgrade path, the box's config kept, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
 [ -n "$pid_before" ] || die "status missing pid: $status"
 # The account already exists by definition on a reinstall, which is the
@@ -832,7 +857,10 @@ chmod 0777 "$B/in"
 # four-digit mode, and the bit is what tmpfiles.d must put back.
 chmod 00755 "$B"
 chown hotserve "$B/out"
-dpkg -i "$deb" >/tmp/reinstall.out 2>/tmp/reinstall.err \
+cp "$CONFIG" /tmp/Caddyfile.configured
+# stdin from /dev/null and no --force-conf*: a question would end at
+# EOF and fail the install.
+dpkg -i "$deb" </dev/null >/tmp/reinstall.out 2>/tmp/reinstall.err \
 	|| { cat /tmp/reinstall.out /tmp/reinstall.err; die "reinstall (dpkg -i) failed"; }
 cat /tmp/reinstall.out /tmp/reinstall.err
 # hotserve is enabled and running: the start hint would be noise, and a
@@ -845,8 +873,10 @@ grep -qx 'hotserve restarted.' /tmp/reinstall.out \
 	|| die "reinstall over a running hotserve did not say it restarted"
 id -nG hotserve | tr ' ' '\n' | grep -qx hotserve \
 	|| die "reinstall did not restore the hotserve user's group membership: the package's group-owned directories would be unreachable"
-grep -q liveswap_webhook /etc/hotserve/Caddyfile \
-	|| die "reinstall clobbered the modified /etc/hotserve/Caddyfile (config|noreplace broken)"
+cmp -s /tmp/Caddyfile.configured "$CONFIG" \
+	|| die "reinstall changed the configured $CONFIG"
+[ "$(cat "$RECORD")" = "$(sha "$STARTER")" ] \
+	|| die "reinstall over a configured box changed the record"
 [ "$(systemctl is-enabled hotserve-box-apply.path)" = disabled ] \
 	|| die "an upgrade re-enabled the box applier's path unit an administrator disabled"
 systemctl is-active --quiet hotserve-box-apply.path \
@@ -957,7 +987,8 @@ stage "stage 4: removal"
 apt-get remove -y hotserve
 systemctl is-active --quiet hotserve && die "service still active after remove (preremove did not stop it)" || true
 [ ! -e /usr/bin/hotserve ] || die "/usr/bin/hotserve still present after remove"
-[ -f /etc/hotserve/Caddyfile ] || die "conffile deleted on remove (should survive until purge)"
+cmp -s /tmp/Caddyfile.configured "$CONFIG" || die "remove changed or deleted $CONFIG"
+[ -f "$RECORD" ] || die "remove deleted the record"
 systemctl is-active --quiet "user@$uid.service" && die "user manager still running after remove (apps would linger)" || true
 [ ! -e /etc/systemd/system/hotserve.service.d/10-user-manager.conf ] || die "user-manager drop-in left behind"
 [ ! -e "/etc/systemd/system/user@$uid.service.d/10-hotserve.conf" ] || die "user@ limits drop-in left behind"
@@ -966,7 +997,7 @@ kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived 
 systemctl is-active --quiet hotserve-box-apply.path && die "the box applier's path unit is still active after remove (preremove did not stop it)" || true
 [ ! -e /lib/systemd/system/hotserve-box-apply.path ] && [ ! -e /lib/systemd/system/hotserve-box-apply.service ] \
 	|| die "the box applier's units are still installed after remove"
-echo "removal stopped the service, the apps and the box applier's path unit, kept the conffile"
+echo "removal stopped the service, the apps and the box applier's path unit, kept the config and the record"
 
 stage "stage 5: install again after removal"
 # preremove stops the path unit and does not disable it, so an install
@@ -975,9 +1006,147 @@ stage "stage 5: install again after removal"
 apt-get install -y "$deb" >/tmp/again.out 2>&1 || { cat /tmp/again.out; die "install after removal failed"; }
 [ "$(systemctl is-enabled hotserve-box-apply.path)" = enabled ] && systemctl is-active --quiet hotserve-box-apply.path \
 	|| die "after remove and install, the box applier's path unit is '$(systemctl is-enabled hotserve-box-apply.path)', $(systemctl is-active hotserve-box-apply.path); want enabled and active"
+cmp -s /tmp/Caddyfile.configured "$CONFIG" || die "an install after removal changed the configured $CONFIG"
+echo "install after removal: the path unit enabled and active again; the configured $CONFIG kept"
+
+stage "stage 5b: the starter across upgrades"
+# Upgrades never ask about $CONFIG: postinstall installs the starter
+# where nothing stands, replaces it only while it is byte-identical to
+# the starter it last wrote (the record), and leaves anything else
+# alone. hotserve is disabled and stopped since stage 4, so no
+# postinstall here restarts it.
+systemctl is-active --quiet hotserve && die "hotserve is running; stage 5b expects it stopped" || true
+rm -f "$CONFIG"
+dpkg -i "$deb" </dev/null >/tmp/starter.out 2>&1 || { cat /tmp/starter.out; die "reinstall over a missing $CONFIG failed"; }
+cmp -s "$STARTER" "$CONFIG" || die "a missing $CONFIG was not restored from the starter"
+[ "$(cat "$RECORD")" = "$(sha "$STARTER")" ] || die "restoring the starter did not record it"
+echo "a missing $CONFIG: the starter restored and recorded"
+
+# A newer package whose starter changed: this one, repacked.
+cp "$STARTER" /tmp/starter.prev
+rm -rf /tmp/repack
+dpkg-deb -R "$deb" /tmp/repack
+printf '# smoke: a changed starter\n' >>/tmp/repack/usr/share/hotserve/Caddyfile
+sed -i 's/^Version: .*/&+smoke1/' /tmp/repack/DEBIAN/control
+(cd /tmp/repack && find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | xargs -0 md5sum >DEBIAN/md5sums)
+dpkg-deb -b /tmp/repack /tmp/hotserve-smoke1.deb >/dev/null || die "could not repack the .deb with a changed starter"
+dpkg -i /tmp/hotserve-smoke1.deb </dev/null >/tmp/starter.out 2>&1 \
+	|| { cat /tmp/starter.out; die "the upgrade to a changed starter failed (a question at EOF fails it)"; }
+grep -q 'Configuration file' /tmp/starter.out && { cat /tmp/starter.out; die "the upgrade to a changed starter asked about a config file"; }
+tail -n 1 "$STARTER" | grep -qx '# smoke: a changed starter' || die "the repacked .deb did not ship the changed starter"
+cmp -s "$STARTER" "$CONFIG" || die "a stock $CONFIG was not replaced by the changed starter"
+got=$(stat -c '%U:%G %a %F' "$CONFIG")
+[ "$got" = "root:root 644 regular file" ] || die "the replaced $CONFIG is '$got', want 'root:root 644 regular file'"
+[ "$(cat "$RECORD")" = "$(sha "$STARTER")" ] || die "the record does not name the starter just written"
+echo "a stock $CONFIG: replaced by the changed starter, with no question, and recorded"
+
+# Each case below runs the installed postinst directly, the way stage
+# 3b runs prerm: each is the state an upgrade would find.
+ver=$(dpkg-query -W -f='${Version}' hotserve)
+postinst() {
+	/var/lib/dpkg/info/hotserve.postinst configure "$ver" </dev/null >/tmp/postinst.out 2>&1 \
+		|| { cat /tmp/postinst.out; die "postinst exited non-zero over $1"; }
+}
+want=$(sha "$STARTER")
+
+printf '# an operator was here\n' >>"$CONFIG"
+cp "$CONFIG" /tmp/edited
+postinst "an edited $CONFIG"
+cmp -s /tmp/edited "$CONFIG" || die "postinst changed an edited $CONFIG"
+[ "$(cat "$RECORD")" = "$want" ] || die "postinst changed the record over an edited $CONFIG"
+echo "an edited $CONFIG: untouched"
+
+# A crash between the rename and the record: the starter on disk, the
+# record still the previous one's. The next run heals the record, or
+# the box would look edited for good.
+cp "$STARTER" "$CONFIG"
+sha /tmp/starter.prev >"$RECORD"
+ino=$(stat -c %i "$CONFIG")
+postinst "a crash between the rename and the record"
+[ "$(cat "$RECORD")" = "$want" ] || die "postinst did not heal a record left behind by a crash"
+[ "$(stat -c %i "$CONFIG")" = "$ino" ] && cmp -s "$STARTER" "$CONFIG" || die "healing the record rewrote $CONFIG"
+echo "a crash between the rename and the record: the record healed, $CONFIG not rewritten"
+
+# A symlink is never followed, even to bytes the record names: here a
+# followed link would be replaced.
+rm -f "$CONFIG"
+cp /tmp/starter.prev /tmp/linked
+sha /tmp/linked >"$RECORD"
+ln -s /tmp/linked "$CONFIG"
+postinst "a symlink"
+[ "$(readlink "$CONFIG")" = /tmp/linked ] || die "postinst replaced a symlinked $CONFIG"
+cmp -s /tmp/starter.prev /tmp/linked || die "postinst wrote through a symlinked $CONFIG"
+rm -f "$CONFIG"
+ln -s /nonexistent/Caddyfile "$CONFIG"
+postinst "a dangling symlink"
+[ "$(readlink "$CONFIG")" = /nonexistent/Caddyfile ] && [ ! -e /nonexistent ] \
+	|| die "postinst replaced or followed a dangling symlink at $CONFIG"
+rm -f "$CONFIG"
+mkdir "$CONFIG"
+postinst "a directory"
+[ -d "$CONFIG" ] && [ -z "$(ls -A "$CONFIG")" ] || die "postinst changed a directory at $CONFIG"
+rmdir "$CONFIG"
+echo "a symlink, a dangling symlink, a directory: untouched"
+
+# Without a record that names it, a file that is not the starter is
+# left alone: a garbled record, and none at all.
+cp /tmp/starter.prev "$CONFIG"
+echo garbage >"$RECORD"
+postinst "a garbled record"
+cmp -s /tmp/starter.prev "$CONFIG" || die "postinst replaced $CONFIG on a garbled record"
+[ "$(cat "$RECORD")" = garbage ] || die "postinst rewrote a garbled record although it wrote no starter"
+rm -f "$RECORD"
+postinst "no record"
+cmp -s /tmp/starter.prev "$CONFIG" || die "postinst replaced $CONFIG with no record"
+[ ! -e "$RECORD" ] || die "postinst wrote a record although it wrote no starter"
+echo "a garbled record, no record: $CONFIG untouched"
+ls -A /etc/hotserve | grep -q '^\.Caddyfile\.package-' && die "postinst left a temporary in /etc/hotserve" || true
+
+# postinst sweeps a crash's temporaries; a directory by one of their
+# names is not its to remove, and must not fail the install.
+mkdir /etc/hotserve/.Caddyfile.package-smoke "$RECORD.smoke"
+postinst "directories named like its temporaries"
+[ -d /etc/hotserve/.Caddyfile.package-smoke ] && [ -d "$RECORD.smoke" ] \
+	|| die "postinst removed a directory named like its temporaries"
+rmdir /etc/hotserve/.Caddyfile.package-smoke "$RECORD.smoke"
+echo "directories named like its temporaries: left, and postinst exits 0"
+
+# A directory at a temporary's exact name: made under the PID postinst
+# will run as (exec keeps the shell's, and the script's $$ is it). The
+# install goes on, saying why, and nothing is written into the
+# directory, over it or in its place.
+postinst_colliding() {
+	sh -c 'mkdir -m 0755 "$1$$" && exec "$2" configure "$3"' sh "$1" /var/lib/dpkg/info/hotserve.postinst "$ver" \
+		</dev/null >/tmp/postinst.out 2>&1 \
+		|| { cat /tmp/postinst.out; die "postinst exited non-zero with a directory at its temporary $1<pid>"; }
+	collided=$(ls -d "$1"[0-9]*) || die "no directory at $1<pid>: the collision tested nothing"
+	[ "$(stat -c '%a %F' "$collided")" = "755 directory" ] && [ -z "$(ls -A "$collided")" ] \
+		|| die "postinst changed the directory at $collided: $(stat -c '%a %F' "$collided"); holds: $(ls -A "$collided")"
+	rmdir "$collided"
+}
+cp /tmp/starter.prev "$CONFIG"
+sha /tmp/starter.prev >"$RECORD"
+postinst_colliding /etc/hotserve/.Caddyfile.package-
+cmp -s /tmp/starter.prev "$CONFIG" || die "postinst changed a stock $CONFIG although its temporary was a directory"
+[ "$(cat "$RECORD")" = "$(sha /tmp/starter.prev)" ] || die "postinst recorded a starter it did not install"
+grep -q 'could not install the starter config' /tmp/postinst.out || die "postinst did not say it could not install the starter"
+rm -f "$CONFIG"
+postinst_colliding /etc/hotserve/.Caddyfile.package-
+[ ! -e "$CONFIG" ] && [ ! -L "$CONFIG" ] \
+	|| die "postinst put a $(stat -c %F "$CONFIG") at a missing $CONFIG although its temporary was a directory"
+[ "$(cat "$RECORD")" = "$(sha /tmp/starter.prev)" ] || die "postinst recorded a starter it did not install"
+grep -q 'could not install the starter config' /tmp/postinst.out || die "postinst did not say it could not install the starter"
+# The starter on disk and a stale record: postinst writes only the record.
+cp "$STARTER" "$CONFIG"
+postinst_colliding "$RECORD."
+[ "$(cat "$RECORD")" = "$(sha /tmp/starter.prev)" ] || die "the record changed although its temporary was a directory"
+cmp -s "$STARTER" "$CONFIG" || die "postinst changed $CONFIG while failing to write the record"
+grep -q "could not write $RECORD durably" /tmp/postinst.out || die "postinst did not say it could not write the record"
+echo "a directory at a temporary's exact name: left as it was, $CONFIG and the record unchanged, postinst exits 0 and says why"
+
 apt-get remove -y hotserve >/dev/null
 systemctl is-active --quiet hotserve-box-apply.path && die "the second remove left the path unit active" || true
-echo "install after removal: the path unit enabled and active again; removed again"
+echo "stage 5b: removed again; the path unit stopped"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

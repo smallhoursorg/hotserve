@@ -14,12 +14,14 @@ apt install ./hotserve_${v}_${arch}.deb
 ```
 
 The package keeps your `/etc/hotserve/Caddyfile` and restarts hotserve
-into the new binary. When a release has changed the starter config the
-package ships, dpkg asks what to do about that file ("Install the
-package maintainer's version?"): answer **N**, the default. The
-packaged file is the starter, and installing it would replace your
-box's config — every app and, on a box set up from the box template,
-the `box` block, so no push could reach the box afterwards. Your apps are not restarted: they run under
+into the new binary. An upgrade never asks about that file. The
+package installs its starter config there only when nothing is there,
+and replaces it only while it is byte-for-byte the starter the package
+itself last wrote. Any other file — one you edited, or one `hotserve
+init` or a push wrote — is never touched, and neither is a symlink.
+The test is the bytes, not who wrote them: a copy of the starter you
+put there yourself counts as the starter. A fresh copy of the starter
+is always at `/usr/share/hotserve/Caddyfile`. Your apps are not restarted: they run under
 hotserve's user manager rather than inside hotserve, so the new process
 finds each one in `state.json` and picks it up as it is — same process,
 no relaunch, no redeploy.

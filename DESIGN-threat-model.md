@@ -50,7 +50,13 @@ Windows, and macOS-as-a-server are out of scope by product design.
    which repository may deploy each app, each app's command and
    flags, which hosts are served, and who may change the file itself.
    Root-owned, 0644; written only by root — `hotserve init`, the `box`
-   applier, the console ([box/DESIGN-box.md](box/DESIGN-box.md)). A
+   applier, the console ([box/DESIGN-box.md](box/DESIGN-box.md)), and
+   the package's postinstall, which puts the starter there only where
+   nothing stands or while the file is byte-identical to the starter
+   it last wrote. Its record of that starter's digest
+   (`/var/lib/hotserve-package/starter.sha256`, in a 0700 root
+   directory) is root's alone, so the hotserve uid cannot steer an
+   upgrade into overwriting the box's config. A
    writer here outlasts a restart, which is what makes it an asset
    distinct from the admin socket (whose changes do not).
 6. **Sibling app data** — `/var/lib/liveswap/<app>/{releases,shared,state.json}`.
@@ -687,7 +693,10 @@ changes:
 
 Runs as root at install; creates the `hotserve` user, chowns
 `/var/lib/{hotserve,liveswap}`, enables linger so the hotserve user
-manager runs without a session. Supply-chain attacks on hotserve's own
+manager runs without a session, and installs or replaces the starter
+config at `/etc/hotserve/Caddyfile` only as asset 5 says: where nothing
+stands, or while the file is byte-identical to the starter recorded in
+root's own `/var/lib/hotserve-package`. Supply-chain attacks on hotserve's own
 build land here, but they run in CI, not from a deployed app — out of
 scope for the runtime model, in scope for release signing (roadmap).
 

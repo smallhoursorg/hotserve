@@ -41,6 +41,68 @@ if command -v systemd-tmpfiles >/dev/null 2>&1; then
 	systemd-tmpfiles --create hotserve-box.conf \
 		|| echo "hotserve: systemd-tmpfiles --create hotserve-box.conf failed; the box applier has no /var/lib/hotserve-box until it succeeds" >&2
 fi
+# The starter config (nfpm.yaml says why it is not a conffile). Install
+# it where nothing stands at /etc/hotserve/Caddyfile, and replace it
+# only while it is byte-identical to the starter this script last wrote
+# there, which the record says. Leave anything else alone, silently: an
+# edit, a file `hotserve init` or a push wrote, a symlink (never
+# followed), anything not a regular file, a file with no record. Each
+# write lands whole, by rename, before the try-restart below loads it. A
+# failure never fails the install; the file stays as it was.
+starter=/usr/share/hotserve/Caddyfile
+config=/etc/hotserve/Caddyfile
+record=/var/lib/hotserve-package/starter.sha256
+sha256() { sha256sum <"$1" | cut -d' ' -f1; }
+# Records $want as the starter on disk. /etc/hotserve is synced first,
+# so the record never names a rename a power cut could still undo,
+# which would make a stock file look edited for good; then the record's
+# own rename, and its directory.
+starter_record() {
+	record_tmp="$record.$$"
+	if sync /etc/hotserve && printf '%s\n' "$want" >"$record_tmp" \
+		&& chmod 0644 "$record_tmp" && sync "$record_tmp" \
+		&& mv -fT "$record_tmp" "$record" && sync "${record%/*}"; then
+		return 0
+	fi
+	rm -f "$record_tmp" || true
+	echo "hotserve: could not write $record durably; until it is, upgrades may leave $config as it is" >&2
+}
+starter_put() {
+	config_tmp="/etc/hotserve/.Caddyfile.package-$$"
+	# -T: a directory standing at that name is refused, never written into.
+	if cp -T "$starter" "$config_tmp" && chown root:root "$config_tmp" \
+		&& chmod 0644 "$config_tmp" && sync "$config_tmp" \
+		&& mv -fT "$config_tmp" "$config"; then
+		starter_record
+		return 0
+	fi
+	rm -f "$config_tmp" || true
+	echo "hotserve: could not install the starter config at $config; it is at $starter" >&2
+}
+# A crash's temporaries: only this script makes them. Never fatal: a
+# directory by one of these names is not this script's to remove.
+rm -f /etc/hotserve/.Caddyfile.package-* "$record".* 2>/dev/null || true
+if want=$(sha256 "$starter") && [ ${#want} -eq 64 ]; then
+	if [ ! -e "$config" ] && [ ! -L "$config" ]; then
+		starter_put
+	elif [ -f "$config" ] && [ ! -L "$config" ]; then
+		have=$(sha256 "$config") || have=
+		recorded=
+		if [ -f "$record" ] && [ ! -L "$record" ]; then
+			recorded=$(head -n 1 "$record") || recorded=
+		fi
+		if [ "$have" = "$want" ]; then
+			# Already the starter: a crash between the rename and the
+			# record, or a box that has never had a record. Without
+			# this it would look edited for good.
+			[ "$recorded" = "$want" ] || starter_record
+		elif [ -n "$have" ] && [ "$have" = "$recorded" ]; then
+			starter_put
+		fi
+	fi
+else
+	echo "hotserve: could not read $starter; $config is left as it is" >&2
+fi
 # The box's key for secrets (box/DESIGN-box.md, "The box's key"), made
 # once and never replaced, so that a box upgraded from a release without
 # secrets has one with no step. Only on a running system: an image built
