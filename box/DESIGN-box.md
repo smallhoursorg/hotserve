@@ -888,8 +888,9 @@ an empty cell means nobody, by design.
 <!-- table: paths (box/units_test.go reads it) -->
 | Path | Mode | Owner | Creates | Writes | Reads | Removes |
 |---|---|---|---|---|---|---|
-| `/etc/hotserve/Caddyfile` | 0644 | root:root | package | applier, `init`, console | hotserve, handler, applier | — |
+| `/etc/hotserve/Caddyfile` | 0644 | root:root | postinstall (the starter, where nothing stands) | applier, `init`, console; postinstall (the new starter, only while the file is byte-identical to the starter it last wrote) | hotserve, handler, applier, postinstall | — |
 | `/etc/hotserve/.Caddyfile.box-<id>` | 0644 | root:root | applier, `init` | applier, `init` | — | applier, `init` (renamed over `Caddyfile`, or removed on failure) |
+| `/etc/hotserve/.Caddyfile.package-<pid>` | 0644 | root:root | postinstall | postinstall | — | postinstall (renamed over `Caddyfile`, or removed on failure; the next run removes a crash's) |
 | `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d | `box key` | applier, `box key` | — |
 | `/etc/hotserve/age/identity` | 0600 | root:root | `box key` (run by postinstall, `init` and the console) | — (never rewritten) | applier (step 15a), `box key` | — (a console moves it aside) |
 | `/etc/hotserve/age/.identity-<random>` | 0600 | root:root | `box key` | `box key` | — | `box key` (linked to `identity`, then removed; or removed on failure; the next run removes a crash's) |
@@ -914,6 +915,9 @@ an empty cell means nobody, by design.
 | `…/applied.json` | 0640 | root:hotserve | `init` | applier, `init`, `baseline` (all under `lock`) | handler (`GET /`), applier | — |
 | `…/.applied.json.tmp` | 0640 | root:hotserve (born in the setgid dir) | applier, `init`, `baseline` | applier, `init`, `baseline` | — | the writer (renamed over `applied.json`, or removed on failure); the applier's recovery removes a crash's |
 | `…/lock` | 0600 | root:hotserve (born in the setgid dir) | whichever of applier, `init`, `baseline` takes it first | — | applier, `init`, `baseline` (blocking `flock`) | — |
+| `/usr/share/hotserve/Caddyfile` | 0644 | root:root | package | package | postinstall | package |
+| `/var/lib/hotserve-package/` | 0700 | root:root | package | — | — | — |
+| `/var/lib/hotserve-package/starter.sha256` (and its `.<pid>` temporary) | 0644 | root:root | postinstall | postinstall (by rename: after each starter it writes, and when `Caddyfile` already is the starter but the record does not say so) | postinstall | postinstall (the temporary: renamed over the record, or removed on failure; the next run removes a crash's) |
 
 Notes that the table cannot hold:
 

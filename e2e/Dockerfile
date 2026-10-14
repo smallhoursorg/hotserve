@@ -70,9 +70,13 @@ COPY packaging/hotserve.service /etc/systemd/system/hotserve.service
 # them (packaging/nfpm.yaml); postinstall makes the tree.
 COPY packaging/hotserve-box-apply.path packaging/hotserve-box-apply.service /lib/systemd/system/
 COPY packaging/hotserve-box.tmpfiles /usr/lib/tmpfiles.d/hotserve-box.conf
+# The starter and the directories the package ships for it; postinstall
+# installs it and its record (e2e/Caddyfile replaces it below).
+COPY packaging/Caddyfile /usr/share/hotserve/Caddyfile
 COPY packaging/postinstall.sh /tmp/postinstall.sh
-RUN mkdir -p /var/lib/hotserve /var/lib/liveswap \
+RUN mkdir -p /var/lib/hotserve /var/lib/liveswap /etc/hotserve /var/lib/hotserve-package \
 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap \
+	&& chmod 755 /etc/hotserve && chmod 700 /var/lib/hotserve-package \
 	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh
 COPY e2e/systemd/e2e.conf /etc/systemd/system/hotserve.service.d/e2e.conf
 COPY e2e/systemd/e2e-token.service /etc/systemd/system/e2e-token.service

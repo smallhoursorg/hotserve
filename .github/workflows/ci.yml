@@ -139,7 +139,7 @@ jobs:
 
   # Installs the .deb under real systemd on each arch and runs the
   # staged smoke test (install → unit boot → liveswap deploy under the
-  # sandbox → reinstall/conffile → remove). The single
+  # sandbox → reinstall/starter config → remove). The single
   # dist artifact carries both arches; smoke.sh picks by
   # `dpkg --print-architecture`, which is what makes the arm cells work
   # unchanged.

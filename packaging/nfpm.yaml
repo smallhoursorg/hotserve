@@ -77,11 +77,31 @@ contents:
     dst: /usr/lib/tmpfiles.d/hotserve-box.conf
     file_info:
       mode: 0644
+  # The starter config. It is not a conffile: postinstall installs it
+  # at /etc/hotserve/Caddyfile where nothing stands, replaces it there
+  # only while that file is byte-identical to the starter postinstall
+  # last wrote (the sha256 in /var/lib/hotserve-package/starter.sha256),
+  # and otherwise never touches it. So an upgrade never asks. As a
+  # conffile, a changed starter made dpkg ask on every box whose file
+  # `hotserve init` or a push had written, and Y there replaced the
+  # box's config with this one, which no push can reach. ucf asks too,
+  # or (forced) never replaces an untouched file; dpkg-maintscript-helper
+  # rm_conffile empties the live path mid-upgrade. Neither is used.
   - src: packaging/Caddyfile
-    dst: /etc/hotserve/Caddyfile
-    type: config|noreplace
+    dst: /usr/share/hotserve/Caddyfile
     file_info:
       mode: 0644
+  - dst: /etc/hotserve
+    type: dir
+    file_info:
+      mode: 0755
+  # Root's alone: a record the hotserve user could write would let a
+  # compromised hotserve make root's next upgrade overwrite the box's
+  # config with the starter.
+  - dst: /var/lib/hotserve-package
+    type: dir
+    file_info:
+      mode: 0700
   - dst: /var/lib/hotserve
     type: dir
     file_info:
