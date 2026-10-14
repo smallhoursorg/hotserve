@@ -94,10 +94,11 @@ for f in $files; do
 	secrets=$(grep -c '^secret ' "$tmpd/describe" || true)
 	# A value is a file in an app's directory under <dir>/secrets/, as
 	# the box counts them: a hotserve that names none has never heard
-	# of secrets, and would pass them unread.
+	# of secrets, and would pass them unread. The refusal names no
+	# release: `hotserve version` prints Caddy's.
 	values=$(find "$dir/secrets" -mindepth 2 -maxdepth 2 -name '[!.]*.age' 2>/dev/null | grep -c . || true)
 	if [ "$values" -gt 0 ] && [ "$secrets" = 0 ] && ! grep -q '^recipients ' "$tmpd/describe"; then
-		bad "$f: $dir/secrets holds values, and this hotserve ($("$HOTSERVE" version 2>/dev/null | head -n 1)) does not read secrets: check with a release that does (the workflow's HOTSERVE_VERSION variable, or the latest)"
+		bad "$f: $dir/secrets holds values, and this hotserve does not read secrets: check with a release that does (the workflow takes the latest stable release, or the one its HOTSERVE_VERSION variable names)"
 		continue
 	fi
 	if [ "$secrets" -gt 0 ] && ! grep -q '^recipients ' "$tmpd/describe"; then
