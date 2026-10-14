@@ -772,48 +772,20 @@ shows after recovery.
 
 ### Triage: which failures to defend
 
-The tables above say what each failure does; this says which ones the
-code must handle and which are accepted. A finding — from a review, a
-test or the field — is scored on three axes (FMEA's), then the rule
-decides. Without it every edge case looks mandatory, and each guard
-added for a multi-fault case becomes a new branch for the next one.
+The tables above say what each failure does; [DESIGN-triage.md](../DESIGN-triage.md)
+says which ones the code must handle and which are accepted: the
+scales, scoring the fix as well as the failure, and the rule. These
+are the box's examples for its scales:
 
 | Axis | 5 | 4 | 3 | 2 | 1 |
 |---|---|---|---|---|---|
-| **Severity** — the effect if it happens | installs bytes no listed signer signed, or advances the baseline wrongly (I6, I4) | the box wedged until the console | a wrong verdict the workflow trusts (green for a push that did not apply, or the reverse) | a wrong message; red where green was due | logging only |
-| **Occurrence** — what must go wrong | normal operation | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
-| **Detection** — how it surfaces | silently | — | a wrong but plausible answer | — | red, with a journal line naming it |
+| **Severity** | installs bytes no listed signer signed, or advances the baseline wrongly (I6, I4) | the box wedged until the console | a wrong verdict the workflow trusts (green for a push that did not apply, or the reverse) | a wrong message; red where green was due | logging only |
+| **Occurrence** | normal operation | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
+| **Detection** | silently | — | a wrong but plausible answer | — | red, with a journal line naming it |
 
-The fix is scored too, on what it costs. Cost is never multiplied into
-severity × occurrence × detection: that product measures the failure,
-and these measure the fix.
-
-| Cost | 1 | 2 | 3 |
-|---|---|---|---|
-| **Size** — what the fix adds to the code that runs | tightens lines already there: no new branch, state or file | one new branch, or about ten lines | a new state, lock or file, or more |
-| **Risk** — what the fix may break | the normal path behaves as before, and a new test proves the fix | the normal path changes, under a test that already exists | the normal path changes, and no test covers it |
-
-The rule, in order:
-
-1. **Severity 5 is fixed**, whatever its occurrence.
-2. **Single faults are fixed** (occurrence 3 or more): the box must
-   end correct, or red and named, under any one fault — the
-   single-fault criterion of safety engineering.
-3. Anything else is fixed if severity × occurrence × detection is 20
-   or more, or if its fix scores 1 for both size and risk: a fix
-   that cheap and that safe is made whatever the finding scores.
-   Otherwise the finding is **accepted** and recorded in the table
-   below, with its scores.
-4. **Stop** when the next guard costs more than it buys (ALARP): a
-   fix that adds a branch for a multi-fault case is itself a finding to
-   weigh, since every branch is one more state the next fault can
-   reach. The cost axes are how that cost is weighed. Rules 1 and 2
-   hold whatever a fix costs: the cost changes how they are fixed,
-   not whether.
-
-A hostile hotserve uid (T5) is scored by what it gains: an effect it
-could already have by other means — answering every poll itself,
-refusing every push at admission — scores severity 1.
+A hostile hotserve uid (T5) gains nothing, and so scores severity 1,
+by answering every poll itself or refusing every push at admission: it
+can do both by other means.
 
 **Accepted residuals** (each also stated where its behaviour lives):
 
@@ -838,7 +810,7 @@ refusing every push at admission — scores severity 1.
 | A crash or shutdown between the swap and the reload's outcome, for a file that validates but does not load: hotserve starts on it at boot and fails, and recovery puts the previous bytes back on a hotserve that stays down (`failed`, "hotserve is not running") | States, `swapped` and `rolling_back` | 4 | 2 | 1 | 8; red, and the result names the commands that start hotserve on the previous file |
 | What a console put at an env file's name that is not root's own is not put back as it was by a rollback: a link reads as no file, so the push replaces it and the rollback removes the push's file; a file at another mode or owner gets its bytes back at 0640 `root:hotserve` | "Values and the env file" | 2 | 2 | 3 | 12; two independent faults (a console's own entry in root's directory, then a failed push), and the push is red and named |
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
-| A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4: a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
+| A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4 (DESIGN-triage.md): a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
 
 ## Admission
 
@@ -2265,9 +2237,7 @@ Dated one-liners; the full text of each is in git.
   reads `describe`'s secrets lines. The template's sudoers file and its
   e2e suite are gone: secrets are commits, and an administrator is an
   account in `adm`, for the journal alone.
-- 2026-10-14 — Triage scores the fix as well as the failure: size and
-  risk, each 1 to 3, never multiplied into severity × occurrence ×
-  detection. A finding under the bar is still fixed when its fix only
-  tightens lines already there and leaves the normal path as it was,
-  with a test that proves it (first used on #239, where tracing such a
-  fix turned up a worse case than the one reported).
+- 2026-10-14 — The triage rule moves to DESIGN-triage.md, for every
+  subsystem, and scores the fix as well as the failure. "Triage: which
+  failures to defend" keeps the box's examples for the scales and its
+  accepted residuals.
