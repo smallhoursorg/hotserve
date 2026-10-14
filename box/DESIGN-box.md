@@ -784,19 +784,32 @@ added for a multi-fault case becomes a new branch for the next one.
 | **Occurrence** — what must go wrong | normal operation | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
 | **Detection** — how it surfaces | silently | — | a wrong but plausible answer | — | red, with a journal line naming it |
 
+The fix is scored too, on what it costs. Cost is never multiplied into
+severity × occurrence × detection: that product measures the failure,
+and these measure the fix.
+
+| Cost | 1 | 2 | 3 |
+|---|---|---|---|
+| **Size** — what the fix adds to the code that runs | tightens lines already there: no new branch, state or file | one new branch, or about ten lines | a new state, lock or file, or more |
+| **Risk** — what the fix may break | the normal path behaves as before, and a new test proves the fix | the normal path changes, under a test that already exists | the normal path changes, and no test covers it |
+
 The rule, in order:
 
 1. **Severity 5 is fixed**, whatever its occurrence.
 2. **Single faults are fixed** (occurrence 3 or more): the box must
    end correct, or red and named, under any one fault — the
    single-fault criterion of safety engineering.
-3. Anything else is fixed only if severity × occurrence × detection is
-   20 or more; otherwise it is **accepted** and recorded in the table
+3. Anything else is fixed if severity × occurrence × detection is 20
+   or more, or if its fix scores 1 for both size and risk: a fix
+   that cheap and that safe is made whatever the finding scores.
+   Otherwise the finding is **accepted** and recorded in the table
    below, with its scores.
 4. **Stop** when the next guard costs more than it buys (ALARP): a
    fix that adds a branch for a multi-fault case is itself a finding to
    weigh, since every branch is one more state the next fault can
-   reach.
+   reach. The cost axes are how that cost is weighed. Rules 1 and 2
+   hold whatever a fix costs: the cost changes how they are fixed,
+   not whether.
 
 A hostile hotserve uid (T5) is scored by what it gains: an effect it
 could already have by other means — answering every poll itself,
@@ -2252,3 +2265,9 @@ Dated one-liners; the full text of each is in git.
   reads `describe`'s secrets lines. The template's sudoers file and its
   e2e suite are gone: secrets are commits, and an administrator is an
   account in `adm`, for the journal alone.
+- 2026-10-14 — Triage scores the fix as well as the failure: size and
+  risk, each 1 to 3, never multiplied into severity × occurrence ×
+  detection. A finding under the bar is still fixed when its fix only
+  tightens lines already there and leaves the normal path as it was,
+  with a test that proves it (first used on #239, where tracing such a
+  fix turned up a worse case than the one reported).
