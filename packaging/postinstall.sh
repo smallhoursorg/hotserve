@@ -64,18 +64,19 @@ starter_record() {
 		&& mv -fT "$record_tmp" "$record" && sync "${record%/*}"; then
 		return 0
 	fi
-	rm -f "$record_tmp"
+	rm -f "$record_tmp" || true
 	echo "hotserve: could not write $record durably; until it is, upgrades may leave $config as it is" >&2
 }
 starter_put() {
 	config_tmp="/etc/hotserve/.Caddyfile.package-$$"
-	if cp "$starter" "$config_tmp" && chown root:root "$config_tmp" \
+	# -T: a directory standing at that name is refused, never written into.
+	if cp -T "$starter" "$config_tmp" && chown root:root "$config_tmp" \
 		&& chmod 0644 "$config_tmp" && sync "$config_tmp" \
 		&& mv -fT "$config_tmp" "$config"; then
 		starter_record
 		return 0
 	fi
-	rm -f "$config_tmp"
+	rm -f "$config_tmp" || true
 	echo "hotserve: could not install the starter config at $config; it is at $starter" >&2
 }
 # A crash's temporaries: only this script makes them. Never fatal: a

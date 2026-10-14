@@ -1111,6 +1111,39 @@ postinst "directories named like its temporaries"
 rmdir /etc/hotserve/.Caddyfile.package-smoke "$RECORD.smoke"
 echo "directories named like its temporaries: left, and postinst exits 0"
 
+# A directory at a temporary's exact name: made under the PID postinst
+# will run as (exec keeps the shell's, and the script's $$ is it). The
+# install goes on, saying why, and nothing is written into the
+# directory, over it or in its place.
+postinst_colliding() {
+	sh -c 'mkdir -m 0755 "$1$$" && exec "$2" configure "$3"' sh "$1" /var/lib/dpkg/info/hotserve.postinst "$ver" \
+		</dev/null >/tmp/postinst.out 2>&1 \
+		|| { cat /tmp/postinst.out; die "postinst exited non-zero with a directory at its temporary $1<pid>"; }
+	collided=$(ls -d "$1"[0-9]*) || die "no directory at $1<pid>: the collision tested nothing"
+	[ "$(stat -c '%a %F' "$collided")" = "755 directory" ] && [ -z "$(ls -A "$collided")" ] \
+		|| die "postinst changed the directory at $collided: $(stat -c '%a %F' "$collided"); holds: $(ls -A "$collided")"
+	rmdir "$collided"
+}
+cp /tmp/starter.prev "$CONFIG"
+sha /tmp/starter.prev >"$RECORD"
+postinst_colliding /etc/hotserve/.Caddyfile.package-
+cmp -s /tmp/starter.prev "$CONFIG" || die "postinst changed a stock $CONFIG although its temporary was a directory"
+[ "$(cat "$RECORD")" = "$(sha /tmp/starter.prev)" ] || die "postinst recorded a starter it did not install"
+grep -q 'could not install the starter config' /tmp/postinst.out || die "postinst did not say it could not install the starter"
+rm -f "$CONFIG"
+postinst_colliding /etc/hotserve/.Caddyfile.package-
+[ ! -e "$CONFIG" ] && [ ! -L "$CONFIG" ] \
+	|| die "postinst put a $(stat -c %F "$CONFIG") at a missing $CONFIG although its temporary was a directory"
+[ "$(cat "$RECORD")" = "$(sha /tmp/starter.prev)" ] || die "postinst recorded a starter it did not install"
+grep -q 'could not install the starter config' /tmp/postinst.out || die "postinst did not say it could not install the starter"
+# The starter on disk and a stale record: postinst writes only the record.
+cp "$STARTER" "$CONFIG"
+postinst_colliding "$RECORD."
+[ "$(cat "$RECORD")" = "$(sha /tmp/starter.prev)" ] || die "the record changed although its temporary was a directory"
+cmp -s "$STARTER" "$CONFIG" || die "postinst changed $CONFIG while failing to write the record"
+grep -q "could not write $RECORD durably" /tmp/postinst.out || die "postinst did not say it could not write the record"
+echo "a directory at a temporary's exact name: left as it was, $CONFIG and the record unchanged, postinst exits 0 and says why"
+
 apt-get remove -y hotserve >/dev/null
 systemctl is-active --quiet hotserve-box-apply.path && die "the second remove left the path unit active" || true
 echo "stage 5b: removed again; the path unit stopped"
