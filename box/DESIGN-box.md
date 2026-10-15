@@ -780,7 +780,7 @@ failure, and the rule. These are the box's examples for its scales:
 | Axis | 5 | 4 | 3 | 2 | 1 |
 |---|---|---|---|---|---|
 | **Severity** | installs bytes no listed signer signed, or advances the baseline wrongly (I6, I4) | the box wedged until the console | a wrong verdict the workflow trusts (green for a push that did not apply, or the reverse) | a wrong message; red where green was due | logging only |
-| **Occurrence** | normal operation | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
+| **Occurrence** | normal operation, or any line a signer may commit | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
 | **Detection** | silently | — | a wrong but plausible answer | — | red, with a journal line naming it |
 
 A hostile hotserve uid (T5) gains nothing, and so scores severity 1,
@@ -2245,3 +2245,7 @@ Dated one-liners; the full text of each is in git.
   (`.claude/skills/triage/SKILL.md`), for every subsystem, and scores
   the fix as well as the failure. "Triage: which failures to defend"
   keeps the box's examples for the scales and its accepted residuals.
+- 2026-10-15 — Triage scores only failures: features and comments are
+  not scored, a line a signer may commit is occurrence 5, severity 1
+  clears only by a cheap fix and gets no residual row, and an issue's
+  item is scored before a branch is cut.
