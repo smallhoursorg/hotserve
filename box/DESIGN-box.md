@@ -6,11 +6,10 @@ promises. History lives in git (`git log -- box/DESIGN-box.md`); the
 are for decisions still fresh or contested and get folded into the
 body once they settle.
 
-**Status: built, and released in v0.3.0** (History lists the PRs),
-**except secrets**: the "Secrets" section, and every step, row and
+**Status: built, and released**: the box channel in v0.3.0, and
+secrets in v0.3.1 (the "Secrets" section, and every step, row and
 message that names a secret, the box's key, an env file the box
-writes or the set, is the design box PRs 7b to 7f build, and the
-released box applies the Caddyfile alone. Normative: a change that
+writes or the set). History lists the PRs. Normative: a change that
 cannot hold a line here changes the line in the same PR, with the
 reason.
 
