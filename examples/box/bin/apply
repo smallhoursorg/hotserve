@@ -50,10 +50,12 @@ HOTSERVE=${HOTSERVE:-hotserve}
 audience=${HOTSERVE_AUDIENCE:-hotserve}
 actions=${GITHUB_ACTIONS:-}
 # A request's bound. A push's (post) is 600 s: before the box waits up
-# to 30 s for the first result, it checks the chain, validates and
-# adapts the file, bounded at 10 minutes, 120 s and 120 s
-# (box/DESIGN-box.md, Caps), though a legitimate push takes seconds. A
-# POST cut short is no answer, and the poll asks for its result.
+# to 30 s for the first result, it checks the chain, bounded at 10
+# minutes, then runs up to three children on the file, each bounded at
+# 120 s: hotserve validate, hotserve adapt, and hotserve-backup validate
+# when backups are installed (box/DESIGN-box.md, Caps). A legitimate
+# push takes seconds. A POST cut short is no answer, and the poll asks
+# for its result.
 maxtime=60
 # How long a push is waited for, polled or held off by another pending
 # one: past root's worst case (box/DESIGN-box.md, Caps, "workflow poll").
