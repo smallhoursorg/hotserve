@@ -107,5 +107,17 @@ In order:
   table holds it. Reply on the review thread with the same scores.
 - **Owed:** add it to the subsystem's owed fixes, with its scores and
   where the fix will land.
+- **Flag what the scores cannot see.** A fix or an owed fix gets a
+  note on its line, for the person who merges, when either holds:
+  - **One-way:** the way back does not undo it (the `.deb` a box
+    upgraded from, `docs/upgrading.md`; an app's rollback to one of its
+    newest five releases), or nothing does: it deletes what nothing
+    else holds, or publishes.
+  - **Wide:** it changes code every app's requests or deploys run
+    through, or reaches past the box (off-site backups, a workflow
+    users copy).
+
+  The note leaves the outcome as it is. A one-way fix waits for that
+  person's go before it merges.
 - When asking a reviewer such as Copilot, state the bar in the PR
   body: it cannot read this skill.
