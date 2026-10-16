@@ -2,16 +2,51 @@
 
 A release is a new `.deb`; installing it over the old one is the
 upgrade. Everything on this page runs as root on the box
-(`ssh root@box.example.com`):
+(`ssh root@box.example.com`). This fetches the `.deb` for the box's
+architecture from the latest of the
+[releases](https://github.com/smallhoursorg/hotserve/releases), beside
+the one you are upgrading from, checks it, and installs it:
 
 ```sh
-# from the release page: the .deb for your architecture, and checksums.txt
-cd /var/local/hotserve              # next to the release you are upgrading from
-v=0.3.1                             # the version in the .deb's file name
+v=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+  https://github.com/smallhoursorg/hotserve/releases/latest)
+v=${v##*/v}                         # the latest release's tag, without the v
 arch=$(dpkg --print-architecture)   # amd64 or arm64
+base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
+cd /var/local/hotserve              # next to the release you are upgrading from
+curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
 sha256sum -c --ignore-missing checksums.txt
 apt install ./hotserve_${v}_${arch}.deb
 ```
+
+<details>
+<summary><b>To upgrade to a release candidate</b></summary>
+
+A release candidate's `.deb` has a dot where its tag has a hyphen —
+`hotserve_0.3.1.rc1_arm64.deb` under `v0.3.1-rc1` — so the block above
+does not fit it as it stands. This one does:
+
+```sh
+v=0.3.1-rc1                         # the candidate's tag, without the v
+arch=$(dpkg --print-architecture)   # amd64 or arm64
+deb=hotserve_$(echo "$v" | tr - .)_${arch}.deb
+base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
+cd /var/local/hotserve              # next to the release you are upgrading from
+curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt"
+sha256sum -c --ignore-missing checksums.txt
+apt install "./$deb"
+```
+
+The box's repository then needs its Actions variable
+`HOTSERVE_VERSION` set to the same version, `0.3.1-rc1`: its workflow
+checks with the latest stable release unless told otherwise, and a
+release candidate is never that. On the laptop:
+`gh variable set HOTSERVE_VERSION -R your-org/boxes --body 0.3.1-rc1`.
+Once the release is out, upgrade to it with the first block on this
+page, and delete the variable so the workflow follows the latest
+stable release again: `gh variable delete HOTSERVE_VERSION -R your-org/boxes`.
+
+</details>
 
 The package keeps your `/etc/hotserve/Caddyfile` and restarts hotserve
 into the new binary. An upgrade never asks about that file. The
