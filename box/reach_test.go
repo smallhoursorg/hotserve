@@ -282,6 +282,8 @@ func TestReachConnectionJSON(t *testing.T) {
 		"an IP host, strict SNI on":                         {host: ip, settings: `"strict_sni_host":true,`, want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
 		"an IP host, strict SNI on by another site's client authentication": {host: ip, settings: `"tls_connection_policies":[{"match":{"sni":["example.com"]},"client_authentication":{"mode":"require"}},{}],`,
 			want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
+		"a nameless setting":                 {settings: `"tls_connection_policies":[{"":1}],`, want: "a TLS connection policy for deploy.example.com sets nameless, which may refuse the handshake"},
+		"a nameless matcher":                 {settings: `"tls_connection_policies":[{"match":{"":1},"drop":true},{}],`, want: "a TLS connection policy that may apply to deploy.example.com drops the connection (its nameless matcher is decided per connection)"},
 		"a hostname, strict SNI on":          {settings: `"strict_sni_host":true,`},
 		"protocols that do not read":         {settings: `"protocols":"h1",`, want: "error"},
 		"listener wrappers that do not read": {settings: `"listener_wrappers":{"wrapper":"tls"},`, want: "error"},

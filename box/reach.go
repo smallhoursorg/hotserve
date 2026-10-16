@@ -280,10 +280,7 @@ func (s serverSettings) connection(host string) string {
 			// unless the policy for its address requires one; the
 			// address is not the file's to know.
 		default:
-			if name = proof.Bound(name); name == "" {
-				name = "nameless"
-			}
-			return "the " + name + " listener wrapper may refuse the connection"
+			return "the " + named(name) + " listener wrapper may refuse the connection"
 		}
 	}
 	sni := host
@@ -301,7 +298,7 @@ func (s serverSettings) connection(host string) string {
 		if what := p.block(served); what != "" {
 			if v.status == mayMatch {
 				return "a TLS connection policy that may apply to " + proof.Bound(host) + " " + what +
-					" (its " + proof.Bound(v.matcher) + " matcher is decided per connection)"
+					" (its " + named(v.matcher) + " matcher is decided per connection)"
 			}
 			return "a TLS connection policy for " + proof.Bound(host) + " " + what
 		}
@@ -322,6 +319,16 @@ func (s serverSettings) connection(host string) string {
 		return "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"
 	}
 	return ""
+}
+
+// named is a wrapper's, a matcher's or a setting's name for a
+// refusal's text, bounded: never empty from Caddy, and "nameless" when
+// other bytes give none, so the text still reads.
+func named(s string) string {
+	if s = proof.Bound(s); s == "" {
+		return "nameless"
+	}
+	return s
 }
 
 // listeners is each listener's protocols as Caddy provisions them: the
@@ -406,7 +413,7 @@ func (p tlsPolicy) block(served map[string]bool) string {
 				return "offers neither h2 nor http/1.1 by ALPN"
 			}
 		default:
-			return "sets " + proof.Bound(k) + ", which may refuse the handshake"
+			return "sets " + named(k) + ", which may refuse the handshake"
 		}
 	}
 	return ""
