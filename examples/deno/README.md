@@ -138,9 +138,13 @@ What a first deploy that worked looks like, from the laptop:
   app's own output — the migration's line, then whatever `main.ts`
   prints. The `adm` group the box README grants is what reads it.
 
-A re-run of the same workflow run is refused with a 422: versions are
-immutable on the box, and that commit's version is already there. Push
-a new commit to deploy again.
+A re-run of the same workflow run rebuilds the tarball, and the box
+refuses it with a 422: versions are immutable on the box, that
+commit's version is already there, and the rebuilt bytes are not the
+ones it runs (the box relaunches a running version only for the very
+same artifact). Push a new commit to deploy again, or **Run workflow**
+with the running version as the rollback target to relaunch it as it
+is.
 
 ## When the code needs a new permission
 

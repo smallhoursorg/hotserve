@@ -2,6 +2,8 @@ package liveswap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -691,7 +693,10 @@ func TestDeployHealthFailureStopsNewKeepsOld(t *testing.T) {
 	}
 }
 
-func TestDeployRejectsSameRunningVersion(t *testing.T) {
+// An unpinned deploy of the running version is refused: with no digest
+// there is nothing to match the artifact by (a matching digest would
+// relaunch it — app_relaunch_test.go).
+func TestDeployRejectsSameRunningVersionWithoutAPin(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()
 	must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/1", version: "v1"}))
@@ -1239,7 +1244,7 @@ func TestStageUploadClassifiesErrors(t *testing.T) {
 	var se *stagingError
 
 	// A body-read failure is a client fault — bare error, not stagingError.
-	if _, err := stageUpload(errReader{}, t.TempDir(), 100); err == nil || errors.As(err, &se) {
+	if _, _, err := stageUpload(errReader{}, t.TempDir(), 100); err == nil || errors.As(err, &se) {
 		t.Fatalf("body-read error should be a bare (client) error, got %v", err)
 	}
 	// A local filesystem failure (tmpDir is actually a file → MkdirAll
@@ -1248,12 +1253,13 @@ func TestStageUploadClassifiesErrors(t *testing.T) {
 	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stageUpload(strings.NewReader("data"), notADir, 100); !errors.As(err, &se) {
+	if _, _, err := stageUpload(strings.NewReader("data"), notADir, 100); !errors.As(err, &se) {
 		t.Fatalf("a local FS failure should be a *stagingError (server), got %v", err)
 	}
-	// Happy path still works.
-	if _, err := stageUpload(strings.NewReader("data"), t.TempDir(), 100); err != nil {
-		t.Fatalf("valid upload should stage: %v", err)
+	// Happy path still works, and the digest is the staged bytes'.
+	sum := sha256.Sum256([]byte("data"))
+	if _, digest, err := stageUpload(strings.NewReader("data"), t.TempDir(), 100); err != nil || digest != hex.EncodeToString(sum[:]) {
+		t.Fatalf("valid upload should stage with its digest: %q %v", digest, err)
 	}
 }
 

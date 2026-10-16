@@ -134,14 +134,16 @@ What a patch reaches depends on where the app's runtime came from:
   only. A newer Deno is a new file there, and a newer Node a new build;
   either still waits for the next launch.
 
-So after patching, relaunch each app by pushing a commit to its
-repository. An empty one is enough:
+So after patching, relaunch each app. In its repository, Actions →
+deploy → **Run workflow**, with the running version as the version to
+roll back to: a rollback to the running version relaunches it from
+the box's disk, through the same health gate and cutover as any
+deploy, with no build. Or push a commit — an empty one is enough —
+which deploys a new version the same way:
 
 ```sh
 git commit --allow-empty -m "Relaunch after patching" && git push
 ```
 
-The version running cannot be deployed or rolled back to again, and a
-new commit is a new version, so it goes through the same health gate
-and cutover as any deploy. Or reboot, which relaunches every app at
-once but takes the sites down while it does.
+Or reboot, which relaunches every app at once but takes the sites
+down while it does.

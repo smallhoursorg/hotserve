@@ -479,9 +479,13 @@ app block changes that, `0` keeps them on the box). The full journal
 is `journalctl -t hotserve-example` on the box. Nothing was serving
 before, so nothing changed.
 
-A re-run of the same workflow run is refused with a 422: versions are
-immutable on the box, and that commit's version is already there. Push
-a new commit to deploy again.
+A re-run of the same workflow run rebuilds the tarball, and the box
+refuses it with a 422: versions are immutable on the box, that
+commit's version is already there, and the rebuilt bytes are not the
+ones it runs (the box relaunches a running version only for the very
+same artifact). Push a new commit to deploy again, or **Run workflow**
+with the running version as the rollback target to relaunch it as it
+is.
 
 ## What you have
 

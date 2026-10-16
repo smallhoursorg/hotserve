@@ -73,6 +73,27 @@ Concept map from the Nomad-era stack:
   whose shape is the issuer's.
 - The deploy MUST be rejected (409) if one is already running for that
   app; other apps' deploys proceed independently.
+- A deploy or rollback naming the version that is running MUST
+  relaunch it from its release on disk through the deploy pipeline
+  minus fetch and extract (`preparing` runs no `pre_start`): a second
+  instance of the installed release under a fresh nonce, soaked,
+  promoted, the first drained and stopped — so a changed `env_file`
+  value or app definition reaches the app without a new version. A URL
+  or push deploy relaunches only for the same artifact: its digest
+  (the URL deploy's `sha256` pin; a push's upload, hashed as it is
+  staged and recorded as its pin) MUST equal the version's recorded
+  pin (`recordedPin`). A request without a digest, a version whose
+  record has none (an unpinned pull; a push made before pushes were
+  hashed), or a different digest MUST be refused (422) without fetching
+  anything to compare, in a message that says how a new value reaches
+  the app. A rollback to the running version needs no digest: it is
+  the same release by definition. A relaunch MUST write no deploy
+  record — the version's record stays the deploy that put it there,
+  with its pin and its times, whether the relaunch succeeded or failed
+  — and MUST say what it did in `last_deploy` and the response
+  (`note`: `relaunched <version> (same artifact); it reads its env
+  file now`). A relaunch never writes under the release: it can only
+  run the bytes already there.
 - Artifact downloads MUST enforce `max_artifact_size` both via
   Content-Length and the streamed byte count, MUST default to https
   only (enforced on every redirect hop), and MUST match the required
@@ -127,8 +148,9 @@ Concept map from the Nomad-era stack:
 - Release GC MUST run only after successful deploys, keep the newest
   `keep` dirs by mtime, and never delete the currently-serving version.
   A failed URL or push deploy's freshly extracted release dir is
-  removed (a rollback relaunches an existing release and never deletes
-  it), so its version stays retriable — unless the failed instance
+  removed (a rollback, or a relaunch of the running version, launches
+  an existing release and never deletes it), so its version stays
+  retriable — unless the failed instance
   may still be running (the
   dir is kept rather than pulled from under a live process; the next
   launch's sweep stops the stray unit) or the removal itself fails;
@@ -431,7 +453,11 @@ author's beliefs about systemd, and only the real thing corrects them.
 
 1. Unit (`make test`, race, goleak): the deploy state machine (happy
    path; pre_start abort; health abort keeps old serving; 409;
-   same-version rejection; GC gated on a confirmed sweep); recovery
+   same-version relaunch — a matching pin, a push of the same bytes, a
+   rollback onto the running version — and its refusals — no digest
+   on either side, a different digest — with the version's record
+   untouched either way and a failed relaunch leaving the old
+   instance serving; GC gated on a confirmed sweep); recovery
    (reattach, relaunch, no-state sweep, transient vs permanent
    classification, retry loop on the fake clock, refusal of a foreign
    unit name in state.json, Cleanup joining recovery); Destruct's
@@ -532,6 +558,17 @@ Design summary (full operator docs in README.md "Watchdog"):
   runner creates every unit with `Restart=no`, or systemd and
   liveswap would fight over the same failure.
 
+## Accepted residuals
+
+Findings scored by the repository's triage rule
+(`.claude/skills/triage/SKILL.md`) and accepted; the scores are
+severity × occurrence × detection, then the fix's size and risk.
+
+| Failure | Where | S | O | D | Product | Fix | Why accepted |
+|---|---|---|---|---|---|---|---|
+| A relaunch of the running version starts a second instance of the same release in the same release dir, bound read-write (`sandbox.go`), for the overlap — `soak`, then `drain` and the old instance's stop. An app that keeps mutable state in its release dir rather than under `HOME` (its shared dir) may see its two instances contend there. | `deployLocked`, relaunch | 3 | 5 | 3 | 45 | size 3, risk 2 (a copy per instance, or a stop-then-start branch) | Scores to fix; accepted by decision (#234, 2026-10-16). Both fixes cost what the feature exists to avoid: stop-then-start drops every request for the launch time, which the watchdog's restart already does and a deploy never does; a copy per instance doubles the disk of each relaunch and makes two paths to one release (`{release_dir}`, status, GC). The shared dir is already shared by both versions in every deploy, so an app's state there meets the same overlap today; the release dir is the app's code, and nothing of hotserve's writes under it during a relaunch. An app that conflicts fails the health gate or crashes in the watchdog's view, red and named; the silent case needs state the app chose to keep where every deploy already discards it. |
+| A relaunch matches the request's digest against the version's record, not the release's bytes (`recordedPin`'s known limit: a version release GC pruned, deployed again, whose record write then failed). A request carrying the old digest then relaunches the bytes on disk. | `relaunchRefusal` | 3 | 1 | 3 | 9 | size 3 (a pin kept with the release) | The relaunch introduces no bytes: whatever the match decides, what runs is the release that was already serving. Closing it is the same fix the known limit names for rollbacks. |
+
 ## Non-goals
 
 - Post-promote *auto*-revert. Rollback is an explicit operation —
@@ -555,8 +592,10 @@ Design summary (full operator docs in README.md "Watchdog"):
    webhook. Lean: later; the webhook + status JSON covers CI and cron.
 3. **Metrics.** Lean: add with events.
 4. **Config-change restarts** — an explicit "apply now" admin action
-   instead of waiting for the next launch. Lean: keep next-launch
-   semantics; add an admin endpoint if users ask.
+   instead of waiting for the next launch. A rollback to the running
+   version, or a deploy of it with the same artifact, is that action
+   through the webhook (Behavior specification); the lean is to add
+   no admin endpoint beside it.
 
 ## History
 
@@ -586,3 +625,8 @@ Dated one-liners; the full text of each is in git.
   response filter. One visible change: an app name carrying a control
   byte or invalid UTF-8 is Go-quoted in the two auth journal lines, as
   a refusal already was. Nothing else changed.
+- 2026-10-16 (#234) — A deploy or rollback to the running version
+  relaunches it from its release on disk (same artifact only, by
+  digest; a push's upload is hashed and recorded as its pin from here
+  on) instead of being refused; the two instances share the release
+  dir for the overlap, recorded as an accepted residual.

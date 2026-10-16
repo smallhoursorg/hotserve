@@ -1305,12 +1305,13 @@ listed.
 
 The app reads its env file at its next launch. A push of secrets
 alone reloads nothing ("Running apps are never restarted", after the trust chain), and it
-does not relaunch the app: liveswap refuses a deploy, and a rollback,
-to the version that is already running (`version … is already
-running; bump the version to redeploy`, `managedApp.deployLocked`, liveswap/app.go),
-and root asking the serving process for a relaunch would be root
-consuming its word. So the workflow's line says what launches the app
-now: a deploy of a new version. Open question 4.
+does not relaunch the app: root asking the serving process for a
+relaunch would be root consuming its word. The relaunch is the
+deployer's, through the webhook — a rollback to the running version,
+or a deploy of it with the same artifact (`relaunchRefusal`,
+liveswap/app.go; docs/secrets.md, "When a value reaches the app") —
+so the workflow's line says what launches the app now: a deploy of a
+new version. Open question 4.
 
 ### Which checks run where
 
@@ -1984,7 +1985,7 @@ computer (Open question 6).
 | A classic X25519 box key | A post-quantum hybrid key (ML-KEM-768 + X25519, age v1.3's `age1pq`) | age refuses to mix a post-quantum recipient with SSH-key recipients in one file, and the readers are the signers' SSH keys. Open question 6. |
 | The previous bytes of each env file in the record | Hard-link each previous file aside in `secrets/` | One durable artifact recovery reasons from (I8), as the Caddyfile's `prev` already is; a second artifact would need crash rows of its own. The cost: the record's read cap, 16 MiB. |
 | A set of env files alone reloads nothing | Reload anyway | hotserve reads an env file at an app's launch, never at a load ("Running apps are never restarted", after the trust chain). |
-| No relaunch after a secrets change | Relaunch each app whose secrets changed | liveswap refuses a deploy, and a rollback, to the running version, so it would be a liveswap feature of its own, and root asking the serving process for it would be root consuming its word (backups' D10). Open question 4. |
+| No relaunch after a secrets change | Relaunch each app whose secrets changed | Root asking the serving process for it would be root consuming its word (backups' D10). The relaunch is the deployer's, through the webhook: a rollback to the running version (liveswap/DESIGN-liveswap.md, Behavior specification). Open question 4. |
 | Readers per box, in each box's `recipients` | One list of readers for the repository | A person may read one box's secrets and not another's; signers must match across boxes because every commit is on every box's chain, and readers have no such cause. |
 | The consistency checks in the handler and CI, not in root | In root | They catch mistakes and guard nothing; root installs what a signer signed and reads no more of an app block than the walk does. |
 | `init` installs no secrets | `init` decrypts the copied directory's secrets | `init` has no objects to prove them against and, on a fresh box, no key until it ends; the first push installs them by the whole chain. |
@@ -2020,12 +2021,17 @@ computer (Open question 6).
 3. **Host rename ergonomics.** Moving the directory in the commit that
    changes the host, then `init` again, is a console step. Lean: leave
    it; a rename needs a certificate first anyway.
-4. **A relaunch after a secrets change.** Today a changed value
-   reaches an app at its next launch, and a deploy of a new version is
-   the way to launch it now. A relaunch of the running version would be
-   liveswap's to add, through its health check, with two instances of
-   one release sharing its directory during the overlap. Lean: not
-   until someone needs it.
+4. **A relaunch after a secrets change.** A changed value reaches an
+   app at its next launch, and the deployer gives it one through the
+   webhook: a rollback to the running version, or a deploy of it with
+   the same artifact, relaunches it through liveswap's health check
+   (liveswap/DESIGN-liveswap.md, Behavior specification; the two
+   instances share the release dir for the overlap, an accepted
+   residual there). What stays open is whether the box's run should
+   say so beside "a deploy of a new version launches it now", and
+   whether a push of secrets should ever ask for the relaunch itself.
+   Lean: name the rollback in the run's line; never relaunch from the
+   applier.
 5. **The backup credential through this channel.** It could ride as
    the reserved `secrets/_backup/`, rendered to
    `/etc/hotserve-backup/repository.env`, 0600 root:root, outside the

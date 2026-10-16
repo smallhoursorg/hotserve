@@ -2,6 +2,8 @@ package liveswap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -215,7 +217,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	// the upload can't stage under one spec and extract under another.
 	c := ma.snapshot()
 	spec := c.spec
-	archive, err := stageUpload(r.Body, spec.dirs.tmp, spec.maxArtifactSize)
+	archive, digest, err := stageUpload(r.Body, spec.dirs.tmp, spec.maxArtifactSize)
 	var stgErr *stagingError
 	switch {
 	case errors.Is(err, errArtifactTooLarge):
@@ -232,7 +234,11 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	// Backstop cleanup: fetch removes the archive once it extracts it,
 	// but if the pipeline returns before fetch it would leak.
 	defer func() { _ = os.Remove(archive) }()
-	req := deployRequest{version: version, localArchive: archive, by: by}
+	// The upload's digest is the push's pin: recorded with the version,
+	// and what a later push of the same version is matched by
+	// (relaunchRefusal). The bytes are the caller's own, so there is
+	// nothing to check it against here.
+	req := deployRequest{version: version, localArchive: archive, sha256: digest, by: by}
 	h.logDeployAuthorized(r, ma, req)
 	return h.finishDeploy(w, r, ma, func(onPhase func(string)) error {
 		req.onPhase, c.onPhase = onPhase, onPhase
@@ -313,8 +319,9 @@ func (h *Handler) logDeployAuthorized(r *http.Request, ma *managedApp, req deplo
 		zap.String("source", req.source()), zap.String("remote", r.RemoteAddr),
 	}
 	if req.sha256 != "" {
-		// What the pull is bound to, for the operator reading back what
-		// a deploy fetched: a digest, never a secret.
+		// What the pull is bound to, or what the push uploaded, for the
+		// operator reading back what a deploy ran: a digest, never a
+		// secret.
 		fields = append(fields, zap.String("sha256", req.sha256))
 	}
 	h.logger.Info("deploy authorized", fields...)
@@ -513,38 +520,41 @@ func (t *writeTracker) Write(p []byte) (int, error) {
 }
 
 // stageUpload streams the request body to a temp file, capped at
-// maxBytes. Returns the path; the caller owns cleanup. Local filesystem
-// failures come back wrapped in *stagingError (→ 5xx); a body-read
-// failure comes back bare (→ 400); an over-cap body → errArtifactTooLarge.
-func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, error) {
+// maxBytes, hashing it on the same pass. Returns the path and the
+// sha256 of the staged bytes as lowercase hex; the caller owns cleanup.
+// Local filesystem failures come back wrapped in *stagingError (→
+// 5xx); a body-read failure comes back bare (→ 400); an over-cap body →
+// errArtifactTooLarge.
+func stageUpload(body io.Reader, tmpDir string, maxBytes int64) (string, string, error) {
 	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
-		return "", &stagingError{err}
+		return "", "", &stagingError{err}
 	}
 	f, err := os.CreateTemp(tmpDir, "push-*.tar.gz")
 	if err != nil {
-		return "", &stagingError{err}
+		return "", "", &stagingError{err}
 	}
 	path := f.Name()
 	// One byte past the cap proves it is oversized.
 	wt := &writeTracker{w: f}
-	n, copyErr := io.Copy(wt, io.LimitReader(body, maxBytes+1))
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(wt, h), io.LimitReader(body, maxBytes+1))
 	closeErr := f.Close()
 	if copyErr != nil {
 		_ = os.Remove(path)
 		if wt.failed {
-			return "", &stagingError{copyErr} // disk write failed
+			return "", "", &stagingError{copyErr} // disk write failed
 		}
-		return "", copyErr // request body read failed
+		return "", "", copyErr // request body read failed
 	}
 	if closeErr != nil {
 		_ = os.Remove(path)
-		return "", &stagingError{closeErr}
+		return "", "", &stagingError{closeErr}
 	}
 	if n > maxBytes {
 		_ = os.Remove(path)
-		return "", errArtifactTooLarge
+		return "", "", errArtifactTooLarge
 	}
-	return path, nil
+	return path, hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // RespondJSON writes every body the webhook sends, through the
