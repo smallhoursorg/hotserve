@@ -1228,6 +1228,39 @@ umount "$B/work"
 rm -rf "$B"
 echo "a mount under $B: postrm purge kept the tree whole, said so, exit 0"
 
+# The mount table names a mount point by its physical path. A tree
+# reached through a symlinked ancestor (/var -> /srv/var) must still be
+# seen as mounted: the function is taken out of the saved postrm and
+# asked about a stand-in reached through a link, since /var itself
+# cannot be made a link here.
+sed -n '/^mounted() {/,/^}/p' /tmp/hotserve.postrm >/tmp/mounted.sh
+grep -q '^mounted() {' /tmp/mounted.sh || die "could not take mounted() out of the postrm for the symlink case"
+mkdir -p /tmp/real-var/tree/work
+ln -sfn /tmp/real-var /tmp/link-var
+mount -t tmpfs -o size=1m smoke /tmp/real-var/tree/work || die "could not mount a tmpfs for the symlink case"
+if (. /tmp/mounted.sh && mounted /tmp/link-var/tree); then :; else
+	die "mounted() missed a tmpfs under a tree reached through a symlinked ancestor (/tmp/link-var -> /tmp/real-var)"
+fi
+if (. /tmp/mounted.sh && mounted /tmp/link-var/other); then
+	die "mounted() said a tree with nothing mounted under it is mounted (symlink case)"
+fi
+umount /tmp/real-var/tree/work
+rm -rf /tmp/real-var /tmp/link-var
+echo "a mount under a tree reached through a symlinked ancestor: mounted() saw it"
+
+# A scan that fails (awk exiting 2 with no answer) must count as
+# mounted: the tree is kept and named, not removed.
+mkdir -p /tmp/fakebin "$B/in"
+printf '#!/bin/sh\nexit 2\n' >/tmp/fakebin/awk
+chmod 0755 /tmp/fakebin/awk
+: >"$B/in/entry"
+PATH="/tmp/fakebin:$PATH" sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero with a failing awk"; }
+[ -f "$B/in/entry" ] || die "postrm purge removed $B although the mount scan failed; output: $(cat /tmp/postrm.out)"
+grep -q "kept $B: something is mounted at or under it" /tmp/postrm.out \
+	|| die "postrm purge did not say it kept $B when the scan failed: $(cat /tmp/postrm.out)"
+rm -rf /tmp/fakebin "$B"
+echo "a failing mount scan: postrm purge kept the tree, said so, exit 0"
+
 # A run of the applier under way holds root's lock for its whole run
 # and swaps the Caddyfile under it; preremove leaves a run alone. The
 # purge takes that lock first: it waits for a run to finish, then
