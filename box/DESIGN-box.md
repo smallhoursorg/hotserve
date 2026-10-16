@@ -874,7 +874,7 @@ an empty cell means nobody, by design.
 <!-- table: paths (box/units_test.go reads it) -->
 | Path | Mode | Owner | Creates | Writes | Reads | Removes |
 |---|---|---|---|---|---|---|
-| `/etc/hotserve/Caddyfile` | 0644 | root:root | postinstall (the starter, where nothing stands) | applier, `init`, console; postinstall (the new starter, only while the file is byte-identical to the starter it last wrote) | hotserve, handler, applier, postinstall | — |
+| `/etc/hotserve/Caddyfile` | 0644 | root:root | postinstall (the starter, where nothing stands) | applier, `init`, console; postinstall (the new starter, only while the file is byte-identical to the starter it last wrote) | hotserve, handler, applier, postinstall | postremove (`apt purge`; a regular file only, never a symlink) |
 | `/etc/hotserve/.Caddyfile.box-<id>` | 0644 | root:root | applier, `init` | applier, `init` | — | applier, `init` (renamed over `Caddyfile`, or removed on failure) |
 | `/etc/hotserve/.Caddyfile.package-<pid>` | 0644 | root:root | postinstall | postinstall | — | postinstall (renamed over `Caddyfile`, or removed on failure; the next run removes a crash's) |
 | `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d | `box key` | applier, `box key` | — |
@@ -885,7 +885,7 @@ an empty cell means nobody, by design.
 | `/etc/hotserve/secrets/` | 2750 | root:hotserve | tmpfiles.d | applier | hotserve, handler, applier | — |
 | `/etc/hotserve/secrets/<app>.env` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | hotserve (each launch of `<app>`, and its response filter), handler (step 4's digest), applier | applier (when `applied.json` lists the app and HEAD has no `secrets/<app>/`) |
 | `/etc/hotserve/secrets/.<app>.env.box-<id>` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | — | applier (renamed over `<app>.env`, or removed on failure; recovery removes a crash's) |
-| `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |
+| `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | postremove (`apt purge`; the tree whole, with every row under it, unless something is mounted at or under it) |
 | `…/stage/` | 0700 | hotserve:hotserve | tmpfiles.d | handler (bundle temporaries) | handler, applier (sweep) | handler (its own temporaries) |
 | `…/stage/lock` | 0600 | hotserve:hotserve | handler | — | handler (`flock`) | — |
 | `…/stage/<id>.auth` | 0600 | hotserve:hotserve | handler, after the rename into `in/` | — | handler (pending, a poll's `admitted`), applier (sweep) | applier (sweep) |
@@ -902,7 +902,7 @@ an empty cell means nobody, by design.
 | `…/.applied.json.tmp` | 0640 | root:hotserve (born in the setgid dir) | applier, `init`, `baseline` | applier, `init`, `baseline` | — | the writer (renamed over `applied.json`, or removed on failure); the applier's recovery removes a crash's |
 | `…/lock` | 0600 | root:hotserve (born in the setgid dir) | whichever of applier, `init`, `baseline` takes it first | — | applier, `init`, `baseline` (blocking `flock`) | — |
 | `/usr/share/hotserve/Caddyfile` | 0644 | root:root | package | package | postinstall | package |
-| `/var/lib/hotserve-package/` | 0700 | root:root | package | — | — | — |
+| `/var/lib/hotserve-package/` | 0700 | root:root | package | — | — | postremove (`apt purge`, whole) |
 | `/var/lib/hotserve-package/starter.sha256` (and its `.<pid>` temporary) | 0644 | root:root | postinstall | postinstall (by rename: after each starter it writes, and when `Caddyfile` already is the starter but the record does not say so) | postinstall | postinstall (the temporary: renamed over the record, or removed on failure; the next run removes a crash's) |
 
 Notes that the table cannot hold:
@@ -920,6 +920,14 @@ Notes that the table cannot hold:
   `.Caddyfile.box-` prefix (`sweepTemporaries`).
 - `/var/lib/hotserve-box` joins `sandboxHotservePaths`
   (liveswap/sandbox.go): never a bind source for an app.
+- `apt purge` is the one removal that is not a process of the design:
+  `packaging/postremove.sh` removes the exchange tree whole, the
+  record and `applied.json` with it, the box's `Caddyfile` (a regular
+  file only) and the starter's record, and keeps `/etc/hotserve/age/`,
+  `age.pub` and `secrets/`, naming them: the key is the one way to
+  read the secrets the repository holds, and only the person purging
+  knows whether that is over. A plain `apt remove` removes none of
+  these.
 - The applier reaches `stage/` and anything the hotserve uid created
   through `CAP_DAC_OVERRIDE`/`CAP_FOWNER`, so the "Removes" column can
   be honoured against a hostile creator (a `mkdir in/x && chmod 000
@@ -1769,6 +1777,10 @@ under way, which stays in `in/` for the first run after the next
 install, held to every check any push is. It neither disables the path
 unit (an install after the removal finds it enabled and starts it) nor
 stops the service (a run under way settles by its own tables).
+`postremove.sh` then masks the path unit, as dh_installsystemd has it,
+so that nothing of it comes back until an install unmasks it; a purge
+drops its enable state and the mask, and removes the exchange tree
+(the Paths table's note on `apt purge`).
 
 ## Sequences
 

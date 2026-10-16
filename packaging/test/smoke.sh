@@ -18,7 +18,8 @@
 # applier and then with the real one, and stages 3 to 5 follow its path
 # unit through upgrade, removal and an install after removal. Stage 5b
 # follows the starter config through upgrades: none asks, a stock file
-# follows the starter, and no other file is touched.
+# follows the starter, and no other file is touched. Stage 6 purges:
+# what the package made goes, the apps' data and the key stay.
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -997,7 +998,25 @@ kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived 
 systemctl is-active --quiet hotserve-box-apply.path && die "the box applier's path unit is still active after remove (preremove did not stop it)" || true
 [ ! -e /lib/systemd/system/hotserve-box-apply.path ] && [ ! -e /lib/systemd/system/hotserve-box-apply.service ] \
 	|| die "the box applier's units are still installed after remove"
-echo "removal stopped the service, the apps and the box applier's path unit, kept the config and the record"
+# postremove's daemon-reload, run after dpkg removed the unit files:
+# the manager no longer loads them. The path unit is masked, as
+# dh_installsystemd has it, until an install unmasks it (stage 5 finds
+# it enabled and active again); the mask is a /dev/null link where the
+# unit file was, and deb-systemd-helper's note of it is what lets
+# postinstall take it off without undoing an administrator's own mask.
+for u in hotserve.service hotserve-box-apply.service; do
+	[ "$(systemctl show -p LoadState --value "$u")" = not-found ] \
+		|| die "$u is still loaded after remove ($(systemctl show -p LoadState,FragmentPath --value "$u" | tr '\n' ' ')): postremove did not reload the manager"
+	[ -z "$(systemctl list-unit-files --no-legend "$u" 2>/dev/null)" ] \
+		|| die "$u is still a unit file after remove: $(systemctl list-unit-files --no-legend "$u")"
+done
+[ "$(systemctl is-enabled hotserve-box-apply.path 2>/dev/null)" = masked ] \
+	|| die "hotserve-box-apply.path is '$(systemctl is-enabled hotserve-box-apply.path 2>&1)' after remove, want masked (postremove's deb-systemd-helper mask)"
+[ "$(readlink /etc/systemd/system/hotserve-box-apply.path)" = /dev/null ] \
+	|| die "the mask of hotserve-box-apply.path is not a /dev/null link in /etc/systemd/system"
+[ -e /var/lib/systemd/deb-systemd-helper-masked/hotserve-box-apply.path ] \
+	|| die "deb-systemd-helper did not note the mask: postinstall's unmask would leave the path unit masked"
+echo "removal stopped the service, the apps and the box applier's path unit, kept the config and the record; the units unloaded, the path unit masked"
 
 stage "stage 5: install again after removal"
 # preremove stops the path unit and does not disable it, so an install
@@ -1147,6 +1166,67 @@ echo "a directory at a temporary's exact name: left as it was, $CONFIG and the r
 apt-get remove -y hotserve >/dev/null
 systemctl is-active --quiet hotserve-box-apply.path && die "the second remove left the path unit active" || true
 echo "stage 5b: removed again; the path unit stopped"
+
+stage "stage 6: purge"
+# postremove on purge removes what the package made and nothing else
+# holds — the box's config, the starter's record, the box applier's
+# exchange tree, the path unit's enable state and its mask — and never
+# Caddy's state, the deployed apps' data or the account. The box's key
+# for secrets stays in /etc/hotserve, and the purge says so on stderr.
+# Each path is checked to be there first, so that "gone" proves the
+# purge removed it; the installed postrm is copied for the mount case
+# below, since dpkg removes the script with the purge.
+cp /var/lib/dpkg/info/hotserve.postrm /tmp/hotserve.postrm
+: >/var/lib/hotserve/smoke-state
+for p in "$CONFIG" "$RECORD" "$B/in" "$B/out" /etc/hotserve/age/identity "$view" \
+	/var/lib/liveswap/other/shared/secret /var/lib/systemd/deb-systemd-helper-enabled/hotserve-box-apply.path.dsh-also \
+	/var/lib/systemd/deb-systemd-helper-masked/hotserve-box-apply.path; do
+	[ -e "$p" ] || die "the purge would prove nothing: $p is already gone"
+done
+apt-get purge -y hotserve >/tmp/purge.out 2>&1 || { cat /tmp/purge.out; die "apt-get purge failed"; }
+cat /tmp/purge.out
+case "$(dpkg-query -W -f='${Status}' hotserve 2>/dev/null)" in
+'' | *not-installed) : ;;
+*) die "hotserve is still '$(dpkg-query -W -f='${Status}' hotserve)' after purge" ;;
+esac
+[ ! -e "$CONFIG" ] && [ ! -L "$CONFIG" ] || die "purge left $CONFIG"
+[ ! -e "${RECORD%/*}" ] || die "purge left ${RECORD%/*}"
+[ ! -e "$B" ] || die "purge left $B: $(find "$B" | tr '\n' ' ')"
+[ -f /var/lib/hotserve/smoke-state ] || die "purge removed /var/lib/hotserve, Caddy's state"
+[ -f "$view" ] && [ -f /var/lib/liveswap/other/shared/secret ] || die "purge removed the apps' data under /var/lib/liveswap"
+id hotserve >/dev/null || die "purge removed the hotserve account"
+[ -f /etc/hotserve/age/identity ] && [ "$(cat /etc/hotserve/age.pub)" = "$box_key" ] \
+	|| die "purge removed the box's key for secrets, the one way to read the secrets its repository holds"
+grep -q 'kept /etc/hotserve: it still holds' /tmp/purge.out || die "the purge did not say it kept /etc/hotserve"
+grep -q 'age/identity is the box.s key for secrets' /tmp/purge.out || die "the purge did not name the key it kept"
+# The path unit's enable state and mask: gone, so a later install
+# starts from nothing (postinstall's was-enabled is true with no state).
+st=$(systemctl is-enabled hotserve-box-apply.path 2>&1) && die "hotserve-box-apply.path is still '$st' after purge" || true
+[ "$st" != masked ] || die "purge left hotserve-box-apply.path masked"
+[ "$(systemctl show -p LoadState --value hotserve-box-apply.path)" = not-found ] \
+	|| die "hotserve-box-apply.path is '$(systemctl show -p LoadState --value hotserve-box-apply.path)' after purge, want not-found"
+for p in /etc/systemd/system/hotserve-box-apply.path /etc/systemd/system/multi-user.target.wants/hotserve-box-apply.path \
+	/var/lib/systemd/deb-systemd-helper-enabled/hotserve-box-apply.path.dsh-also /var/lib/systemd/deb-systemd-helper-masked/hotserve-box-apply.path; do
+	[ ! -e "$p" ] && [ ! -L "$p" ] || die "purge left $p"
+done
+echo "purge: config, record and exchange tree gone; the key, Caddy's state, the apps' data and the account kept; the path unit's state and mask gone"
+
+# A mount at or under the exchange tree: nothing is removed through
+# it, the tree is kept whole and named, and the script still exits 0.
+# The tree is made again by hand and the saved postrm run as dpkg
+# runs it.
+mkdir -p "$B/work"
+mount -t tmpfs -o size=1m smoke "$B/work" || die "could not mount a tmpfs under $B; the mount case would prove nothing"
+: >"$B/work/through-the-mount"
+: >"$B/beside-the-mount"
+sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero with a mount under $B"; }
+[ -f "$B/work/through-the-mount" ] && [ -f "$B/beside-the-mount" ] \
+	|| die "postrm purge removed through or beside a mount under $B; left: $(find "$B" | tr '\n' ' ')"
+grep -q "kept $B: something is mounted at or under it" /tmp/postrm.out \
+	|| die "postrm purge did not say it kept $B: $(cat /tmp/postrm.out)"
+umount "$B/work"
+rm -rf "$B"
+echo "a mount under $B: postrm purge kept the tree whole, said so, exit 0"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

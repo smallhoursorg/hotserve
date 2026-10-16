@@ -13,8 +13,9 @@ This document holds what has no place there: packaging's triage.
 
 Findings are triaged by the triage skill (`.claude/skills/triage/SKILL.md`):
 its scales, the fix's cost, and the rule. The maintainer scripts
-(`packaging/postinstall.sh`, `packaging/preremove.sh`) run as root on
-every install, upgrade and removal. These are packaging's examples for
+(`packaging/postinstall.sh`, `packaging/preremove.sh`,
+`packaging/postremove.sh`) run as root on every install, upgrade,
+removal and purge. These are packaging's examples for
 the scales:
 
 | Axis | Examples |
@@ -32,12 +33,21 @@ the scales:
 | A box installed from a release without the conffile, taken back to a release with it (v0.3.1-rc1 or earlier), gets dpkg's question about the Caddyfile; Y replaces the box's file with the starter | — | 4 | 2 | 1 | 8; off the documented way back (the `.deb` you upgraded from), then Y against the default; the prompt names the file and the choice |
 | A box still on a starter from a release with the conffile keeps it: no record names it, so upgrades leave it alone | packaging/postinstall.sh | 2 | 1 | 5 | 10; the safe direction. `cp /usr/share/hotserve/Caddyfile /etc/hotserve/` then `dpkg-reconfigure hotserve` makes it stock: postinstall records the starter only when it runs on the release whose starter is on disk, so the `cp` alone leaves the next release's upgrade nothing to match |
 | A push that installs bytes identical to the starter postinstall last wrote is replaced by the next starter | packaging/postinstall.sh | 2 | 1 | 3 | 6; a starter has no `box` block, so no push reaches such a box anyway |
+| `apt purge` finds something mounted at or under `/var/lib/hotserve-box` (or cannot read `/proc/self/mountinfo`): the exchange tree is kept whole, so a purge and a reinstall come up on the old `applied.json` and record | packaging/postremove.sh (`mounted`) | 2 | 1 | 1 | 2; root's own mount in a directory the package owns; named on stderr with the remedy (unmount, then remove); the alternative, an rm through the mount, would remove what is not the package's |
+| `apt purge` finds a symlink, or anything but a regular file, at `/etc/hotserve/Caddyfile`: kept, so a reinstall comes up on what it points to | packaging/postremove.sh | 2 | 5 | 1 | 10; an operator's own path (not a fault, so occurrence 5 and detection carries it): named on stderr, and postinstall leaves a symlink alone too, so the box comes up on the file the operator chose |
 
-**Owed** (over the bar, not yet fixed):
+**Owed** (over the bar, not yet fixed): none.
 
-| Finding | S | O | D | Where the fix lands |
-|---|---|---|---|---|
-| `apt purge` leaves `/etc/hotserve/Caddyfile` and `/var/lib/hotserve-package/` behind on a box installed from a release without the conffile, so a purge and a reinstall come up on the old config | 3 | 5 | 3 | 45; a postrm that removes both on purge, in `packaging/postremove.sh`, which the `backup` branch adds |
+**Kept on purpose, not scored** — `apt purge` leaves `/etc/hotserve/age/`
+(the box's key for secrets), `age.pub` and `/etc/hotserve/secrets/`,
+and names them on stderr, with the `rm -r` that finishes the job
+where the key is among them.
+Deleting the key is one-way: it is the one way to read the secrets
+the box's repository holds, and a purge cannot know whether that is
+over. `/var/lib/hotserve` (Caddy's state) and `/var/lib/liveswap` (the
+apps' releases and data) are never removed by a maintainer script;
+dpkg removes either only when it is empty, as any directory a package
+shipped. The account stays.
 
 ## History
 
@@ -46,3 +56,9 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-14 — Packaging gets a design doc for its triage: its examples
   for the scales, #239's residuals (the starter config out of the
   conffile, #237), and the purge it owes.
+- 2026-10-16 — The owed purge (scored 45) is paid by
+  `packaging/postremove.sh` (PR #NNN): a purge removes the box's
+  config, the starter's record and the box applier's exchange tree,
+  and masks the path unit on remove the dh_installsystemd way. Two
+  residuals of that script accepted; the key kept on purpose. The
+  `backup` branch folds its timers' handling into the same file.
