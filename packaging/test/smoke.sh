@@ -689,6 +689,19 @@ sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
 [ "$mgr_nofile" = "1048576" ] \
 	|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
 echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
+# A crashed app writes no core dump: the unit sets LimitCORE=0 on both
+# limits (liveswap/systemd_dbus.go), where the manager's own default
+# is soft 0 over an unlimited hard limit — one setrlimit from a dump
+# of the app's memory, env values included, left in its release dir
+# past the unit's life. The unit's property, then the limit the app
+# itself saw from inside.
+[ "$(user_systemctl show -p LimitCORE --value "$unit")" = "0" ] \
+	|| die "app unit LimitCORE is '$(user_systemctl show -p LimitCORE --value "$unit")', want 0: a crash could write the app's memory to disk"
+[ "$(user_systemctl show -p LimitCORESoft --value "$unit")" = "0" ] \
+	|| die "app unit LimitCORESoft is '$(user_systemctl show -p LimitCORESoft --value "$unit")', want 0"
+expect_probe core_soft 0
+expect_probe core_hard 0
+echo "app core-dump limit 0/0: a crash writes no dump"
 echo "deployed as unit $unit under user@$uid; app output in the journal"
 
 # The sandbox tier: full — a PID namespace on top of the user namespace

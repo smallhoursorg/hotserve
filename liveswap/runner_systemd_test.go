@@ -333,6 +333,8 @@ func TestUnitPropertiesApplyHardening(t *testing.T) {
 		"Restart":          "no",
 		"KillMode":         "control-group",
 		"NoNewPrivileges":  true,
+		"LimitCORE":        uint64(0),
+		"LimitCORESoft":    uint64(0),
 		"TimeoutStopUSec":  uint64(3_000_000),
 		"Type":             "oneshot",
 		"StandardOutput":   "journal",

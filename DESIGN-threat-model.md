@@ -457,8 +457,8 @@ file itself and hands the pairs to the manager as the transient unit's
 inline `Environment=` property (`unitProperties`,
 liveswap/systemd_dbus.go), never `EnvironmentFile=`. From then on the
 `hotserve` uid — the trust domain that read the file — holds them by
-four routes, with a host-dependent fifth, and nothing else holds them
-by any:
+four routes, and nothing else holds them by any; a fifth, the core
+dump, is closed:
 
 - **The unit's property**, for as long as the unit exists:
   `systemctl --user -M hotserve@ show -p Environment <unit>` (as that
@@ -479,15 +479,18 @@ by any:
   a launch, or for the response filter, which reads the file without
   one (`managedApp.secrets` and `redactorFor`, liveswap/app.go) — for
   as long as the app stays configured, behind the non-dumpable floor.
-- **A core dump, where the host writes one.** Nothing makes an app
-  non-dumpable (the floor under "A non-dumpable supervisor is the
-  floor" is the supervisor's own) and no unit sets `LimitCORE=`, so an
-  app crash can write its memory, values included, past the unit's
-  life: under the kernel's default pattern into the crashing process's
-  working directory — the release dir unless the app moved, anywhere
-  writable in its view if it did; under systemd-coredump into its
-  store, with an access entry for the uid. Same uid and root. Closing
-  it (`LimitCORE=0` on app units) is a code change, not made here.
+- **Not a core dump.** App units run with `LimitCORE=0` on both the
+  soft and the hard limit (`unitProperties`, liveswap/systemd_dbus.go),
+  so a crash writes no dump of the app's memory, and the app cannot
+  raise the limit back: the manager's own default is soft 0 under an
+  unlimited hard limit, one `setrlimit` from a dump. Nothing makes an
+  app non-dumpable (the floor under "A non-dumpable supervisor is the
+  floor" is the supervisor's own); the dump itself is what is closed,
+  since it would outlive the unit — under the kernel's default pattern
+  in the crashing process's working directory, the release dir unless
+  the app moved; under systemd-coredump in its store — where the same
+  uid and root could read it later. The cost is that no app can write
+  a core dump for debugging; there is no per-app opt-in.
 
 No account gains a read it did not already have: the file is
 root:hotserve 0640 by the tutorial's install line (nothing in hotserve
@@ -1236,3 +1239,7 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-13 — The template's secrets grant is gone (box PR 7e2):
   secrets are commits in the config repository, and an administrator
   is an account in `adm`, for the journal alone.
+- 2026-10-16 (#234) — App units run with `LimitCORE=0` on both limits:
+  a crash writes no dump of the app's memory, env values included, so
+  the fifth route for `env_file` values is closed. No app can write a
+  core dump for debugging.

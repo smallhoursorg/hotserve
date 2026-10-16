@@ -480,7 +480,8 @@ author's beliefs about systemd, and only the real thing corrects them.
    support matrix, on both arches): Depends resolution (`libpam-systemd`,
    `dbus`), user manager active with lingering, a deploy under the
    shipped unit as a transient unit with its output and `LimitNOFILE`
-   in the journal, `hotserve validate` as root and as hotserve leaving
+   in the journal and `LimitCORE=0` on the unit and inside it,
+   `hotserve validate` as root and as hotserve leaving
    the running app alone, the app keeping its PID across the upgrade
    restart, and removal taking the apps, drop-ins and linger flag.
 
