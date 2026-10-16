@@ -884,37 +884,9 @@ existing on-disk release, so a version you can roll back to can't be
 silently replaced — re-deploying an existing version with other bytes
 is a `422`. Use a new version, or roll back to relaunch an existing
 one. (A deploy that *fails* before cutover is cleaned up, so that
-version stays retriable.)
-
-**Relaunching the running version.** A rollback to the version that is
-running, or a deploy of it that is for the same artifact, relaunches
-it: the same pipeline from `preparing` on, with no download or
-extraction and no `pre_start` — a second instance of the installed
-release on a fresh socket, soaked, promoted, the first drained and
-stopped. Zero downtime, as any deploy, and how a changed `env_file`
-value or app definition reaches the app without a new version (a
-reload never restarts a running app). "The same artifact" is decided
-by digest, with nothing fetched: a URL deploy's `sha256` pin, or the
-digest of a push's upload, must equal the `sha256` in the version's
-deploy record. A request without a digest, a version whose record has
-none (an unpinned pull, or a push made by a hotserve older than this
-one, before pushes were hashed), or a different digest is a `422`
-saying so and naming the way in — a rollback to the running version
-needs no digest, since it is the same release by definition. A URL
-deploy's `url` still has to pass the scheme and `artifact_allowlist`
-checks a fetch gives it, though nothing is fetched. The
-response is the status as for any deploy, with
-`last_deploy.note` set: `relaunched v1.4.2 (same artifact); it reads
-its env file now` (the second clause when the app has an `env_file`).
-A relaunch is not a new deploy: the version's
-record keeps the deploy that put it there, with its pin and times,
-and `deploys` gains no entry. The cost is the cost of any deploy —
-in-memory state goes — now also paid by an accidental re-run or a CI
-retry that sends the same artifact again; and for the overlap the two
-instances share the release dir (it is the working directory, bound
-read-write), as two versions already share `HOME`, so an app that
-keeps state in its release dir rather than under `HOME` may see its
-two instances contend there.
+version stays retriable.) The running version is the one exception,
+relaunched rather than refused when the artifact is the same — see
+[Relaunching the running version](#relaunching-the-running-version).
 
 The response is synchronous:
 
@@ -1033,6 +1005,37 @@ nothing streamed yet and is the usual single response with its real
 code. Every line passes the response filter. The examples'
 `scripts/deploy.sh` streams, prints each line as it arrives, and exits
 on the last line's code — or on the real one when nothing streamed.
+
+### Relaunching the running version
+
+A rollback to the version that is running, or a deploy of it that is
+for the same artifact, relaunches it: the same pipeline from
+`preparing` on, with no download or extraction and no `pre_start` — a
+second instance of the installed release on a fresh socket, soaked,
+promoted, the first drained and stopped. Zero downtime, as any deploy,
+and how a changed `env_file` value or app definition reaches the app
+without a new version (a reload never restarts a running app). "The
+same artifact" is decided by digest, with nothing fetched: a URL
+deploy's `sha256` pin, or the digest of a push's upload, must equal
+the `sha256` in the version's deploy record. A request without a
+digest, a version whose record has none (an unpinned pull, or a push
+made by a hotserve older than this one, before pushes were hashed), or
+a different digest is a `422` saying so and naming the way in — a
+rollback to the running version needs no digest, since it is the same
+release by definition. A URL deploy's `url` still has to pass the
+scheme and `artifact_allowlist` checks a fetch gives it, though
+nothing is fetched. The response is the status as for any deploy,
+with `last_deploy.note` set: `relaunched v1.4.2 (same artifact); it
+reads its env file now` (the second clause when the app has an
+`env_file`). A relaunch is not a new deploy: the version's record
+keeps the deploy that put it there, with its pin and times, and
+`deploys` gains no entry. The cost is the cost of any deploy —
+in-memory state goes — now also paid by an accidental re-run or a CI
+retry that sends the same artifact again; and for the overlap the two
+instances share the release dir (it is the working directory, bound
+read-write), as two versions already share `HOME`, so an app that
+keeps state in its release dir rather than under `HOME` may see its
+two instances contend there.
 
 ### Deploy records
 
