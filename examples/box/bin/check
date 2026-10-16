@@ -89,12 +89,16 @@ for f in $files; do
 	# `release`: nothing outside the set (a newline included) before the
 	# grep, which matches per line; the v comes off after the check, so a
 	# file of just "v" is refused. $(...) drops the line's newline. A
-	# dangling link is a file too (-L), one that cannot be read.
+	# dangling link is a file too (-L), one that cannot be read; so is a
+	# directory, or a pipe, which cat would wait on (-f first).
 	HOTSERVE=$default
 	vf=$dir/HOTSERVE_VERSION
 	picked=
 	if [ -e "$vf" ] || [ -L "$vf" ]; then
-		v=$(cat "$vf" 2>/dev/null) || { bad "$f: $vf cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1"; continue; }
+		if ! [ -f "$vf" ] || ! v=$(cat "$vf" 2>/dev/null); then
+			bad "$f: $vf cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1"
+			continue
+		fi
 		case $v in
 		'' | *[!0-9A-Za-z.-]*) ok= ;;
 		*) ok=$(printf '%s\n' "$v" | grep -Ex 'v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?') || ok= ;;

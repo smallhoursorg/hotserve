@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1300,6 +1301,14 @@ func TestBoxCheckVersionFile(t *testing.T) {
 		t.Fatalf("a dangling link: exit %d\n%s", code, out)
 	}
 	r.remove(vfile)
+	// A pipe at the name: refused, not waited on (the test would hang).
+	if err := syscall.Mkfifo(filepath.Join(r.dir, vfile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := check(); code != 1 || !strings.Contains(out, vfile+" cannot be read: a box's HOTSERVE_VERSION is a regular file of one line") || runs() != "" {
+		t.Fatalf("a pipe: exit %d\n%s", code, out)
+	}
+	r.remove(vfile)
 
 }
 
@@ -1634,6 +1643,15 @@ func TestBoxInstallHotserve(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "install-hotserve: deploy2.example.com/HOTSERVE_VERSION cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1; skipped, and make check refuses this box\n") ||
 		strings.Contains(out, "not a hotserve release") || !maps.Equal(gh.served(), three) {
 		t.Fatalf("a directory: exit %d\n%s\ndownloads %v", code, out, gh.served())
+	}
+	r.remove("deploy2.example.com/HOTSERVE_VERSION")
+	// A pipe at the name: said, skipped, not waited on.
+	if err := syscall.Mkfifo(filepath.Join(r.dir, "deploy2.example.com/HOTSERVE_VERSION"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code = install()
+	if code != 0 || !strings.Contains(out, "install-hotserve: deploy2.example.com/HOTSERVE_VERSION cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1; skipped, and make check refuses this box\n") || !maps.Equal(gh.served(), three) {
+		t.Fatalf("a pipe: exit %d\n%s\ndownloads %v", code, out, gh.served())
 	}
 	r.remove("deploy2.example.com/HOTSERVE_VERSION")
 	for _, v := range []string{"v", "0.3", "latest"} {

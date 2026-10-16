@@ -89,8 +89,9 @@ if [ -n "$boxes" ]; then
 		unset IFS
 		f=${c%/Caddyfile}/HOTSERVE_VERSION
 		[ -e "$f" ] || [ -L "$f" ] || continue
-		# $(...) drops the line's newline; anything else is refused.
-		if ! v=$(cat "$f" 2>/dev/null); then
+		# $(...) drops the line's newline; anything else is refused. A
+		# regular file first: cat would wait on a pipe.
+		if ! [ -f "$f" ] || ! v=$(cat "$f" 2>/dev/null); then
 			echo "install-hotserve: $f cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1; skipped, and make check refuses this box" >&2
 			continue
 		fi
