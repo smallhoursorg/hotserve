@@ -57,7 +57,7 @@ Dated one-liners; the full text of each is in git.
   for the scales, #239's residuals (the starter config out of the
   conffile, #237), and the purge it owes.
 - 2026-10-16 — The owed purge (scored 45) is paid by
-  `packaging/postremove.sh` (PR #NNN): a purge removes the box's
+  `packaging/postremove.sh` (PR #255): a purge removes the box's
   config, the starter's record and the box applier's exchange tree,
   and masks the path unit on remove the dh_installsystemd way. Two
   residuals of that script accepted; the key kept on purpose. The
