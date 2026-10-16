@@ -633,7 +633,8 @@ What it does not close. `systemctl reload`'s exit status is the
 hotserve uid's word; the `applied` phase trusts it, the file on disk
 does not depend on it, and `systemctl restart` is the remedy. Root's
 never-cut-the-branch guard checks presence, and the handler's
-reachability check covers only what stands before `box_webhook` on
+reachability check covers only what the box server's own settings do
+to the workflow's connection and what stands before `box_webhook` on
 `/`: a `claim` typo passes both and strands the box until root fixes
 it on the box.
 The
@@ -1036,13 +1037,14 @@ does not isolate the runtime.
   handler's.** A pushed Caddyfile that keeps a `box` block, a signer,
   the `box_webhook` site and the signing key passes root's guard. The
   handler also refuses one whose adaptation would answer a push to `/`
-  before `box_webhook` (box/DESIGN-box.md, step 6) — a check a
+  before `box_webhook`, or whose server would refuse the workflow's
+  connection first (its protocols, a listener wrapper, the host's TLS
+  connection policy) (box/DESIGN-box.md, step 6) — a check a
   supervisor RCE skips with the rest of the handler, and one `hotserve
   init` does not run. Neither catches a mistyped `claim`, a host
-  without a certificate, a key no laptop holds, or a server-level
-  setting that refuses the connection before any route runs (a
-  required client certificate, a listener wrapper, `protocols`), any of
-  which strands the box. The remedy is root on the box: `hotserve init`
+  without a certificate, a key no laptop holds, or a server moved
+  where the workflow's connection does not arrive (`https_port`, a
+  `bind`), any of which strands the box. The remedy is root on the box: `hotserve init`
   again, or a hand edit the next signed push overwrites.
 - **A signer's software-held key is the box.** Nothing on the box
   distinguishes a signature made by the operator from one made by

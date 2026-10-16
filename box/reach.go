@@ -2,12 +2,15 @@ package box
 
 // Step 6's reachability (DESIGN-box.md, "Reachability: what may stand
 // before box_webhook"): of the pushed file's adaptation — Caddy's JSON
-// as `hotserve adapt` prints it — whether a GET and a POST for / on the
-// box_webhook host meet box_webhook before any handler that could
-// answer them. Pure: the JSON in, a verdict out, no module loaded but
-// the five matcher types it decides with. Fail-closed every way: a
-// handler the table has not weighed answers, a matcher the table
-// cannot decide may match, and one it does not know may fail.
+// as `hotserve adapt` prints it — whether the workflow's connection
+// reaches the routes of the server that carries box_webhook, and
+// whether a GET and a POST for / on the box_webhook host then meet
+// box_webhook before any handler that could answer them. Pure: the
+// JSON in, a verdict out, no module loaded but the five matcher types
+// it decides with and Caddy's SNI matcher. Fail-closed every way: a
+// handler, a listener wrapper or a TLS policy setting the tables have
+// not weighed answers or refuses, a matcher they cannot decide may
+// match, and one they do not know may fail.
 
 import (
 	"context"
@@ -23,6 +26,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/caddyserver/caddy/v2/modules/caddytls"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
 )
@@ -143,6 +147,15 @@ func reach(adapted []byte, host string) error {
 		if !carriesWebhook(routes) {
 			continue
 		}
+		// The connection first: what refuses it stands before every
+		// route.
+		s, err := settingsOf(servers[name])
+		if err != nil {
+			return err
+		}
+		if what := s.connection(host); what != "" {
+			return &refusal{msg: msgUnreachable(what)}
+		}
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			w := &reachWalk{req: reachRequest(method, host), groups: map[string]groupState{}}
 			switch end, b := w.routes(routes, matchVerdict{status: matches}, true); end {
@@ -182,6 +195,189 @@ func carriesWebhook(routes []adaptedRoute) bool {
 		}
 	}
 	return false
+}
+
+// serverSettings is what of a server's own keys the workflow's
+// connection meets before any route runs: the protocols its listeners
+// serve, its listener wrappers and its TLS connection policies. Only
+// these keys are encoded again and decoded into Caddy's shapes for
+// them, so a value of another shape is the adaptation's fault, as in
+// the routes; no other key of the server is read.
+type serverSettings struct {
+	Protocols        []string         `json:"protocols"`
+	ListenProtocols  [][]string       `json:"listen_protocols"`
+	ListenerWrappers []map[string]any `json:"listener_wrappers"`
+	Policies         []map[string]any `json:"tls_connection_policies"`
+}
+
+func settingsOf(server any) (serverSettings, error) {
+	m, _ := server.(map[string]any)
+	keys := map[string]any{}
+	for _, k := range []string{"protocols", "listen_protocols", "listener_wrappers", "tls_connection_policies"} {
+		if v, ok := m[k]; ok {
+			keys[k] = v
+		}
+	}
+	var s serverSettings
+	b, err := json.Marshal(keys)
+	if err != nil || json.Unmarshal(b, &s) != nil {
+		return serverSettings{}, errAdaptation
+	}
+	return s, nil
+}
+
+// connection is the question asked before the routes, of the
+// connection bin/apply's curl makes: HTTP/1.1 or HTTP/2 over TLS, both
+// offered by ALPN, the host as its SNI, no client certificate, no PROXY
+// header. "" when it reaches the routes; otherwise the catalogue text
+// of the first thing that refuses it, asked in the order of the tables:
+// the listeners, the wrappers, the TLS policies.
+func (s serverSettings) connection(host string) string {
+	served := map[string]bool{}
+	for _, ps := range s.listeners() {
+		if !slices.Contains(ps, "h1") && !slices.Contains(ps, "h2") {
+			return "a listener's protocols include neither h1 nor h2"
+		}
+		for _, p := range ps {
+			served[p] = true
+		}
+	}
+	tlsAt := slices.IndexFunc(s.ListenerWrappers, func(w map[string]any) bool { return w["wrapper"] == "tls" })
+	for i, w := range s.ListenerWrappers {
+		name, _ := w["wrapper"].(string)
+		fallback, _ := w["fallback_policy"].(string)
+		switch {
+		case name == "tls":
+		case name == "http_redirect" && i < tlsAt:
+			// Ahead of the handshake it answers only a connection whose
+			// first bytes are plaintext HTTP. Behind it — where every
+			// wrapper stands when tls is not listed — it reads the
+			// request itself and redirects an HTTP/1.1 one.
+		case name == "proxy_protocol" && !strings.EqualFold(fallback, "require"):
+			// A connection without a PROXY header is served as sent
+			// unless the policy for its address requires one; the
+			// address is not the file's to know.
+		default:
+			if name = proof.Bound(name); name == "" {
+				name = "nameless"
+			}
+			return "the " + name + " listener wrapper may refuse the connection"
+		}
+	}
+	for _, p := range s.Policies {
+		// Caddy hands the handshake to the first policy whose matchers
+		// all match; one decided per connection may or may not be it,
+		// so it is weighed and the next ones too.
+		v := policyMatch(p["match"], host)
+		if v.status == noMatch {
+			continue
+		}
+		if what := policyBlock(p, served); what != "" {
+			if v.status == mayMatch {
+				return "a TLS connection policy that may apply to " + proof.Bound(host) + " " + what +
+					" (its " + proof.Bound(v.matcher) + " matcher is decided per connection)"
+			}
+			return "a TLS connection policy for " + proof.Bound(host) + " " + what
+		}
+		if v.status == matches {
+			break
+		}
+	}
+	return ""
+}
+
+// listeners is each listener's protocols as Caddy provisions them: the
+// server's (h1, h2 and h3 when it lists none), unless listen_protocols
+// gives the listener its own, in which "" stands for the server's.
+func (s serverSettings) listeners() [][]string {
+	server := s.Protocols
+	if len(server) == 0 {
+		server = []string{"h1", "h2", "h3"}
+	}
+	if s.ListenProtocols == nil {
+		return [][]string{server}
+	}
+	out := make([][]string, 0, len(s.ListenProtocols))
+	for _, ln := range s.ListenProtocols {
+		switch {
+		case len(ln) == 0:
+			out = append(out, server)
+		case slices.Contains(ln, ""):
+			out = append(out, append(slices.Clone(ln), server...))
+		default:
+			out = append(out, ln)
+		}
+	}
+	return out
+}
+
+// policyMatch is a TLS connection policy's matchers asked of the
+// workflow's ClientHello: sni decided statically by Caddy's own type,
+// any other matcher (remote_ip, local_ip, sni_regexp, one this code
+// does not know) or a name holding a placeholder per connection, so
+// "may". No matcher matches, as Caddy's catch-all policy does.
+func policyMatch(match any, host string) matchVerdict {
+	m, _ := match.(map[string]any)
+	v := matchVerdict{status: matches}
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		names, static := staticPatterns(m[k])
+		switch {
+		case k == "sni" && static:
+			if !caddytls.MatchServerName(names).Match(&tls.ClientHelloInfo{ServerName: host}) {
+				return matchVerdict{status: noMatch}
+			}
+		case v.status == matches:
+			v = matchVerdict{status: mayMatch, matcher: k}
+		}
+	}
+	return v
+}
+
+// policyBlock is the Reachability table of TLS policy settings: what a
+// TLS connection policy that may apply to the box host does to the
+// workflow's handshake, served being the protocols the server's
+// listeners serve, which bound what ALPN can agree on. "" when the
+// handshake completes; a setting the table has not weighed may refuse
+// it.
+func policyBlock(p map[string]any, served map[string]bool) string {
+	for _, k := range slices.Sorted(maps.Keys(p)) {
+		switch k {
+		case "match", "certificate_selection", "protocol_min", "protocol_max",
+			"default_sni", "fallback_sni", "insecure_secrets_log":
+		case "client_authentication":
+			if requiresCertificate(p[k]) {
+				return "requires a client certificate"
+			}
+		case "drop":
+			if b, ok := p[k].(bool); !ok || b {
+				return "drops the connection"
+			}
+		case "alpn":
+			alpn, _ := p[k].([]any)
+			agrees := (slices.Contains(alpn, any("h2")) && served["h2"]) || (slices.Contains(alpn, any("http/1.1")) && served["h1"])
+			if !agrees {
+				return "offers neither h2 nor http/1.1 by ALPN"
+			}
+		default:
+			return "sets " + proof.Bound(k) + ", which may refuse the handshake"
+		}
+	}
+	return ""
+}
+
+// requiresCertificate is whether a client_authentication refuses a
+// client that sends no certificate. An empty one asks for none; any
+// other lets such a client through only in mode request or
+// verify_if_given, and only with no verifier, since Caddy runs each
+// verifier on every connection (trusted_leaf_certs becomes one, which
+// fails a connection with no certificate).
+func requiresCertificate(v any) bool {
+	ca, _ := v.(map[string]any)
+	if len(ca) == 0 {
+		return false
+	}
+	mode, _ := ca["mode"].(string)
+	return (mode != "request" && mode != "verify_if_given") || ca["verifiers"] != nil || ca["trusted_leaf_certs"] != nil
 }
 
 // matchStatus is what a matcher, a set or a route says of the request:
