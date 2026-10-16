@@ -151,7 +151,9 @@ rests on:
 - **The admin API is not on localhost.** It listens on a unix socket
   rather than TCP: "localhost-only" would include every app you run,
   and one SSRF bug in an app could otherwise reconfigure the server.
-  Apps themselves run unprivileged, with `NoNewPrivileges`.
+  Apps themselves run unprivileged, with `NoNewPrivileges`, and write
+  no core dump (`LimitCORE=0`), so a crash cannot leave an app's
+  memory on disk.
 - **Every app is sandboxed, with no opt-out.** Apps share the
   `hotserve` user, so each runs in its own systemd sandbox: it sees
   its own release, its `shared/` data, a private `/tmp`, and the parts

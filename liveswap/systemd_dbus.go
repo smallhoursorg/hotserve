@@ -264,10 +264,8 @@ func dialPrivate(socket string) (*godbus.Conn, net.Conn, error) {
 // hardening set is fixed here for every unit hotserve creates:
 // Restart=no (the watchdog restarts), KillMode=control-group (stop
 // means the whole tree), NoNewPrivileges (no setuid escalation),
-// LimitCORE=0 on both limits (a crash writes no dump of the app's
-// memory, env values included, and the app cannot raise the soft
-// limit back up), and both output streams to the journal under the
-// app's identifier.
+// LimitCORE=0 on both limits (no core dump), and both output streams
+// to the journal under the app's identifier.
 func unitProperties(u unitSpec) []sddbus.Property {
 	typ := "simple"
 	if u.Oneshot {
@@ -292,9 +290,10 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		{Name: "Restart", Value: godbus.MakeVariant("no")},
 		{Name: "KillMode", Value: godbus.MakeVariant("control-group")},
 		{Name: "NoNewPrivileges", Value: godbus.MakeVariant(true)},
-		// Both managers default to soft 0 and hard unlimited, which an
-		// app may raise with one setrlimit; a hard 0 is the one it
-		// cannot. The dump would outlive the unit, in the release dir
+		// The manager's default is soft 0 under an unlimited hard
+		// limit, which an app may raise with one setrlimit; a hard 0
+		// is the one it cannot. A dump would hold the app's memory,
+		// env values included, past the unit's life
 		// (DESIGN-threat-model.md, "Where env_file values sit").
 		{Name: "LimitCORE", Value: godbus.MakeVariant(uint64(0))},
 		{Name: "LimitCORESoft", Value: godbus.MakeVariant(uint64(0))},

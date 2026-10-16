@@ -457,8 +457,9 @@ file itself and hands the pairs to the manager as the transient unit's
 inline `Environment=` property (`unitProperties`,
 liveswap/systemd_dbus.go), never `EnvironmentFile=`. From then on the
 `hotserve` uid — the trust domain that read the file — holds them by
-four routes, and nothing else holds them by any; a fifth, the core
-dump, is closed:
+four routes, and nothing else holds them by any; a fifth, a core dump,
+is closed by the unit's limit — enforced by the kernel under a file
+`core_pattern`, and under a piped one by the collector honouring it:
 
 - **The unit's property**, for as long as the unit exists:
   `systemctl --user -M hotserve@ show -p Environment <unit>` (as that
@@ -482,14 +483,20 @@ dump, is closed:
 - **Not a core dump.** App units run with `LimitCORE=0` on both the
   soft and the hard limit (`unitProperties`, liveswap/systemd_dbus.go),
   so a crash writes no dump of the app's memory, and the app cannot
-  raise the limit back: the manager's own default is soft 0 under an
-  unlimited hard limit, one `setrlimit` from a dump. Nothing makes an
-  app non-dumpable (the floor under "A non-dumpable supervisor is the
-  floor" is the supervisor's own); the dump itself is what is closed,
-  since it would outlive the unit — under the kernel's default pattern
-  in the crashing process's working directory, the release dir unless
-  the app moved; under systemd-coredump in its store — where the same
-  uid and root could read it later. The cost is that no app can write
+  raise the limit back. Without it the manager's defaults apply, soft
+  0 under an unlimited hard limit (measured on Debian 13, systemd
+  257.13, 2026-10-13, #234): one `setrlimit` from a dump. Nothing
+  makes an app non-dumpable (the floor under "A non-dumpable
+  supervisor is the floor" is the supervisor's own); the dump itself
+  is what is closed, since it would outlive the unit where the same
+  uid and root could read it later. Who enforces the limit depends on
+  the host's `core_pattern`: with a file pattern — Debian 13's
+  default, `core`, in the crashing process's working directory, the
+  release dir unless the app moved — the kernel writes nothing; with a
+  pipe pattern the kernel hands the process to the helper whatever the
+  limit, and it is systemd-coredump (not installed by default) that
+  declines to store a dump when the limit is 0, its own "resource
+  limits disable core dumping" rule. The cost is that no app can write
   a core dump for debugging; there is no per-app opt-in.
 
 No account gains a read it did not already have: the file is
@@ -940,6 +947,8 @@ lifecycle properties and appends `sandboxProperties` for the rest
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
   restarter of apps; hotserve.service itself is restarted by systemd
   after a crash, never after a refused start), `KillMode=control-group`,
+  `LimitCORE=0` on both limits (no core dump of an app; "Where
+  `env_file` values sit", above),
   `UnsetEnvironment=XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS`.
 
 **The probe stays.** At `App.Start` — every config activation —
@@ -1241,5 +1250,7 @@ Dated one-liners; the full text of each is in git.
   is an account in `adm`, for the journal alone.
 - 2026-10-16 (#234) — App units run with `LimitCORE=0` on both limits:
   a crash writes no dump of the app's memory, env values included, so
-  the fifth route for `env_file` values is closed. No app can write a
-  core dump for debugging.
+  the fifth route for `env_file` values is closed — by the kernel
+  under a file `core_pattern` (Debian's default), by the collector's
+  own limit check under a piped one. No app can write a core dump for
+  debugging.

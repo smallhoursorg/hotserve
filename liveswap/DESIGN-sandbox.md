@@ -274,7 +274,8 @@ last moment before the manager acts (closing the planted-symlink
 case), `homeOutsideView` reports an operator `HOME` the view cannot
 satisfy, and `unitProperties` (liveswap/systemd_dbus.go) renders the
 lifecycle properties — `Restart=no`, `KillMode=control-group`,
-`NoNewPrivileges=` — then appends `sandboxProperties` for the
+`NoNewPrivileges=`, `LimitCORE=0` on both limits — then appends
+`sandboxProperties` for the
 namespaces, the view and the privilege surface. `unitFor` refuses a
 spec without a sandbox.
 

@@ -199,9 +199,8 @@ emit home "$HOME"
 [ -n "$XDG_RUNTIME_DIR" ] && emit xdg_runtime set || emit xdg_runtime unset
 emit nofile_soft "$(ulimit -Sn)"
 emit nofile_hard "$(ulimit -Hn)"
-# The core-dump limit as the app sees it: both 0 under the unit's
-# LimitCORE=0 (liveswap/systemd_dbus.go), so a crash writes no dump
-# of its memory and no setrlimit can raise the soft limit back up.
+# The core-dump limit as the app sees it: 0/0 under the unit's
+# LimitCORE=0 (liveswap/systemd_dbus.go).
 emit core_soft "$(ulimit -Sc)"
 emit core_hard "$(ulimit -Hc)"
 # A secret seeded into the supervisor's own environment: hotserve

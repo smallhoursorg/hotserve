@@ -251,8 +251,10 @@ lifetime to the binary's.
 What the unit gives us: `KillMode=control-group` makes stop and crash
 cleanup mean the whole process tree (npm → node → workers), the
 journal captures stdout/stderr under `SyslogIdentifier=hotserve-<app>`,
-`Restart=no` keeps the watchdog the sole restart authority, and
-`NoNewPrivileges` is on. `handleState.Unit` (persisted in
+`Restart=no` keeps the watchdog the sole restart authority,
+`NoNewPrivileges` is on, and `LimitCORE=0` on both limits means a
+crash writes no core dump of the app (DESIGN-threat-model.md, "Where
+`env_file` values sit"). `handleState.Unit` (persisted in
 `state.json`) is what `Reattach` looks up after a hotserve restart: a
 running unit is adopted with the socket its recorded nonce names —
 pinned afresh, so a name that no longer holds a socket refuses the
