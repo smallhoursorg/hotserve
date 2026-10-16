@@ -97,11 +97,16 @@ contents:
       mode: 0755
   # Root's alone: a record the hotserve user could write would let a
   # compromised hotserve make root's next upgrade overwrite the box's
-  # config with the starter.
+  # config with the starter. Removed whole by `apt purge` (postremove),
+  # with /etc/hotserve/Caddyfile and the box applier's exchange tree.
   - dst: /var/lib/hotserve-package
     type: dir
     file_info:
       mode: 0700
+  # Caddy's state (TLS certificates) and the deployed apps' releases
+  # and data. No maintainer script removes either, purge included:
+  # dpkg itself removes one only when it is empty, as any directory a
+  # package shipped.
   - dst: /var/lib/hotserve
     type: dir
     file_info:
@@ -114,3 +119,8 @@ contents:
 scripts:
   postinstall: packaging/postinstall.sh
   preremove: packaging/preremove.sh
+  # remove: the manager drops the removed units, the box applier's
+  # path unit is masked; purge: its enable state, the box's config,
+  # the starter's record and the exchange tree go — the script's
+  # header says what is kept, and why.
+  postremove: packaging/postremove.sh

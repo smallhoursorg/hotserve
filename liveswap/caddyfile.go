@@ -163,6 +163,15 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
+			// Checked here as well as in Validate, because Caddy strips
+			// every "@id" key from the JSON before decoding it
+			// (caddy.RemoveMetaFields): Validate never sees that one, and
+			// the app would start without it. A config written as JSON
+			// loses the key before any hotserve code runs; no check can
+			// catch that (owed: #251).
+			if !validEnvKey(key) {
+				return d.Errf("env key %q is not a valid environment variable name (must match %s)", key, envKeyRe)
+			}
 			if cfg.Env == nil {
 				cfg.Env = make(map[string]string)
 			}

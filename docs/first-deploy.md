@@ -65,9 +65,9 @@ v=${v##*/v}                         # the latest release's tag, without the v
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 mkdir -p /var/local/hotserve && cd /var/local/hotserve
-curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-apt install ./hotserve_${v}_${arch}.deb
+curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt" &&
+  sha256sum -c --ignore-missing checksums.txt &&
+  apt install ./hotserve_${v}_${arch}.deb
 systemctl enable --now hotserve
 ```
 
@@ -84,9 +84,9 @@ arch=$(dpkg --print-architecture)   # amd64 or arm64
 deb=hotserve_$(echo "$v" | tr - .)_${arch}.deb
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 mkdir -p /var/local/hotserve && cd /var/local/hotserve
-curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-apt install "./$deb"
+curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt" &&
+  sha256sum -c --ignore-missing checksums.txt &&
+  apt install "./$deb"
 systemctl enable --now hotserve
 ```
 

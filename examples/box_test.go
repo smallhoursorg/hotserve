@@ -330,6 +330,12 @@ func TestBoxSigner(t *testing.T) {
 	if got := r.git("config", "--local", "user.signingkey"); got != strings.TrimSuffix(bob, ".pub") {
 		t.Errorf("user.signingkey = %q after bob's make signer", got)
 	}
+	// A box under a name git would quote by default (core.quotePath)
+	// gains it too.
+	r.write("café/Caddyfile", other)
+	if out, code := r.run("signer", "KEY=~/.ssh/bob.pub", "PRINCIPAL=bob"); code != 0 || !strings.Contains(r.read("café/Caddyfile"), "\t\tsigner bob ssh-ed25519 "+r.b64(bob)+"\n") {
+		t.Fatalf("a box under a non-ASCII name: exit %d\n%s", code, out)
+	}
 }
 
 func TestBoxCheck(t *testing.T) {
@@ -354,7 +360,13 @@ func TestBoxCheck(t *testing.T) {
 	if out, code := check(); code != 1 || !strings.Contains(out, "box1/Caddyfile: its box_webhook host is deploy.example.com, so it belongs at deploy.example.com/Caddyfile (git mv box1 deploy.example.com)") {
 		t.Fatalf("a box under another name: exit %d\n%s", code, out)
 	}
-	r.git("mv", "box1", "deploy.example.com")
+	// A name git would quote by default (core.quotePath) is read as it
+	// is, not skipped.
+	r.git("mv", "box1", "café")
+	if out, code := check(); code != 1 || !strings.Contains(out, "café/Caddyfile: its box_webhook host is deploy.example.com, so it belongs at deploy.example.com/Caddyfile (git mv café deploy.example.com)") {
+		t.Fatalf("a box under a non-ASCII name: exit %d\n%s", code, out)
+	}
+	r.git("mv", "café", "deploy.example.com")
 
 	// One level down, nothing shallower or deeper; new files count.
 	for _, f := range []string{"Caddyfile", "archive/old.example.com/Caddyfile"} {
@@ -363,6 +375,20 @@ func TestBoxCheck(t *testing.T) {
 			t.Fatalf("%s: exit %d\n%s", f, code, out)
 		}
 		r.remove(f)
+	}
+	// A name git quotes even so is named as git shows it; tracked but
+	// deleted here, it is on its way out.
+	for dir, shown := range map[string]string{`a"b`: `"a\"b/Caddyfile"`, `a\b`: `"a\\b/Caddyfile"`, "a\tb": `"a\tb/Caddyfile"`, "a\nb": `"a\nb/Caddyfile"`} {
+		r.write(dir+"/Caddyfile", good)
+		if out, code := check(); code != 1 || !strings.Contains(out, "check: "+shown+": git quotes this name") {
+			t.Fatalf("%q: exit %d\n%s", dir, code, out)
+		}
+		r.git("add", dir+"/Caddyfile")
+		r.remove(dir)
+		if out, code := check(); code != 0 {
+			t.Fatalf("%q tracked but deleted: exit %d\n%s", dir, code, out)
+		}
+		r.git("rm", "-q", "--cached", "--", dir+"/Caddyfile")
 	}
 
 	// Every box lists the same keys; a principal may differ.
@@ -398,6 +424,27 @@ func TestBoxCheck(t *testing.T) {
 	r.write(boxFile, strings.Replace(good, "\tliveswap_webhook\n", "\tliveswap_webhook\n\tno_such_directive\n", 1))
 	if out, code := check(); code != 1 || !strings.Contains(out, boxFile+" does not validate:") || !strings.Contains(out, "no_such_directive") {
 		t.Fatalf("a file validate refuses: exit %d\n%s", code, out)
+	}
+
+	// A describe or a validate that fails and says nothing (killed, or
+	// crashed): the file and the command that failed are named.
+	r.write(boxFile, good)
+	silent := filepath.Join(r.home, "silent-hotserve")
+	script := "#!/bin/sh\n" +
+		"case \"$FAIL $1\" in\n" +
+		"\"describe box\"|\"validate validate\") exit 1 ;;\n" +
+		"esac\n" +
+		"exec \"$REAL\" \"$@\"\n"
+	if err := os.WriteFile(silent, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for fail, want := range map[string]string{
+		"describe": "check: " + boxFile + ": " + silent + " box describe failed, and said nothing\n",
+		"validate": "check: " + boxFile + " does not validate:\n  " + silent + " validate failed, and said nothing\n",
+	} {
+		if out, code := r.run("check", "HOTSERVE="+silent, "REAL="+bin, "FAIL="+fail); code != 1 || !strings.Contains(out, want) {
+			t.Errorf("%s fails and says nothing: exit %d\n%s", fail, code, out)
+		}
 	}
 }
 
@@ -1177,6 +1224,24 @@ func TestBoxApply(t *testing.T) {
 		out, code := g.apply()
 		if code != 1 || g.box.seen().baseline != head || !strings.Contains(out, "https://deploy2.example.com/: HTTP 409") {
 			t.Fatalf("exit %d\n%s", code, out)
+		}
+	})
+
+	t.Run("names git would quote by default", func(t *testing.T) {
+		// A box directory and a value read as they are (core.quotePath),
+		// not skipped: the second box is asked, and the value is counted,
+		// so the first box's key is checked before anything is sent.
+		g := newApplyRig(t)
+		g.write("café/Caddyfile", strings.Replace(g.read(boxFile), "deploy.example.com {", "deploy2.example.com {", 1))
+		g.write("deploy.example.com/secrets/example/É.age", "x")
+		head := g.commit("both")
+		second := newStandIn(t, head, nil)
+		second.set(func(s *standIn) { s.onGet = "nobaseline" })
+		g.route(map[string]*standIn{"deploy.example.com": g.box, "deploy2.example.com": second})
+		out, code := g.apply()
+		if code != 1 || !strings.Contains(out, "https://deploy2.example.com/: HTTP 409") ||
+			!strings.Contains(out, "deploy.example.com/secrets holds values but no recipients file names a key") || g.box.seen().bundles != 0 {
+			t.Fatalf("exit %d, %d bundles\n%s", code, g.box.seen().bundles, out)
 		}
 	})
 

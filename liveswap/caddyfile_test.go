@@ -171,6 +171,9 @@ func TestCaddyfileUnmarshalErrors(t *testing.T) {
 		{"bad entries", "liveswap {\n\tapp a {\n\t\tmax_artifact_entries lots\n\t}\n}", "invalid max_artifact_entries"},
 		{"command missing args", "liveswap {\n\tapp a {\n\t\tcommand\n\t}\n}", "wrong argument count"},
 		{"env missing value", "liveswap {\n\tapp a {\n\t\tenv K\n\t}\n}", "wrong argument count"},
+		{"invalid env key", "liveswap {\n\tapp a {\n\t\tenv my-var 1\n\t}\n}", `env key "my-var" is not a valid environment variable name`},
+		// Caddy strips "@id" keys before decoding, so only the parser can refuse this one.
+		{"env key Caddy strips", "liveswap {\n\tapp a {\n\t\tenv \"@id\" 1\n\t}\n}", `env key "@id" is not a valid environment variable name`},
 		{"root missing arg", "liveswap {\n\troot\n}", "wrong argument count"},
 		{"positional arg", "liveswap positional", "wrong argument count"},
 		{"root extra arg", "liveswap {\n\troot /a /b\n}", "wrong argument count"},

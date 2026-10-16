@@ -61,15 +61,23 @@ warn() {
 }
 
 # Tracked files and new ones not ignored: a box added but not yet
-# committed is checked too.
-files=$(git ls-files --cached --others --exclude-standard | grep -E '(^|/)Caddyfile$' | LC_ALL=C sort || true)
+# committed is checked too. Names as they are (core.quotePath=false),
+# but for those git quotes even so (below).
+files=$(git -c core.quotePath=false ls-files --cached --others --exclude-standard | grep -E '(^|/)Caddyfile"?$' | LC_ALL=C sort || true)
 [ -n "$files" ] || { echo "check: no box here: a box is <host>/Caddyfile at the top of the repository" >&2; exit 1; }
 # One path a line; a name never splits.
 IFS='
 '
 first= firstkeys= checked=0
 for f in $files; do
-	# Tracked but deleted here: on its way out.
+	# git quotes a name with a ", a \ or a control character in it, and
+	# no host's name has one. Tracked but deleted here: on its way out.
+	case $f in
+	\"*)
+		git -c core.quotePath=false ls-files --deleted | grep -qxF -- "$f" ||
+			bad "$f: git quotes this name, for a \", a \\ or a control character in it; a box's file is <host>/Caddyfile, and no host's name has one"
+		continue ;;
+	esac
 	[ -e "$f" ] || continue
 	case $f in
 	*/*/*|Caddyfile)
@@ -117,6 +125,8 @@ for f in $files; do
 		picked=", checked with $HOTSERVE"
 	fi
 	if ! "$HOTSERVE" box describe "$f" >"$tmpd/describe" 2>&1; then
+		# One that said nothing (killed, or crashed) is named for it.
+		[ -s "$tmpd/describe" ] || printf '%s: %s box describe failed, and said nothing\n' "$f" "$HOTSERVE" >"$tmpd/describe"
 		hint=
 		grep -q 'has no signer' "$tmpd/describe" && hint=" (make signer adds yours)"
 		bad "$(cat "$tmpd/describe")$hint"
@@ -129,6 +139,7 @@ for f in $files; do
 	fi
 	if ! "$HOTSERVE" validate --adapter caddyfile --config "$f" >"$tmpd/validate" 2>&1; then
 		bad "$f does not validate:"
+		[ -s "$tmpd/validate" ] || printf '%s validate failed, and said nothing\n' "$HOTSERVE" >"$tmpd/validate"
 		sed 's/^/  /' "$tmpd/validate" >&2
 		continue
 	fi

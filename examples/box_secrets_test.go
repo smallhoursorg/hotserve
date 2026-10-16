@@ -925,6 +925,12 @@ func TestBoxSecretsNeverReadThroughALink(t *testing.T) {
 			t.Errorf("%s with a link in the index: exit %d\n%s", c.cmd, code, out)
 		}
 	}
+	// Under a box whose name git would quote by default (core.quotePath):
+	// the box is listed, and its index entries read, as they are named.
+	r.git("mv", "deploy.example.com", "café")
+	if out, code := r.secrets("", "", "list"); code != 1 || !strings.Contains(out, "café/secrets/example/LINKED.age is a symbolic link in git's index") {
+		t.Errorf("a link in the index under a non-ASCII box name: exit %d\n%s", code, out)
+	}
 }
 
 func mapsEqual(a, b map[string]string) bool {
