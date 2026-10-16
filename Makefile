@@ -146,8 +146,18 @@ vulncheck:
 # Full-history secret scan — the same engine and image as CI's gitleaks
 # gate (the image is pinned in docker-compose.yml, where Dependabot
 # watches it), so local and CI can never drift.
+#
+# Inside the container the history is readable only when .git is a
+# directory: a git worktree's .git is a file naming a gitdir outside
+# the /src mount, and there gitleaks logs "not a git repository",
+# scans 0 commits and exits 0 with "no leaks found" — a false pass. So
+# a worktree gets --no-git and the scan covers the working tree
+# instead: every file on disk (ignored build output included), not
+# the branch's commits — those CI's git-mode run covers. A plain
+# checkout (and CI's) is unchanged.
+secretscan: GITLEAKS_FLAGS = $(shell test -d .git || echo --no-git)
 secretscan:
-	$(COMPOSE) run --rm gitleaks detect --source /src --redact -v
+	$(COMPOSE) run --rm gitleaks detect --source /src --redact -v $(GITLEAKS_FLAGS)
 
 # Cross-compiles the product binary for the release targets. GOFLAGS is
 # cleared so -buildvcs is back on: caddycmd stamps the version from the
