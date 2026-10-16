@@ -578,11 +578,16 @@ remedy is to move it behind `box_webhook`, where the default order
 already puts every responder, or to give it a path.
 
 **The connection.** Before any route runs, the workflow's connection
-meets the settings of the server that carries `box_webhook`, and the
-handler asks them first, of the connection `bin/apply`'s curl makes
-on the workflow's Ubuntu runner: HTTP/1.1 or HTTP/2 over TLS, both
-offered by ALPN, the host as its SNI, no client certificate, no PROXY
-header. Each of that server's listeners must serve `h1` or `h2` — its
+meets the server that carries `box_webhook`: its listeners'
+protocols, its listener wrappers, its TLS connection policies and its
+strict SNI check. The handler asks those first (and no other server
+setting: "Not caught here"), of the connection `bin/apply`'s curl
+makes on the workflow's Ubuntu runner: HTTP/1.1 or HTTP/2 over TLS,
+both offered by ALPN, the host as its SNI — none for an IP address,
+to which curl sends none — no client certificate, no PROXY header.
+Each setting is read in Caddy's shape for it, client authentication
+in Caddy's own type, and one written as `null` as Caddy reads it:
+absent. Each of that server's listeners must serve `h1` or `h2` — its
 `protocols`, from the `servers` option or a `bind` block, are `h1 h2
 h3` when none are set — or the push is refused `a listener's
 protocols include neither h1 nor h2`: with neither, Caddy opens no TCP
@@ -610,16 +615,28 @@ policy for each site with `tls` options, matched by its names, and a
 catch-all last; a wildcard site's client authentication never reaches
 the box host, which has a site of its own: the adapter puts that
 site's own policy, or a copy of the wildcard's without client
-authentication, ahead of it.
+authentication, ahead of it. The policies are walked in the order
+written: past 30 of them Caddy looks first at those naming the host
+exactly, which the adapter writes ahead of any other that matches it,
+and a list in which none is sure to apply passes, since the adapter
+ends every list with a catch-all (Accepted residuals).
 
 | TLS policy setting | Treated as | Why |
 |---|---|---|
 | `match`, `certificate_selection`, `protocol_min`, `protocol_max`, `default_sni`, `fallback_sni`, `insecure_secrets_log` | passes | curl speaks TLS 1.2 and 1.3, the two versions Caddy offers; `tls <cert> <key>` adapts to a `certificate_selection` of the loaded certificate (whether the host has a certificate at all is not asked here); the SNI defaults apply only to a handshake without SNI or without a certificate for it; the log only records |
-| `client_authentication` that is empty, or in mode `request` or `verify_if_given` with no `verifiers` and no `trusted_leaf_certs` | passes | a client without a certificate is let through |
+| `client_authentication` that Caddy counts as inactive (nothing in it set), or in mode `request` or `verify_if_given` with no `verifiers` and no `trusted_leaf_certs` | passes | a client without a certificate is let through |
 | `client_authentication` otherwise: `mode require` or `require_and_verify`, a trust pool and no mode, any verifier | refused: `a TLS connection policy for <host> requires a client certificate` | Caddy runs each verifier on every connection, and `trusted_leaf_certs` becomes the leaf verifier, which fails a connection with no certificate |
 | `drop` | refused: `… drops the connection` | |
-| `alpn` naming neither `h2` while a listener serves `h2` nor `http/1.1` while one serves `h1` | refused: `… offers neither h2 nor http/1.1 by ALPN` | Caddy takes out of ALPN what no listener serves, and Go's TLS server refuses a handshake whose ALPN lists share nothing |
+| `alpn` naming neither `h2` while a listener serves `h2` nor `http/1.1` while one serves `h1`, or an empty `alpn` where none serves `h1` | refused: `… offers neither h2 nor http/1.1 by ALPN` | Caddy takes out of ALPN what no listener serves, and Go's TLS server refuses a handshake whose ALPN lists share nothing; an empty list negotiates no protocol, so curl speaks HTTP/1.1 |
 | anything else — `cipher_suites`, `curves`, `handshake_context`, a setting this table does not list | refused: `… sets <setting>, which may refuse the handshake` | fail-closed: which suites and curves the workflow's TLS library shares with a list is the runner image's to say, and a handshake module may fail |
+
+Last, the strict SNI check: with `strict_sni_host` on, Caddy answers
+a request whose SNI is not its Host with an error, and it turns the
+check on itself, when the file leaves it unset, for a server where
+any policy authenticates clients. A box host that is an IP address,
+whose requests carry no SNI, is then refused `the server's
+strict_sni_host refuses a request to an IP address, which carries no
+SNI`.
 
 The cost, as with "may": the questions are asked of the connection
 as curl makes it, not as whatever stands in front of the box passes it
@@ -642,13 +659,17 @@ the console is the way back ("At 3am"), and whether the workflow asks
 call. A `request_body` cap below the bundle's 16 MiB, or a `timeouts`
 read deadline shorter than the upload, ahead of `box_webhook` is not
 caught either: the push reaches the handler and fails its body read
-(400), which names the bundle. Nor is where the server listens: a push
-that moves the box host's server where the workflow's
-`https://<host>/` does not arrive (`https_port`, a `bind` to an
-address the host's name does not lead to) passes, since a port
-forward or a NAT'd address makes the same lines right, and strands the
-box until root undoes it ("At 3am"; owed, "Triage"). Nor is a host
-without a certificate.
+(400), which names the bundle. No other server setting is read: a
+push that sets the server's request limits below what the workflow
+sends (`timeouts { read_header }` shorter than a handshake from the
+runner, `max_header_size` below its headers and their OIDC token)
+passes, and the next push is refused before any route (owed,
+"Triage"). Nor is where the server listens: a push that moves the box
+host's server where the workflow's `https://<host>/` does not arrive
+(`https_port`, a `bind` to an address the host's name does not lead
+to) passes, since a port forward or a NAT'd address makes the same
+lines right, and strands the box until root undoes it ("At 3am";
+owed, "Triage"). Nor is a host without a certificate.
 
 ## The install transaction
 
@@ -875,12 +896,14 @@ can do both by other means.
 | An app's `env_file` outside `/etc/hotserve/secrets/` that is not on the box: the push applies green, since config load is silent about an absent file (`warnEnvFileModeOf`, liveswap/app.go). A deploy fails at its launch, named, and the old version keeps serving; but a crash's relaunch fails the same way, so the app stays down until the console makes the file | "Which checks run where" | 4 | 4 | 1 | 16; every launch names the missing file. A warning at config load would fire on every CI check, where the file cannot exist; reporting root's own stat in the push's result is a new field (size 3, risk 2) |
 | `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the latest stable, or the one `HOTSERVE_VERSION` names), whose install step's line names it. `hotserve version` prints Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
 | A box host that a proxy reaches with a client certificate (Cloudflare's Authenticated Origin Pulls), or that a balancer reaches through a `proxy_protocol` falling back to `REQUIRE`, or whose TLS policy sets ciphers or curves: every push is refused, though the workflow's connection would arrive | Reachability, "The connection" | 2 | 5 | 1 | 10; red and named, and each remedy there keeps the box reachable. Admitting the setting needs the comparison the owed row below names (size 3) |
+| A box server whose TLS policies are in an order no Caddyfile adapts to passes as walked: a list in which no policy is sure to apply to the host (Caddy then refuses the handshake), or, past 30 policies, one matching the host by wildcard or by matcher ahead of one naming it exactly (Caddy looks at that one first) | Reachability, "The connection" | 4 | 1 | 3 | 12; the input is always the adapter's, which ends every list with a catch-all and writes a policy naming a host ahead of any other matching it |
 
 **Owed** (over the bar, not yet fixed):
 
 | Finding | S | O | D | Where the fix lands |
 |---|---|---|---|---|
 | A push moves the box host's server where the workflow's `https://<host>/` does not arrive (`https_port`, a `bind` to an address the host's name does not lead to) with nothing forwarding to it: it applies green, and the next push finds no answer | 4 | 5 | 3 | 60; not decidable from the file, since a port forward or a NAT'd address makes the same lines right (the e2e box listens on 8443). The fix compares the box server's listeners and connection settings with those of the file the box runs, which the push arrived through, and so tells a change from what already carries pushes; it would also admit the residual above. A follow-up: the owner decides |
+| A push sets the box server's request limits below what the workflow sends (`timeouts { read_header }` shorter than a handshake from the runner, `max_header_size` below its headers and their OIDC token): it applies green, and the next push is refused before any route | 4 | 5 | 3 | 60; found while fixing the connection check. A floor for each is a cap to size and discuss, since the runner's latency and the token's length are not the file's; the owner decides |
 
 ## Admission
 
@@ -1476,7 +1499,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository: move it there` (the recorded path is already `<host>/Caddyfile`) / `…: hotserve init, run again from that directory, records it` (it is not) | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
-| 422 | `refused` | `the new Caddyfile does not reach box_webhook on /: a listener's protocols include neither h1 nor h2` / `… : the <wrapper> listener wrapper may refuse the connection` / `… : a TLS connection policy for <host> <what>` / `… : a TLS connection policy that may apply to <host> <what> (its <matcher> matcher is decided per connection)` — `<what>` is `requires a client certificate`, `drops the connection`, `offers neither h2 nor http/1.1 by ALPN` or `sets <setting>, which may refuse the handshake` ("The connection", in "Reachability") | handler | fail |
+| 422 | `refused` | `the new Caddyfile does not reach box_webhook on /: a listener's protocols include neither h1 nor h2` / `… : the <wrapper> listener wrapper may refuse the connection` / `… : the server's strict_sni_host refuses a request to an IP address, which carries no SNI` / `… : a TLS connection policy for <host> <what>` / `… : a TLS connection policy that may apply to <host> <what> (its <matcher> matcher is decided per connection)` — `<what>` is `requires a client certificate`, `drops the connection`, `offers neither h2 nor http/1.1 by ALPN` or `sets <setting>, which may refuse the handshake` ("The connection", in "Reachability") | handler | fail |
 | 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` / `<path> does not decrypt: <reason>` (one of the four reasons in "Values and the env file") / `<app>/<VAR>: the value has a line break` / `<app>/<VAR>: the value has a NUL byte` / `<app>/<VAR>: the value is not UTF-8` / `app <app>'s env file would be <n> bytes; the cap is 65536` (step 15a) | applier | fail |
@@ -2325,7 +2348,7 @@ Dated one-liners; the full text of each is in git.
   clears only by a cheap fix and gets no residual row, and an issue's
   item is scored before a branch is cut.
 - 2026-10-16 — Step 6 asks the box server's connection settings
-  before its routes: its listeners' protocols, its listener wrappers
-  and the TLS connection policy for the host ("The connection"). They
-  had been stated as not caught; where the server listens stays
-  uncaught, and is owed.
+  before its routes: its listeners' protocols, its listener wrappers,
+  the TLS connection policy for the host and its strict SNI check
+  ("The connection"). They had been stated as not caught; where the
+  server listens, and its request limits, stay uncaught and are owed.

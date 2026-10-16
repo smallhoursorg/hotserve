@@ -31,6 +31,7 @@ func FuzzReach(f *testing.F) {
 	f.Add(connJSON(`"protocols":["h3"],`), "deploy.example.com")
 	f.Add(connJSON(`"listener_wrappers":[{"wrapper":"proxy_protocol","fallback_policy":"REQUIRE"},{"wrapper":"tls"}],`), "deploy.example.com")
 	f.Add(connJSON(`"tls_connection_policies":[{"match":{"remote_ip":{}}},{"match":{"sni":["*.example.com"]},"client_authentication":{"mode":"require"}}],`), "deploy.example.com")
+	f.Add(connJSON(`"strict_sni_host":true,`), "203.0.113.5")
 	f.Add([]byte("{"), "x")
 	f.Add([]byte(`{"apps":{"http":{"servers":{"a":{"routes":[{"match":[{"host":["{x}"]}],"handle":[{"handler":"box_webhook"}],"group":"g","terminal":true}]}}}}}`), "h")
 	f.Fuzz(func(t *testing.T, adapted []byte, host string) {
@@ -54,6 +55,7 @@ func FuzzReach(f *testing.F) {
 var catalogueReach = regexp.MustCompile(`^the new Caddyfile does not reach box_webhook on /: (` +
 	`a listener's protocols include neither h1 nor h2|` +
 	`the .+ listener wrapper may refuse the connection|` +
+	`the server's strict_sni_host refuses a request to an IP address, which carries no SNI|` +
 	`a TLS connection policy for .+ ` + policyWhat + `|` +
 	`a TLS connection policy that may apply to .+ ` + policyWhat + ` \(its .+ matcher is decided per connection\)|` +
 	`(.+) (answers first|changes the request first|may (answer|change the request) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\)))$`)

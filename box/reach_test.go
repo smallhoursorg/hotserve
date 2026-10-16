@@ -228,8 +228,10 @@ func TestReachConnectionJSON(t *testing.T) {
 		requires = "a TLS connection policy for deploy.example.com requires a client certificate"
 		wrapper  = "the %s listener wrapper may refuse the connection"
 	)
+	const ip = "203.0.113.5"
 	for name, c := range map[string]struct {
 		settings string
+		host     string // deploy.example.com when empty
 		want     string // "" reachable; "error" a plain error; else the refusal
 	}{
 		"proxy_protocol":                                   {settings: `"listener_wrappers":[{"wrapper":"proxy_protocol"},{"wrapper":"tls"}],`},
@@ -261,13 +263,36 @@ func TestReachConnectionJSON(t *testing.T) {
 		"a remote_ip policy ahead of a catch-all requiring": {settings: `"tls_connection_policies":[{"match":{"remote_ip":{"ranges":["10.0.0.0/8"]}}},{"client_authentication":{"mode":"require"}}],`, want: requires},
 		"an sni placeholder requiring": {settings: `"tls_connection_policies":[{"match":{"sni":["{env.HOST}"]},"client_authentication":{"mode":"require"}},{}],`,
 			want: "a TLS connection policy that may apply to deploy.example.com requires a client certificate (its sni matcher is decided per connection)"},
-		"another server's settings":          {settings: `"protocols":["h1"]},"other":{"listen":[":8443"],"protocols":["h3"],"listener_wrappers":[{"wrapper":"layer4"}],"tls_connection_policies":[{"drop":true}],"routes":[]},"srv1":{"listen":[":444"],`},
+		"another server's settings": {settings: `"protocols":["h1"]},"other":{"listen":[":8443"],"protocols":["h3"],"listener_wrappers":[{"wrapper":"layer4"}],"tls_connection_policies":[{"drop":true}],"routes":[]},"srv1":{"listen":[":444"],`},
+		// What Caddy reads as off, or as its default, is off or the
+		// default here: Caddy's own type for client authentication,
+		// and a setting written as null is absent.
+		"client_authentication with an empty mode":       {settings: `"tls_connection_policies":[{"client_authentication":{"mode":""}}],`},
+		"client_authentication with an empty trust list": {settings: `"tls_connection_policies":[{"client_authentication":{"trusted_ca_certs":[]}}],`},
+		"mode request with an empty verifier list":       {settings: `"tls_connection_policies":[{"client_authentication":{"mode":"request","verifiers":[]}}],`},
+		"alpn null, the default":                         {settings: `"tls_connection_policies":[{"alpn":null}],`},
+		"alpn empty, no protocol negotiated, h1 served":  {settings: `"tls_connection_policies":[{"alpn":[]}],`},
+		"alpn empty where only h2 is served":             {settings: `"protocols":["h2"],"tls_connection_policies":[{"alpn":[]}],`, want: "a TLS connection policy for deploy.example.com offers neither h2 nor http/1.1 by ALPN"},
+		"cipher_suites null":                             {settings: `"tls_connection_policies":[{"cipher_suites":null}],`},
+		// curl sends no SNI to an IP address: a policy naming it does
+		// not apply, and the strict SNI check refuses the request.
+		"an IP host's own policy ahead of a catch-all requiring": {host: ip, settings: `"strict_sni_host":false,"tls_connection_policies":[{"match":{"sni":["203.0.113.5"]}},{"client_authentication":{"mode":"require"}}],`,
+			want: "a TLS connection policy for 203.0.113.5 requires a client certificate"},
+		"an IP host's own policy requiring, strict SNI off": {host: ip, settings: `"strict_sni_host":false,"tls_connection_policies":[{"match":{"sni":["203.0.113.5"]},"client_authentication":{"mode":"require"}},{}],`},
+		"an IP host, strict SNI on":                         {host: ip, settings: `"strict_sni_host":true,`, want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
+		"an IP host, strict SNI on by another site's client authentication": {host: ip, settings: `"tls_connection_policies":[{"match":{"sni":["example.com"]},"client_authentication":{"mode":"require"}},{}],`,
+			want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
+		"a hostname, strict SNI on":          {settings: `"strict_sni_host":true,`},
 		"protocols that do not read":         {settings: `"protocols":"h1",`, want: "error"},
 		"listener wrappers that do not read": {settings: `"listener_wrappers":{"wrapper":"tls"},`, want: "error"},
 		"policies that do not read":          {settings: `"tls_connection_policies":[1],`, want: "error"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := reach(connJSON(c.settings), "deploy.example.com")
+			host := c.host
+			if host == "" {
+				host = "deploy.example.com"
+			}
+			err := reach([]byte(strings.ReplaceAll(string(connJSON(c.settings)), "deploy.example.com", host)), host)
 			if c.want == "error" {
 				var r *refusal
 				if err == nil || errors.As(err, &r) {
