@@ -739,10 +739,11 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		// reaches it without a new version. Nothing is downloaded,
 		// extracted or written under the release: a relaunch can only
 		// run the bytes already there.
-		if msg := relaunchRefusal(spec, req); msg != "" {
-			return validationError{msg}
+		recorded := recordedPin(spec.dirs, req.version)
+		if err := relaunchRefusal(spec, req, recorded); err != nil {
+			return err
 		}
-		relaunch = true
+		relaunch, pin = true, recorded // the pin the running release was matched by: its record's, equal to the request's when it carried one
 		logger.Info("version is already running; relaunching it from its release on disk (same artifact)")
 	}
 	if err := spec.dirs.ensure(); err != nil {
@@ -768,28 +769,23 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 
 	accepted = true
 	// A rollback replaces the version's record, so it carries that
-	// record's pin forward; a relaunch's last_deploy names the pin the
-	// running release was matched by (its record's, equal to the
-	// request's when the request carried one); anything else names its
-	// own (or none).
-	if req.rollback || relaunch {
+	// record's pin forward (a relaunch's was read above); anything else
+	// names its own (or none).
+	if req.rollback && !relaunch {
 		pin = recordedPin(spec.dirs, req.version)
 	}
 
 	// extracted: this deploy put the release there, so a failure takes
 	// it away again; a rollback and a relaunch launch a release that
 	// was already on disk and must never delete it or re-run its
-	// pre_start.
+	// pre_start. The fetcher's rollback path is the one way an on-disk
+	// release is taken as it is — a stat, nothing written — so a
+	// relaunch is fetched as a rollback of the running version.
 	extracted := !req.rollback && !relaunch
-	var releaseDir string
-	if relaunch {
-		// The release the running instance was launched from; a stat,
-		// not a fetch — nothing is written under it.
-		releaseDir = spec.dirs.release(req.version)
-		if _, err := os.Stat(releaseDir); err != nil {
-			return fmt.Errorf("release dir for the running version %s: %w", req.version, err)
-		}
-	} else if releaseDir, stats, err = c.fetch.fetch(ctx, spec, req, func(phase string) { ma.setPhase(c, phase) }); err != nil {
+	fetchReq := req
+	fetchReq.rollback = !extracted
+	releaseDir, stats, err := c.fetch.fetch(ctx, spec, fetchReq, func(phase string) { ma.setPhase(c, phase) })
+	if err != nil {
 		return err
 	}
 	if extracted { // a rollback or relaunch extracted nothing; there is nothing to measure
@@ -980,36 +976,45 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 }
 
 // relaunchRefusal decides whether a request naming the version that is
-// running relaunches it, returning the refusal's message or "" to
-// proceed. A rollback is the same release by definition and needs no
-// digest. A URL or push deploy relaunches only when it is for the
-// same artifact: its digest (the URL deploy's pin; the push's upload,
-// hashed by stageUpload) equals the one the version's record holds,
-// so nothing is fetched or hashed here — a request with no digest, or
-// a record without one (a push deployed before pushes were hashed, an
-// unpinned pull), is refused rather than fetched and compared, and so
-// is a different artifact: versions are immutable. Every message says
-// how a new env_file value reaches the app, since that is what the
-// request was reaching for.
+// running relaunches it: nil to proceed, or the refusal (a
+// validationError, 422). A rollback is the same release by definition
+// and needs no digest. A URL or push deploy relaunches only when it is
+// for the same artifact: its digest (the URL deploy's pin; the push's
+// upload, hashed by stageUpload) equals recorded, the one the
+// version's record holds, so nothing is fetched or hashed here — a
+// request with no digest, or a record without one (a push deployed
+// before pushes were hashed, an unpinned pull), is refused rather than
+// fetched and compared, and so is a different artifact: versions are
+// immutable. Every same-version message says how a new env_file value
+// reaches the app, since that is what the request was reaching for.
+// A URL deploy whose digests match then gets the checks a fetch would
+// give its url (pinArtifactURL), so a URL the allowlist refuses is
+// refused here too rather than passing because nothing was downloaded
+// from it; a request refused on its digest fetches nothing either way,
+// and the digest's message is the one that names its remedy.
 //
 // The comparison is with the record, not the release's bytes (the
 // record's known limit, recordedPin): whatever it decides, a relaunch
 // runs the release on disk and introduces no bytes of its own.
-func relaunchRefusal(spec *appSpec, req deployRequest) string {
+func relaunchRefusal(spec *appSpec, req deployRequest, recorded string) error {
 	if req.rollback {
-		return ""
+		return nil
 	}
 	remedy := fmt.Sprintf("a rollback to %s relaunches it (that, or a new version, is also how a new secret reaches the app)", req.version)
-	recorded := recordedPin(spec.dirs, req.version)
 	switch {
 	case req.sha256 == "":
-		return fmt.Sprintf("version %s is already running and the request carries no sha256 to match its artifact by; %s", req.version, remedy)
+		return validationError{fmt.Sprintf("version %s is already running and the request carries no sha256 to match its artifact by; %s", req.version, remedy)}
 	case recorded == "":
-		return fmt.Sprintf("version %s is already running and its artifact's digest is not on record, so the request cannot be matched to it; %s", req.version, remedy)
+		return validationError{fmt.Sprintf("version %s is already running and its artifact's digest is not on record, so the request cannot be matched to it; %s", req.version, remedy)}
 	case req.sha256 != recorded:
-		return fmt.Sprintf("version %s is already running from a different artifact — versions are immutable; deploy a new version (a rollback to %s relaunches what is running, and either is how a new secret reaches the app)", req.version, req.version)
+		return validationError{fmt.Sprintf("version %s is already running from a different artifact — versions are immutable; deploy a new version (a rollback to %s relaunches what is running, and either is how a new secret reaches the app)", req.version, req.version)}
 	}
-	return ""
+	if req.localArchive == "" {
+		if _, err := pinArtifactURL(req.url, spec.allowInsecure, spec.allowlist); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // relaunchNote is the response's word for a relaunch that succeeded:

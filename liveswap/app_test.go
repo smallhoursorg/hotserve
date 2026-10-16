@@ -445,7 +445,11 @@ func testSpec(t *testing.T) *appSpec {
 		keep:               2,
 		maxArtifactSize:    1 << 20,
 		maxArtifactEntries: 1000,
-		dirs:               newAppDirs(shortTempDir(t), "demo"),
+		// The host the tests' artifact URLs name. The fake fetcher
+		// consults no allowlist; a relaunch of the running version does
+		// (relaunchRefusal), before it decides.
+		allowlist: mustAllowlist(t, "x"),
+		dirs:      newAppDirs(shortTempDir(t), "demo"),
 	}
 }
 

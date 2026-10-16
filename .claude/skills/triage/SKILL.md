@@ -20,7 +20,7 @@ the behaviour they describe. Read only the one the finding is in:
 |---|---|
 | box | `box/DESIGN-box.md`, "Triage: which failures to defend" |
 | packaging (`packaging/`, the `.deb`'s maintainer scripts) | `packaging/DESIGN-packaging.md`, "Triage" |
-| liveswap | `liveswap/DESIGN-liveswap.md`, "Accepted residuals" (no examples yet: the general scales) |
+| liveswap | `liveswap/DESIGN-liveswap.md`, "Accepted residuals" (scored rows; no per-level examples yet, so the general scales) |
 
 A subsystem with no examples yet is scored on the general scales
 alone. Add its examples to its design doc when a finding first needs

@@ -86,8 +86,11 @@ Concept map from the Nomad-era stack:
   record has none (an unpinned pull; a push made before pushes were
   hashed), or a different digest MUST be refused (422) without fetching
   anything to compare, in a message that says how a new value reaches
-  the app. A rollback to the running version needs no digest: it is
-  the same release by definition. A relaunch MUST write no deploy
+  the app; a URL deploy whose digest matches MUST still pass the url
+  checks a fetch gives it (scheme, `artifact_allowlist`), so a URL
+  that could not deploy cannot relaunch either. A rollback to the
+  running version needs no digest: it is the same release by
+  definition. A relaunch MUST write no deploy
   record — the version's record stays the deploy that put it there,
   with its pin and its times, whether the relaunch succeeded or failed
   — and MUST say what it did in `last_deploy` and the response

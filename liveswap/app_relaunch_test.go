@@ -60,11 +60,15 @@ func TestRelaunchOnMatchingPin(t *testing.T) {
 	sockV1 := rig.ma.activeSocket.Load()
 	record, err := readDeployRecord(rig.spec.dirs, "v1")
 	must(t, err)
-	rig.fetch.err = errors.New("a relaunch must not fetch")
 	before := rig.clock.Now()
 
 	must(t, deployV1Pinned(t, rig, pinA))
 
+	// Taken from disk as a rollback is: the fetcher saw a rollback of
+	// v1, so it downloaded and extracted nothing.
+	if got := rig.fetch.lastReq; !got.rollback || got.version != "v1" {
+		t.Fatalf("the relaunch must take the release as a rollback does, got %+v", got)
+	}
 	if rig.runner.startCount() != 3 { // pre_start, v1, then the relaunch — no second pre_start
 		t.Fatalf("starts = %d, want the first deploy's pre_start and app and one relaunch", rig.runner.startCount())
 	}
@@ -175,6 +179,28 @@ func TestRelaunchRefusedWithoutADigest(t *testing.T) {
 	}
 }
 
+// A URL deploy of the running version whose digest matches gets the
+// url checks a fetch would give it: a host the allowlist refuses, or
+// plain http, is the fetch's own 422, with nothing launched — a URL
+// that could not deploy anything cannot relaunch either.
+func TestRelaunchChecksTheURLLikeAFetch(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, deployV1Pinned(t, rig, pinA))
+	for _, tc := range []struct{ url, want string }{
+		{"https://elsewhere.test/v1.tgz", "refused"},
+		{"http://x/v1.tgz", "plain http"},
+	} {
+		err := rig.ma.Deploy(context.Background(), deployRequest{url: tc.url, version: "v1", sha256: pinA})
+		var ve validationError
+		if !errors.As(err, &ve) || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: want a 422 saying %q, got %v", tc.url, tc.want, err)
+		}
+	}
+	if rig.runner.startCount() != 1 {
+		t.Fatalf("starts = %d; a refused url launches nothing", rig.runner.startCount())
+	}
+}
+
 // A rollback to the running version is the same release by definition:
 // it relaunches without a digest, and its last_deploy carries the
 // record's pin like any rollback.
@@ -268,10 +294,12 @@ func TestWebhookPushSameBytesRelaunches(t *testing.T) {
 		t.Fatalf("record pin = %q, want the upload's digest", got)
 	}
 
-	rig.fetch.err = errors.New("a relaunch must not extract")
 	w = send(t, h, gzipDeploy(t, "/demo?version=v9", appToken(t), "tarball-bytes"))
 	if ld := lastDeploy(w.Body.Bytes()); w.Code != http.StatusOK || ld.Note != "relaunched v9 (same artifact)" || ld.SHA256 != digest {
 		t.Fatalf("same bytes: %d %s", w.Code, w.Body.String())
+	}
+	if got := rig.fetch.lastReq; !got.rollback {
+		t.Fatalf("the relaunch must take the release as a rollback does, not extract the upload: %+v", got)
 	}
 	if rig.runner.startCount() != 2 || rig.runner.stopCount() != 1 {
 		t.Fatalf("starts=%d stops=%d", rig.runner.startCount(), rig.runner.stopCount())

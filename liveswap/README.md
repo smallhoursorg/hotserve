@@ -900,7 +900,9 @@ deploy record. A request without a digest, a version whose record has
 none (an unpinned pull, or a push made by a hotserve older than this
 one, before pushes were hashed), or a different digest is a `422`
 saying so and naming the way in — a rollback to the running version
-needs no digest, since it is the same release by definition. The
+needs no digest, since it is the same release by definition. A URL
+deploy's `url` still has to pass the scheme and `artifact_allowlist`
+checks a fetch gives it, though nothing is fetched. The
 response is the status as for any deploy, with
 `last_deploy.note` set: `relaunched v1.4.2 (same artifact); it reads
 its env file now` (the second clause when the app has an `env_file`).
