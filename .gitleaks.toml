@@ -5,9 +5,15 @@
 # strings on purpose, so the tests can assert they are redacted. None
 # is a real secret. The Go tests for the same filter carry a few more
 # inline, each marked gitleaks:allow on its line.
+#
+# The path pattern is an unanchored regex over the path as gitleaks
+# reports it: relative to the repository root in git mode (CI, a plain
+# checkout), but the absolute /src/... path under --no-git (what `make
+# secretscan` uses in a git worktree). (^|/) matches both; a bare ^
+# would miss the second.
 [extend]
 useDefault = true
 
 [allowlist]
 description = "response-filter fixtures: credential-shaped by design"
-paths = ['''^liveswap/testdata/redact/''']
+paths = ['''(^|/)liveswap/testdata/redact/''']
