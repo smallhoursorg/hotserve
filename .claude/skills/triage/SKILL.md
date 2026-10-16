@@ -27,6 +27,18 @@ them, not before.
 
 ## 2. Score the failure
 
+Only a failure is scored. Two kinds of finding are not:
+
+- **A suggestion that names no failure** (nothing is wrong, something
+  could be nicer) is a feature. It is neither scored nor accepted; the
+  owner weighs it as a feature.
+- **A comment or design-doc sentence.** The scales measure what a
+  running system does, and a comment neither occurs nor is detected.
+  One that says something untrue about the code is corrected in the
+  change that found it, with no row; imprecise wording stays as it is.
+  Text a user acts on (a message, a tutorial step, a catalogue entry)
+  is a tool's answer and is scored as one.
+
 FMEA's three axes:
 
 | Axis | 5 | 4 | 3 | 2 | 1 |
@@ -34,6 +46,12 @@ FMEA's three axes:
 | **Severity** — the effect if it happens | silently breaks what the subsystem exists to guarantee | stuck until someone at the console fixes it | a wrong answer someone trusts: a verdict, or a doc or tool that leaves someone in a wrong state they believe is right | a wrong message; red where green was due | logging only |
 | **Occurrence** — what must go wrong | normal operation | one common fault: a crash, a restart, a failed reload | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or state only root can write found corrupted |
 | **Detection** — how it surfaces | silently | — | a wrong but plausible answer | — | loudly, naming the cause |
+
+Input an operator may write (a Caddyfile line, a path, a name) is not
+a fault. A finding it triggers scores occurrence 5 however unlikely
+the input, and detection carries it: a line dropped silently scores 5,
+one refused and named scores 1. How likely the input is stays out of
+the score, since scorers would each guess it differently.
 
 A hostile hotserve uid (T5 in `DESIGN-threat-model.md`) is scored by
 what it gains: an effect it could already have by other means scores
@@ -50,9 +68,8 @@ fix.
 | **Size** — what the fix adds to the code that runs | tightens lines already there: no new branch, state or file | one new branch, or about ten lines | a new state, lock or file, or more |
 | **Risk** — what the fix may break | the normal path behaves as before, and a new test proves the fix | anything between: the normal path changes under a test, new or existing, or it behaves as before with no new test proving the fix | the normal path changes, and no test covers it |
 
-A fix that changes no code that runs — prose, a comment — scores size
-1 and risk 2: no test can prove it, so it is made on the failure's
-score alone, and wording that misleads no one stays as it is.
+A fix to text a user acts on scores size 1, and risk 2 unless a test
+checks the text.
 
 ## 4. Apply the rule
 
@@ -64,8 +81,9 @@ In order:
    single-fault criterion of safety engineering.
 3. Anything else is fixed if severity × occurrence × detection is 20
    or more, or if its fix scores 1 for both size and risk: a fix that
-   cheap and that safe is made whatever the finding scores. Otherwise
-   the finding is **accepted**.
+   cheap and that safe is made whatever the finding scores. Severity 1
+   never clears by its product (1 × 5 × 5 is 25): only the cheap fix
+   reaches it. Otherwise the finding is **accepted**.
 4. **Stop** when the next guard costs more than it buys (ALARP): a fix
    that adds a branch for a multi-fault case is itself a finding to
    weigh, since every branch is one more state the next fault can
@@ -75,14 +93,18 @@ In order:
 
 ## 5. Report and record
 
+- **Score before building.** An item from an issue's backlog is scored
+  before a branch is cut. One that scores accept is closed on the
+  issue with its scores, and recorded as below. A measurement a fix
+  would rest on, such as memory or time, is taken before the fix.
 - Give each finding one line: S, O, D, their product, size, risk, and
   the outcome — **fix**, **accept**, or **owed** (to be fixed, but not
   in this change).
 - **Fix:** keep the fix as small as its score, and add the test that
   proves it.
 - **Accept:** add a row to the subsystem's accepted-residuals table,
-  with its scores and why. Reply on the review thread with the same
-  scores.
+  with its scores and why. Severity 1 gets no row: the change's triage
+  table holds it. Reply on the review thread with the same scores.
 - **Owed:** add it to the subsystem's owed fixes, with its scores and
   where the fix will land.
 - When asking a reviewer such as Copilot, state the bar in the PR

@@ -6,11 +6,10 @@ promises. History lives in git (`git log -- box/DESIGN-box.md`); the
 are for decisions still fresh or contested and get folded into the
 body once they settle.
 
-**Status: built, and released in v0.3.0** (History lists the PRs),
-**except secrets**: the "Secrets" section, and every step, row and
+**Status: built, and released**: the box channel in v0.3.0, and
+secrets in v0.3.1 (the "Secrets" section, and every step, row and
 message that names a secret, the box's key, an env file the box
-writes or the set, is the design box PRs 7b to 7f build, and the
-released box applies the Caddyfile alone. Normative: a change that
+writes or the set). History lists the PRs. Normative: a change that
 cannot hold a line here changes the line in the same PR, with the
 reason.
 
@@ -780,7 +779,7 @@ failure, and the rule. These are the box's examples for its scales:
 | Axis | 5 | 4 | 3 | 2 | 1 |
 |---|---|---|---|---|---|
 | **Severity** | installs bytes no listed signer signed, or advances the baseline wrongly (I6, I4) | the box wedged until the console | a wrong verdict the workflow trusts (green for a push that did not apply, or the reverse) | a wrong message; red where green was due | logging only |
-| **Occurrence** | normal operation | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
+| **Occurrence** | normal operation, or any line a signer may commit | one common fault: a crash, a failed reload, hotserve restarting | one rare fault: `EIO`, a full disk, a clock step | two independent faults | three or more, or root-only state (`txn.json`, `out/`, `applied.json`) corrupted |
 | **Detection** | silently | — | a wrong but plausible answer | — | red, with a journal line naming it |
 
 A hostile hotserve uid (T5) gains nothing, and so scores severity 1,
@@ -812,6 +811,7 @@ can do both by other means.
 | What a console put at an env file's name that is not root's own is not put back as it was by a rollback: a link reads as no file, so the push replaces it and the rollback removes the push's file; a file at another mode or owner gets its bytes back at 0640 `root:hotserve` | "Values and the env file" | 2 | 2 | 3 | 12; two independent faults (a console's own entry in root's directory, then a failed push), and the push is red and named |
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
 | A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4 (the triage skill): a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
+| `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the latest stable, or the one `HOTSERVE_VERSION` names), whose install step's line names it. `hotserve version` prints Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
 
 ## Admission
 
@@ -2246,3 +2246,7 @@ Dated one-liners; the full text of each is in git.
   (`.claude/skills/triage/SKILL.md`), for every subsystem, and scores
   the fix as well as the failure. "Triage: which failures to defend"
   keeps the box's examples for the scales and its accepted residuals.
+- 2026-10-15 — Triage scores only failures: features and comments are
+  not scored, a line a signer may commit is occurrence 5, severity 1
+  clears only by a cheap fix and gets no residual row, and an issue's
+  item is scored before a branch is cut.

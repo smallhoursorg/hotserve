@@ -506,8 +506,8 @@ not a plan.
 The second authenticated entry point, and the only one whose outcome
 is a root-owned file. [box/DESIGN-box.md](box/DESIGN-box.md) is
 authoritative for its behaviour; this section places it. Status:
-released in v0.3.0; the secrets it carries (below) are built, and
-not yet in a release. On a box set up from the
+released in v0.3.0, and the secrets it carries (below) in v0.3.1.
+On a box set up from the
 template (`examples/box`; docs/first-deploy.md, step 3) root writes
 the file once, with `hotserve init`, and the config repository's
 signed pushes write it after that. A box with no `box` block has no

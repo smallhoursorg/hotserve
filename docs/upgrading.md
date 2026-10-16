@@ -7,7 +7,7 @@ upgrade. Everything on this page runs as root on the box
 ```sh
 # from the release page: the .deb for your architecture, and checksums.txt
 cd /var/local/hotserve              # next to the release you are upgrading from
-v=0.3.0                             # the version in the .deb's file name
+v=0.3.1                             # the version in the .deb's file name
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 sha256sum -c --ignore-missing checksums.txt
 apt install ./hotserve_${v}_${arch}.deb

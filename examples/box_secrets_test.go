@@ -1122,7 +1122,8 @@ func TestBoxCheckSecrets(t *testing.T) {
 	if err := os.WriteFile(old, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if out, code := r.run("check", "HOTSERVE="+old); code != 1 || !strings.Contains(out, "does not read secrets") {
+	tooOld := "deploy.example.com/Caddyfile: deploy.example.com/secrets holds values, and this hotserve does not read secrets: check with a release that does (the workflow takes the latest stable release, or the one its HOTSERVE_VERSION variable names)\n"
+	if out, code := r.run("check", "HOTSERVE="+old); code != 1 || !strings.Contains(out, tooOld) {
 		t.Fatalf("an old hotserve: exit %d\n%s", code, out)
 	}
 }
