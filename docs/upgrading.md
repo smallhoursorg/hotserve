@@ -14,10 +14,15 @@ v=${v##*/v}                         # the latest release's tag, without the v
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 cd /var/local/hotserve              # next to the release you are upgrading from
-curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-apt install ./hotserve_${v}_${arch}.deb
+curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt" &&
+  sha256sum -c --ignore-missing checksums.txt &&
+  apt install ./hotserve_${v}_${arch}.deb
 ```
+
+The `&&`s stop the block at the first step that fails. Without them, a
+`checksums.txt` that did not download would leave the last release's
+in place, which checks the old `.deb`, passes, and lets the new one
+install unchecked.
 
 <details>
 <summary><b>To upgrade to a release candidate</b></summary>
@@ -32,9 +37,9 @@ arch=$(dpkg --print-architecture)   # amd64 or arm64
 deb=hotserve_$(echo "$v" | tr - .)_${arch}.deb
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 cd /var/local/hotserve              # next to the release you are upgrading from
-curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-apt install "./$deb"
+curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt" &&
+  sha256sum -c --ignore-missing checksums.txt &&
+  apt install "./$deb"
 ```
 
 The box's repository then needs its Actions variable
