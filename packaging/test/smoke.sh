@@ -1248,6 +1248,22 @@ umount /tmp/real-var/tree/work
 rm -rf /tmp/real-var /tmp/link-var
 echo "a mount under a tree reached through a symlinked ancestor: mounted() saw it"
 
+# A physical path the mount table escapes (a space is written \040):
+# the comparison cannot see a mount under it, so the function fails
+# closed and says mounted whether or not anything is.
+mkdir -p "/tmp/real var/tree/work"
+ln -sfn "/tmp/real var" /tmp/link-spaced
+mount -t tmpfs -o size=1m smoke "/tmp/real var/tree/work" || die "could not mount a tmpfs for the escaped-path case"
+if (. /tmp/mounted.sh && mounted /tmp/link-spaced/tree); then :; else
+	die "mounted() missed a tmpfs under a tree whose physical path holds a space (written \\040 in the mount table)"
+fi
+umount "/tmp/real var/tree/work"
+if (. /tmp/mounted.sh && mounted /tmp/link-spaced/tree); then :; else
+	die "mounted() did not fail closed on a physical path holding a space"
+fi
+rm -rf "/tmp/real var" /tmp/link-spaced
+echo "a physical path the mount table escapes: mounted() fails closed, mount or not"
+
 # A scan that fails (awk exiting 2 with no answer) must count as
 # mounted: the tree is kept and named, not removed.
 mkdir -p /tmp/fakebin "$B/in"

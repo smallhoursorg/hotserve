@@ -62,12 +62,15 @@ box=/var/lib/hotserve-box
 # a mount point by its physical path, so a directory reached through a
 # symlinked ancestor (/var -> /srv/var) is looked up under both names.
 # Fail closed: a table that cannot be read or resolved, or a scan that
-# does not end with a plain yes or no, counts as mounted. The two paths
-# hold no character the table escapes (space, tab, newline, backslash).
+# does not end with a plain yes or no, counts as mounted. So does a
+# physical path holding a character the table escapes (space, tab,
+# newline, backslash: /var -> "/srv/var data" is written \040 there),
+# which the comparison below would miss; the literal path holds none.
 mounted() {
 	[ -r /proc/self/mountinfo ] || return 0
 	real=$(readlink -f -- "$1" 2>/dev/null) || return 0
 	[ -n "$real" ] || return 0
+	case $real in *[[:space:]\\]*) return 0 ;; esac
 	found=$(awk -v d="$1" -v r="$real" \
 		'$5 == d || index($5, d "/") == 1 || $5 == r || index($5, r "/") == 1 { f = 1 } END { print (f ? "yes" : "no") }' \
 		/proc/self/mountinfo 2>/dev/null) || found=
