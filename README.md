@@ -209,6 +209,7 @@ make lint vet tidy     # golangci-lint (gofmt-gated), go vet, go mod tidy
 make tidy-check        # fails if go mod tidy would change a module's go.mod/go.sum; CI runs it on every PR
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
+make usage             # the public ledger of what building this costs — Claude Code sessions, Actions minutes, Copilot credits — usage/*.csv rendered to docs/footprint.md
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make fuzz-list         # what fuzz will run (discovered per module, not listed by hand); CI runs it on every PR
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions; CI runs it per merge to main and weekly

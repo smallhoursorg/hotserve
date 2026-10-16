@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan build package clean-debs install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan usage build package clean-debs install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -148,6 +148,18 @@ vulncheck:
 # watches it), so local and CI can never drift.
 secretscan:
 	$(COMPOSE) run --rm gitleaks detect --source /src --redact -v
+
+# The public ledger of what building hotserve costs: Claude Code
+# sessions, Actions runner minutes and Copilot credits as month-level
+# facts in usage/*.csv, rendered to docs/footprint.md. Reads the
+# transcripts under ~/.claude/projects (the compose service mounts them
+# read-only) and the Actions API with your gh login. Run it monthly —
+# GitHub keeps run records for 90 days — fill in usage/copilot.csv from
+# GitHub billing, and commit what changed.
+USAGE_REPO ?= smallhoursorg/hotserve
+usage:
+	GH_TOKEN=$$(gh auth token) $(COMPOSE) run --rm usage \
+		python3 -I .github/scripts/usage.py collect-claude collect-actions render --repo $(USAGE_REPO)
 
 # Cross-compiles the product binary for the release targets. GOFLAGS is
 # cleared so -buildvcs is back on: caddycmd stamps the version from the
