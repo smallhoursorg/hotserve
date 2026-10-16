@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"testing"
+
+	"github.com/caddyserver/caddy/v2"
 )
 
 func FuzzMatchClaims(f *testing.F) {
@@ -96,6 +98,31 @@ func FuzzMatchClaims(f *testing.F) {
 		}
 		if err := matchClaims(map[string]string{pinName: pinValue, absent: ""}, got); err == nil {
 			t.Fatalf("matchClaims matched with pin %q absent from %s", absent, raw)
+		}
+	})
+}
+
+// FuzzCaddyStripsKey holds caddyStripsKey to Caddy's real
+// RemoveMetaFields: the strip changes a marshalled claims map exactly
+// when its key is one caddyStripsKey refuses, whatever the value. A key
+// the strip touches but the parser let through is a constraint dropped
+// unseen; one refused that the strip leaves alone is a claim that could
+// have been pinned. The value is fuzzed too, so a value that triggers
+// the strip would show the parser checking the wrong thing.
+func FuzzCaddyStripsKey(f *testing.F) {
+	for _, s := range [][2]string{
+		{"@id", "v"}, {`x"@id`, "v"}, {`"@id`, "v"}, {"@idx", "v"}, {"x@id", "v"},
+		{"@ID", "v"}, {`@id"`, "v"}, {"sub", "@id"}, {"sub", `"@id":"x"`}, {"sub", `x"@id`},
+	} {
+		f.Add(s[0], s[1])
+	}
+	f.Fuzz(func(t *testing.T, key, value string) {
+		raw, err := json.Marshal(TrustConfig{Claims: map[string]string{key: value}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stripped := !bytes.Equal(caddy.RemoveMetaFields(raw), raw); stripped != caddyStripsKey(key) {
+			t.Fatalf("claim %q=%q in %s: the strip changes it %t, caddyStripsKey says %t", key, value, raw, stripped, caddyStripsKey(key))
 		}
 	})
 }

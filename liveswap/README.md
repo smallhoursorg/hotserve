@@ -684,7 +684,9 @@ Presets:
 Sub-directives: `audience` (required for OIDC — never trust an
 unaudienced token; for `local`, the name of this box, see below),
 `claim <name> <value>` (exact-match, repeatable — pin `repository`,
-`ref`, `environment`, etc.), `subject` (sugar for `claim sub`),
+`ref`, `environment`, etc.; a claim named `@id` is refused, because
+Caddy deletes that key from the config before hotserve reads it),
+`subject` (sugar for `claim sub`),
 `issuer` (oidc/gitlab), `public_key` (local).
 
 The OIDC presets also **require an identity claim** — one of
