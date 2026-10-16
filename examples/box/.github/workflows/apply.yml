@@ -1,6 +1,7 @@
 # Checks every box's Caddyfile on every push and pull request, with the
-# latest stable hotserve release; on a push to main, also sends HEAD to
-# each box (bin/apply). A box applies it only if this workflow's token names
+# latest stable hotserve release (or the one each box's HOTSERVE_VERSION
+# file names); on a push to main, also sends HEAD to each box
+# (bin/apply). A box applies it only if this workflow's token names
 # this repository's main, and a key the box lists signed every commit
 # since the one it runs. Nothing secret is stored here.
 name: apply
@@ -11,8 +12,10 @@ permissions:
 
 env:
   # Empty: the latest stable release (bin/install-hotserve). The
-  # repository variable pins one instead (0.3.0, 0.3.0-rc1), for a box
-  # held on an older release or a prerelease being tried.
+  # repository variable pins one instead (0.3.0, 0.3.0-rc1), for every
+  # box at once; a box on a release of its own has a HOTSERVE_VERSION
+  # file beside its Caddyfile instead (README.md, "A box on another
+  # release"), and the file wins for that box.
   HOTSERVE_VERSION: ${{ vars.HOTSERVE_VERSION }}
 
 jobs:
@@ -22,7 +25,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install hotserve (the release's bare binary)
+      - name: Install hotserve (each release the boxes need, bare binaries)
         run: bin/install-hotserve
       - run: make check
 
@@ -47,7 +50,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       # bin/apply needs it only to read each box's address from its
-      # Caddyfile, which any release with `box` reads alike.
+      # Caddyfile, which any release with `box` reads alike: the default
+      # alone, so that one box's HOTSERVE_VERSION file cannot hold the
+      # others' pushes back.
       - name: Install hotserve (the release's bare binary)
-        run: bin/install-hotserve
+        run: bin/install-hotserve default
       - run: bin/apply

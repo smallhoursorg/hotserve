@@ -1,9 +1,12 @@
 #!/bin/sh
 # Checks that every box in this repository is one hotserve will take,
 # with the hotserve on PATH (bin/install-hotserve puts the latest stable
-# release there in the workflow; there is no macOS build, so on a Mac the
-# workflow is where this runs). It reads the files as they are in the
-# checkout.
+# release there in the workflow, or the one its HOTSERVE_VERSION variable
+# names; there is no macOS build, so on a Mac the workflow is where this
+# runs). A box with a HOTSERVE_VERSION file beside its Caddyfile — one
+# line, 0.3.1 or v0.3.1-rc1: the release that box runs — is checked
+# with hotserve-<version> instead, which bin/install-hotserve installs
+# for each such file. It reads the files as they are in the checkout.
 #
 # A box is a directory at the top of the repository named for the box's
 # deploy host, holding its whole config as Caddyfile:
@@ -23,20 +26,28 @@
 #     them, within the box's caps (`hotserve box describe` again: it
 #     reads each value's length from its ciphertext, no key needed, and
 #     warns at 75% of a cap), with a recipients file that names the keys
-#     they are encrypted to.
+#     they are encrypted to;
+#   - a box's HOTSERVE_VERSION file, when it has one, names a release
+#     (bin/install-hotserve's rule: an empty file is refused, never read
+#     as the latest), and that release's binary is on PATH. The file is
+#     this repository's alone: bin/apply never sends it to the box.
 #
-# It prints a line for each box, the secrets counted when it has any:
+# It prints a line for each box, the secrets counted when it has any,
+# and the binary named when the box's file picked one:
 #
 #   deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer)
 #   deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer, 2 secrets)
+#   deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer), checked with hotserve-0.3.1-rc1
 #
 # and a warning for what the box takes but is near a cap, or would trip
 # up a checkout on a Mac's case-insensitive disk.
 #
-#   HOTSERVE  the hotserve command (default: hotserve)
+#   HOTSERVE  the hotserve command (default: hotserve); a box whose file
+#             names a release is checked with $HOTSERVE-<version>
 set -eu
 cd "$(dirname "$0")/.."
 HOTSERVE=${HOTSERVE:-hotserve}
+default=$HOTSERVE
 actions=${GITHUB_ACTIONS:-}
 
 tmpd=$(mktemp -d)
@@ -73,6 +84,34 @@ for f in $files; do
 	fi
 	checked=$((checked + 1))
 	dir=${f%/Caddyfile}
+	# The box's binary: $HOTSERVE, or $HOTSERVE-<version> when the box's
+	# HOTSERVE_VERSION file names one. The shape is bin/install-hotserve's
+	# `release`: nothing outside the set (a newline included) before the
+	# grep, which matches per line; the v comes off after the check, so a
+	# file of just "v" is refused. $(...) drops the line's newline. A
+	# dangling link is a file too (-L), one that cannot be read.
+	HOTSERVE=$default
+	vf=$dir/HOTSERVE_VERSION
+	picked=
+	if [ -e "$vf" ] || [ -L "$vf" ]; then
+		v=$(cat "$vf" 2>/dev/null) || { bad "$f: $vf cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1"; continue; }
+		case $v in
+		'' | *[!0-9A-Za-z.-]*) ok= ;;
+		*) ok=$(printf '%s\n' "$v" | grep -Ex 'v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?') || ok= ;;
+		esac
+		if [ -z "$ok" ]; then
+			hint=
+			[ -n "$v" ] || hint="; an empty file pins nothing: name the release this box runs, or delete the file"
+			bad "$f: $vf does not name a hotserve release: '$v' is not a release's version, 0.3.1 or v0.3.1-rc1, on one line$hint"
+			continue
+		fi
+		HOTSERVE=$default-${v#v}
+		if ! command -v "$HOTSERVE" >/dev/null 2>&1; then
+			bad "$f: $vf names ${v#v}, and $HOTSERVE is not here to check it with: bin/install-hotserve installs one for each box's file (in the workflow; there is no macOS build), and says when a release has no build to install"
+			continue
+		fi
+		picked=", checked with $HOTSERVE"
+	fi
 	if ! "$HOTSERVE" box describe "$f" >"$tmpd/describe" 2>&1; then
 		hint=
 		grep -q 'has no signer' "$tmpd/describe" && hint=" (make signer adds yours)"
@@ -98,7 +137,11 @@ for f in $files; do
 	# release: `hotserve version` prints Caddy's.
 	values=$(find "$dir/secrets" -mindepth 2 -maxdepth 2 -name '[!.]*.age' 2>/dev/null | grep -c . || true)
 	if [ "$values" -gt 0 ] && [ "$secrets" = 0 ] && ! grep -q '^recipients ' "$tmpd/describe"; then
-		bad "$f: $dir/secrets holds values, and this hotserve does not read secrets: check with a release that does (the workflow takes the latest stable release, or the one its HOTSERVE_VERSION variable names)"
+		if [ -n "$picked" ]; then
+			bad "$f: $dir/secrets holds values, and $HOTSERVE, the release $vf names, does not read secrets: upgrade the box to a release that does and name that one in the file, or remove the values"
+		else
+			bad "$f: $dir/secrets holds values, and this hotserve does not read secrets: check with a release that does ($vf would name this box's; without it, the workflow takes the latest stable release, or the one its HOTSERVE_VERSION variable names)"
+		fi
 		continue
 	fi
 	if [ "$secrets" -gt 0 ] && ! grep -q '^recipients ' "$tmpd/describe"; then
@@ -127,7 +170,7 @@ for f in $files; do
 	[ "$signers" = 1 ] && s=signer || s=signers
 	sec=
 	[ "$secrets" = 0 ] || { [ "$secrets" = 1 ] && sec=", 1 secret" || sec=", $secrets secrets"; }
-	printf '%s → https://%s/ (%s %s, %s %s%s)\n' "$f" "$host" "$apps" "$a" "$signers" "$s" "$sec"
+	printf '%s → https://%s/ (%s %s, %s %s%s)%s\n' "$f" "$host" "$apps" "$a" "$signers" "$s" "$sec" "$picked"
 done
 # Every file deleted here, or none of them a box's: nothing was checked.
 [ "$checked" -gt 0 ] || bad "no box here: a box is <host>/Caddyfile at the top of the repository"

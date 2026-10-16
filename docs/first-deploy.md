@@ -93,7 +93,9 @@ systemctl enable --now hotserve
 The box's repository (step 3) then needs its Actions variable
 `HOTSERVE_VERSION` set to the same version, `0.3.0-rc2`: its workflow
 checks with the latest stable release unless told otherwise, and a
-release candidate is never that.
+release candidate is never that. (With more than one box, a
+`HOTSERVE_VERSION` file beside this box's Caddyfile pins this box
+alone: the template's README, "A box on another release".)
 
 </details>
 
