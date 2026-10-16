@@ -415,7 +415,7 @@ send() {
 	stree=$(git rev-parse -q --verify "$head:$dir/secrets" 2>/dev/null) || stree=
 	[ -z "$stree" ] || [ "$(git cat-file -t "$stree")" = tree ] || stree=
 	values=0
-	[ -z "$stree" ] || values=$(git ls-tree -r --name-only "$stree" | grep -c '^[^/]*/[^/.][^/]*\.age$' || true)
+	[ -z "$stree" ] || values=$(git -c core.quotePath=false ls-tree -r --name-only "$stree" | grep -c '^[^/]*/[^/.][^/]*\.age$' || true)
 	if [ "$values" -gt 0 ]; then
 		# The box decrypts with its own key, so the values must be
 		# encrypted to it: the first recipient (box/DESIGN-box.md, "The
@@ -554,7 +554,7 @@ if [ $# -gt 0 ]; then
 	boxes=$d/Caddyfile
 else
 	# A symlink is a blob too: found here, and named by send().
-	boxes=$(git ls-tree --name-only HEAD | while read -r d; do
+	boxes=$(git -c core.quotePath=false ls-tree --name-only HEAD | while read -r d; do
 		[ "$(git cat-file -t "HEAD:$d/Caddyfile" 2>/dev/null)" = blob ] && echo "$d/Caddyfile"
 	done || true)
 fi
