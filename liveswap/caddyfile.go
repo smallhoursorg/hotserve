@@ -167,8 +167,9 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			// every "@id" key from the JSON before decoding it
 			// (caddy.RemoveMetaFields): Validate never sees that one, and
 			// the app would start without it. A config written as JSON
-			// loses the key before any hotserve code runs; no check can
-			// catch that (owed: #251).
+			// loses the key before any hotserve code runs, which is why
+			// a JSON config is unsupported (README.md, "What hotserve is
+			// (and isn't)"; #251).
 			if !validEnvKey(key) {
 				return d.Errf("env key %q is not a valid environment variable name (must match %s)", key, envKeyRe)
 			}

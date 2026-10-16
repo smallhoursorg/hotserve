@@ -135,7 +135,10 @@ GitHub Actions with no stored secret.
 
 - **A server product, distributed like Caddy.** Same CLI, same
   Caddyfile, same admin API — `hotserve run`, `hotserve reload`,
-  `hotserve validate` all behave exactly as Caddy's do.
+  `hotserve validate` all behave exactly as Caddy's do. The config is
+  a Caddyfile, though: a JSON config (a `.json` file, or JSON posted
+  to the admin API) is unsupported, because Caddy deletes every
+  `"@id"` key from JSON before hotserve's checks can see it.
 - **Made for one cheap server.** Apps run as systemd units under
   hotserve's own user manager, reached over unix sockets; no container
   runtime anywhere. That's why there's deliberately no Docker image.
