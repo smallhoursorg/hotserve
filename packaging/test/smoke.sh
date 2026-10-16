@@ -115,7 +115,14 @@ runuser -u hotserve -- touch "${RECORD%/*}/smoke" 2>/dev/null \
 	&& die "the hotserve user can create files beside the record"
 echo "starter installed, no conffiles, the record root's alone"
 
-/usr/bin/hotserve version
+# A bug report quotes this line (SECURITY.md), so it names the release
+# ahead of the Caddy it was built with (the Makefile's GO_LDFLAGS). The
+# package carries the same release, with nfpm's "~" for a prerelease's
+# "-", which makes dpkg sort it before the release.
+want="v$(dpkg-query -W -f='${Version}' hotserve | tr '~' '-')"
+got=$(/usr/bin/hotserve version) || die "hotserve version failed"
+echo "$got"
+case "$got" in "$want "*) : ;; *) die "hotserve version printed '$got', want it to start with '$want ' (the package's release)" ;; esac
 for m in liveswap http.handlers.liveswap_webhook \
 	http.reverse_proxy.upstreams.liveswap http.handlers.hint_penaltybox \
 	http.handlers.cache storages.cache.otter; do
