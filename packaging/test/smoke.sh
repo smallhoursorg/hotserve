@@ -1228,5 +1228,40 @@ umount "$B/work"
 rm -rf "$B"
 echo "a mount under $B: postrm purge kept the tree whole, said so, exit 0"
 
+# A run of the applier under way holds root's lock for its whole run
+# and swaps the Caddyfile under it; preremove leaves a run alone. The
+# purge takes that lock first: it waits for a run to finish, then
+# removes the config and the tree; one that holds the lock past 30s
+# keeps both, named, and the script still exits 0. A flock on the lock
+# file stands in for the run, started and then seen held.
+hold_lock() { # <seconds>
+	mkdir -p "$B/in"
+	: >"$B/lock"
+	flock "$B/lock" sleep "$1" &
+	holder=$!
+	until ! flock -n "$B/lock" true 2>/dev/null; do sleep 0.1; done
+}
+cp /tmp/starter.prev "$CONFIG"
+hold_lock 4
+t0=$(date +%s)
+sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero while a run held the lock"; }
+t1=$(date +%s)
+wait "$holder" || true
+[ $((t1 - t0)) -ge 3 ] || die "postrm purge finished in $((t1 - t0))s with the lock held for 4s: it did not wait for the run"
+[ ! -e "$CONFIG" ] && [ ! -e "$B" ] || die "postrm purge waited for the lock but left $CONFIG or $B"
+echo "a run holding the lock for 4s: postrm purge waited $((t1 - t0))s, then removed the config and the tree"
+cp /tmp/starter.prev "$CONFIG"
+hold_lock 120
+t0=$(date +%s)
+sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero with the lock held past its wait"; }
+t1=$(date +%s)
+kill "$holder" 2>/dev/null || true
+[ $((t1 - t0)) -ge 29 ] || die "postrm purge gave up on the lock after $((t1 - t0))s, want about 30"
+[ -f "$CONFIG" ] && [ -d "$B/in" ] || die "postrm purge removed $CONFIG or $B although a run held the lock"
+grep -q "kept $CONFIG and $B: a run of the box applier holds $B/lock" /tmp/postrm.out \
+	|| die "postrm purge did not say it kept both for the run: $(cat /tmp/postrm.out)"
+rm -rf "$B" "$CONFIG"
+echo "a run holding the lock past 30s: postrm purge kept the config and the tree, said so, exit 0"
+
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

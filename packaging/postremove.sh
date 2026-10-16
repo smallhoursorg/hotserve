@@ -30,6 +30,18 @@
 #   where anything is mounted at or under it: an rm there would remove
 #   through the mount, so the tree is kept whole, and named.
 #
+# Both of those under root's lock, /var/lib/hotserve-box/lock: a run of
+# the applier holds it for its whole run and swaps the Caddyfile under
+# it (box/apply.go, lock), and preremove stops the path unit, not a run
+# under way (box/DESIGN-box.md, "The applier unit"), so a run could
+# otherwise put a Caddyfile back after this script removed it. The lock
+# is taken here before either removal and held through both, waiting
+# up to 30s for a run — one is seconds (validate, swap, reload), so the
+# wait covers many — and where it is still held, both are kept, named.
+# Nothing starts a new run by then: the path unit is stopped and the
+# program is gone. The lock file is opened only where it exists (a tree
+# no run has used has none) and never made here.
+#
 # Never: /var/lib/hotserve (Caddy's state: TLS certificates) and
 # /var/lib/liveswap (the deployed apps' releases and data) — root does
 # not delete what an app or an operator put there; dpkg removes either
@@ -75,9 +87,18 @@ purge)
 		deb-systemd-helper purge "$unit" >/dev/null || true
 		deb-systemd-helper unmask "$unit" >/dev/null || true
 	fi
+	# Root's lock, where a run could hold it (header). Read-only: flock
+	# needs no write, and the mode and owner of what a run made stay.
+	held=
+	if [ -f "$box/lock" ] && [ ! -L "$box/lock" ] && [ -r "$box/lock" ] && command -v flock >/dev/null 2>&1; then
+		exec 9<"$box/lock"
+		if flock -w 30 9; then held=yes; else held=no; fi
+	fi
+	if [ "$held" = no ]; then
+		echo "hotserve: kept $config and $box: a run of the box applier holds $box/lock and did not finish within 30s; once it has (journalctl -u hotserve-box-apply.service), remove both yourself" >&2
 	# The box's config: a regular file only. -f follows a symlink, so
 	# the link is ruled out first; whatever else stands there is kept.
-	if [ -L "$config" ]; then
+	elif [ -L "$config" ]; then
 		echo "hotserve: kept $config: a symlink, which this script never follows; remove it yourself" >&2
 	elif [ -f "$config" ]; then
 		rm -f "$config" || echo "hotserve: could not remove $config; remove it yourself" >&2
@@ -95,10 +116,13 @@ purge)
 	fi
 	# The starter's record.
 	rm -rf "$record_dir" || echo "hotserve: could not remove $record_dir; remove it yourself" >&2
-	# The box applier's exchange tree, whole — unless something is
-	# mounted at or under it. --one-file-system is for a mount made
-	# between that check and the rm: it is skipped, not removed through.
-	if [ -L "$box" ]; then
+	# The box applier's exchange tree, whole — unless a run holds the
+	# lock (said above) or something is mounted at or under it.
+	# --one-file-system is for a mount made between that check and the
+	# rm: it is skipped, not removed through.
+	if [ "$held" = no ]; then
+		:
+	elif [ -L "$box" ]; then
 		echo "hotserve: kept $box: a symlink, which this script never follows; remove it yourself" >&2
 	elif [ -d "$box" ]; then
 		if mounted "$box"; then

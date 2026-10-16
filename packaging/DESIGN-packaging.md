@@ -35,6 +35,7 @@ the scales:
 | A push that installs bytes identical to the starter postinstall last wrote is replaced by the next starter | packaging/postinstall.sh | 2 | 1 | 3 | 6; a starter has no `box` block, so no push reaches such a box anyway |
 | `apt purge` finds something mounted at or under `/var/lib/hotserve-box` (or cannot read `/proc/self/mountinfo`): the exchange tree is kept whole, so a purge and a reinstall come up on the old `applied.json` and record | packaging/postremove.sh (`mounted`) | 2 | 1 | 1 | 2; root's own mount in a directory the package owns; named on stderr with the remedy (unmount, then remove); the alternative, an rm through the mount, would remove what is not the package's |
 | `apt purge` finds a symlink, or anything but a regular file, at `/etc/hotserve/Caddyfile`: kept, so a reinstall comes up on what it points to | packaging/postremove.sh | 2 | 5 | 1 | 10; an operator's own path (not a fault, so occurrence 5 and detection carries it): named on stderr, and postinstall leaves a symlink alone too, so the box comes up on the file the operator chose |
+| `apt purge` while a run of the box applier holds root's lock for longer than the purge waits (30s; a run is seconds): the config and the exchange tree are both kept, so a reinstall comes up on them | packaging/postremove.sh (the lock) | 2 | 1 | 1 | 2; a run that long is a fault of its own (a disk that will not sync), and the purge names both paths and the journal to read; removing under a run would let it put a Caddyfile back after the purge (Copilot on #255, S3 O2 D5 = 30, fixed by taking the lock) |
 
 **Owed** (over the bar, not yet fixed): none.
 
@@ -59,6 +60,8 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-16 — The owed purge (scored 45) is paid by
   `packaging/postremove.sh` (PR #255): a purge removes the box's
   config, the starter's record and the box applier's exchange tree,
-  and masks the path unit on remove the dh_installsystemd way. Two
-  residuals of that script accepted; the key kept on purpose. The
+  and masks the path unit on remove the dh_installsystemd way, under
+  the applier's own lock so a run under way cannot put the Caddyfile
+  back. Three residuals of that script accepted; the key kept on
+  purpose. The
   `backup` branch folds its timers' handling into the same file.

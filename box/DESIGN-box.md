@@ -900,7 +900,7 @@ an empty cell means nobody, by design.
 | `…/out/.<id>.json.tmp` | 0640 | root:hotserve | applier | applier | — | applier (renamed over `<id>.json`, or removed on failure; recovery removes a crash's) |
 | `…/applied.json` | 0640 | root:hotserve | `init` | applier, `init`, `baseline` (all under `lock`) | handler (`GET /`), applier | — |
 | `…/.applied.json.tmp` | 0640 | root:hotserve (born in the setgid dir) | applier, `init`, `baseline` | applier, `init`, `baseline` | — | the writer (renamed over `applied.json`, or removed on failure); the applier's recovery removes a crash's |
-| `…/lock` | 0600 | root:hotserve (born in the setgid dir) | whichever of applier, `init`, `baseline` takes it first | — | applier, `init`, `baseline` (blocking `flock`) | — |
+| `…/lock` | 0600 | root:hotserve (born in the setgid dir) | whichever of applier, `init`, `baseline` takes it first | — | applier, `init`, `baseline` (blocking `flock`); postremove (`apt purge`: a `flock` waited for up to 30s, held through the removals) | — |
 | `/usr/share/hotserve/Caddyfile` | 0644 | root:root | package | package | postinstall | package |
 | `/var/lib/hotserve-package/` | 0700 | root:root | package | — | — | postremove (`apt purge`, whole) |
 | `/var/lib/hotserve-package/starter.sha256` (and its `.<pid>` temporary) | 0644 | root:root | postinstall | postinstall (by rename: after each starter it writes, and when `Caddyfile` already is the starter but the record does not say so) | postinstall | postinstall (the temporary: renamed over the record, or removed on failure; the next run removes a crash's) |
@@ -923,7 +923,10 @@ Notes that the table cannot hold:
 - `apt purge` is the one removal that is not a process of the design:
   `packaging/postremove.sh` removes the exchange tree whole, the
   record and `applied.json` with it, the box's `Caddyfile` (a regular
-  file only) and the starter's record, and keeps `/etc/hotserve/age/`,
+  file only) and the starter's record — both under `lock`, waited for
+  up to 30s, so a run under way cannot swap a Caddyfile in after the
+  removal; a run still holding it then keeps both, named — and keeps
+  `/etc/hotserve/age/`,
   `age.pub` and `secrets/`, naming them: the key is the one way to
   read the secrets the repository holds, and only the person purging
   knows whether that is over. A plain `apt remove` removes none of
