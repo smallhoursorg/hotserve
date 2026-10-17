@@ -74,6 +74,22 @@ func (d appDirs) release(version string) string {
 	return filepath.Join(d.releases, versionPathComponent(version))
 }
 
+// linkAt returns the first of the app dir and dirs (its fixed subdirs)
+// that is a link, dangling or not, or "" when none is. An app name is
+// one path element, so these are the only two levels below the root:
+// with a link at neither, the path reaches the directory it names
+// through whatever alias the root itself is — recordsDir's rule, read
+// off Lstat rather than by resolving, so a dangling link cannot pass
+// as the name it stands in for.
+func (d appDirs) linkAt(dirs ...string) string {
+	for _, p := range append([]string{d.app}, dirs...) {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return p
+		}
+	}
+	return ""
+}
+
 func (d appDirs) ensure() error {
 	// deploys/ is not here: the record store is optional, made on
 	// first use by recordsDir, and a failure there is a warning, not a
