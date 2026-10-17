@@ -44,8 +44,8 @@ curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt" &&
 ```
 
 A candidate sorts below the release it leads to, so if `apt` says it
-will downgrade hotserve, answer `n`: the box already runs that release
-or a later one.
+will downgrade hotserve, answer `n` and stop here: the box already runs
+that release or a later one.
 
 The box's repository then needs its Actions variable
 `HOTSERVE_VERSION` set to the same `<tag>`: its workflow

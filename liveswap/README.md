@@ -845,8 +845,10 @@ release, all through the same endpoint and the same auth:
 ```
 
 `auth_header` is optional and is sent verbatim as `Authorization` on
-the artifact download (dropped automatically on cross-host redirects,
-so GitHub's S3 redirect works). The URL must pass `artifact_allowlist`.
+the artifact download. A redirect carries it only while each hop's
+host is the URL's host or a subdomain of it; the first hop outside
+that domain drops it for good, so GitHub's S3 redirect works. The URL
+must pass `artifact_allowlist`.
 
 `sha256` is optional too: the tarball's digest, 64 hex characters
 (`sha256sum blog.tar.gz`). The box hashes the download as it streams

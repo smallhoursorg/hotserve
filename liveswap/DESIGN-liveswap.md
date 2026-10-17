@@ -146,11 +146,12 @@ Concept map from the Nomad-era stack:
   if that tick's probe does.
 - Any failure before the promote step MUST leave the old version
   serving, untouched. The webhook response MUST be synchronous and MUST
-  be a 5xx on failure (CI turns red; `curl --fail-with-body`). A client
-  that sends `Accept: application/x-ndjson` gets the deploy streamed: a
-  line per phase, then the single response's body with its code as
-  `http_status`. The status line is 200 once the first line has gone
-  out, so such a client reads the outcome from the last line.
+  carry a 5xx on failure: as its status (CI turns red; `curl
+  --fail-with-body`), or, for a client that sent `Accept:
+  application/x-ndjson`, as the last line's `http_status`. That client
+  gets the deploy streamed — a line per phase, then the single
+  response's body with its code as `http_status` — and the status line
+  is 200 once the first line has gone out.
 - The cutover MUST NOT trigger a config reload; it is an atomic value
   swap read per-request by the upstream source.
 - After cutover the pipeline MUST wait `drain`, then SIGTERM the old

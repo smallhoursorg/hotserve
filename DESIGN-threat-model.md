@@ -220,8 +220,8 @@ Properties that matter to the model:
   signature check, comparable to the TLS handshake the request already
   paid; against an OIDC source, a well-formed token that fails the
   signature check also costs a refetch of the issuer's JWKS, so a
-  client sending forged tokens drives outbound fetches from the box at
-  its own request rate (owed: #296). One limiter for the process, not per handler, so a
+  client sending forged tokens keeps the box fetching from the issuer,
+  one fetch in flight per source at a time (owed: #296). One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413
   (`maxPayloadBytes`, enforced in `Handler.deployURL`,
@@ -930,7 +930,9 @@ grant.
 **The property set**, on every unit — `unitProperties` renders the
 lifecycle properties and appends `sandboxProperties` for the rest, and
 `userManagerClient.StartTransientUnit` adds `LimitNOFILE=`
-(liveswap/systemd_dbus.go):
+(liveswap/systemd_dbus.go). The capability probe's unit (below) has
+no `BindPaths=` and no `ExecStopPost=`: it binds nothing of an app's
+and has no socket.
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
   `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app
