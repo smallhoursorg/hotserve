@@ -47,8 +47,9 @@
 # In GitHub Actions the same output is also dressed for the job page:
 # the request's output in a collapsible group, a failure as an error
 # annotation naming the phase and the cause, and one line in the job
-# summary. Nothing else is sent or printed; a run from a laptop sees
-# none of it.
+# summary. A release the box refuses as built for another architecture
+# is followed by the repository variable that picks the runner. Nothing
+# else is sent or printed; a run from a laptop sees none of it.
 set -eu
 
 # The box's version alphabet (liveswap/names.go), checked for a deploy's
@@ -262,6 +263,13 @@ finish() { # <what>: dresses the outcome, exits on failure
 		case $why in 'invalid or missing deploy token'*) hint=$(refused) ;; esac
 	fi
 	[ -z "$hint" ] || printf '%s\n' "$hint"
+	# The box's pre-flight names the runner a release for its
+	# architecture is built on (liveswap/elf.go); the workflow takes its
+	# runner from a repository variable, which the box cannot know of.
+	if [ -n "$actions" ] && [ "$code" = 422 ]; then
+		runner=$(printf '%s' "$why" | sed -n 's/.*(runs-on: \([A-Za-z0-9._-]*\)).*/\1/p')
+		[ -z "$runner" ] || echo "The workflow's runner is the repository variable HOTSERVE_RUNS_ON: gh variable set HOTSERVE_RUNS_ON -R ${GITHUB_REPOSITORY:-<owner/repo>} --body $runner (or Settings → Secrets and variables → Actions → Variables), then deploy again."
+	fi
 	[ -n "$actions" ] && printf '::error title=%s::%s\n' "$(prop "hotserve: $what failed")" "$(msg "${phase:+in $phase: }${why:-see the response above}${hint:+; the log says what the box must trust}")"
 	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
 		printf '**hotserve:** %s failed%s, %s\n\n%s\n\n' "$what" "${phase:+ in \`$phase\`}" "$took" "${why:-see the log}" >>"$GITHUB_STEP_SUMMARY"

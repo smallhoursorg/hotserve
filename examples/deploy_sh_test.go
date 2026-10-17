@@ -30,8 +30,10 @@ import (
 // front of the box answers: a 2xx that is not a completed deploy;
 // "refused" is the box's 401, the same flat sentence whatever the
 // reason (liveswap/handler.go pins it); "refused-elsewhere" is a 401
-// from something that is not the box. The stand-in also mints the
-// run's OIDC token at /token, the way Actions does.
+// from something that is not the box; "wrongarch" streams the 422 the
+// box's pre-flight gives a release built for another architecture
+// (liveswap/elf.go words it). The stand-in also mints the run's OIDC
+// token at /token, the way Actions does.
 func box(t *testing.T, mode string) *httptest.Server {
 	t.Helper()
 	status := map[string]any{"app": "demo", "current_version": "v1", "running": true, "last_deploy": map[string]any{"version": "v1", "status": "succeeded"}}
@@ -57,6 +59,11 @@ func box(t *testing.T, mode string) *httptest.Server {
 			single(w, 500, map[string]any{"error": "health gate: boom", "status": status})
 		case "accepted":
 			w.WriteHeader(http.StatusAccepted)
+		case "wrongarch":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"at":"t","event":"phase","phase":"preparing"}` + "\n" +
+				`{"error":"pre-flight: this box is amd64 and ./server is an AArch64 (arm64) executable: build on a runner of the box's architecture (runs-on: ubuntu-24.04)","event":"done","http_status":422}` + "\n"))
 		case "redirect":
 			http.Redirect(w, r, "https://elsewhere.test/demo", http.StatusMovedPermanently)
 		case "truncated":
@@ -282,6 +289,30 @@ func TestDeployShSaysWhatARefusedRunMustBeTrustedFor(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "claim repository  org/blog") {
 		t.Errorf("job summary lacks the checklist:\n%s", got)
+	}
+}
+
+// A release built for another architecture is refused with the runner
+// to build on, which the box words without knowing the workflow; in
+// Actions the run adds the repository variable that picks the runner
+// and the command that sets it. A laptop deploy has no workflow, and
+// gets no such line.
+func TestDeployShNamesTheRunnerVariableForAWrongArchitecture(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Fatal("deploy.sh needs curl; install it to run this test")
+	}
+	srv := box(t, "wrongarch")
+	defer srv.Close()
+	out, code := deploySh(t, srv,
+		"GITHUB_ACTIONS=true", "GITHUB_REPOSITORY=org/blog", "GITHUB_REF=refs/heads/main",
+		"ACTIONS_ID_TOKEN_REQUEST_URL="+srv.URL+"/token?api-version=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=run",
+		"HOTSERVE_TOKEN=")
+	if code != 1 || !strings.Contains(out, "gh variable set HOTSERVE_RUNS_ON -R org/blog --body ubuntu-24.04") {
+		t.Fatalf("in Actions: exit %d (want 1), and the output should name the variable and its value:\n%s", code, out)
+	}
+	out, code = deploySh(t, srv, "HOTSERVE_TOKEN=x", "GITHUB_ACTIONS=", "ACTIONS_ID_TOKEN_REQUEST_URL=")
+	if code != 1 || !strings.Contains(out, "(runs-on: ubuntu-24.04)") || strings.Contains(out, "HOTSERVE_RUNS_ON") {
+		t.Fatalf("from a laptop: exit %d (want 1), and the box's refusal without the workflow's variable:\n%s", code, out)
 	}
 }
 
