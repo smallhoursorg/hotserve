@@ -402,12 +402,10 @@ func probeSandboxSpec() *sandboxSpec {
 func sandboxProbeCommand() []string {
 	// The echo lands in the journal under the probe unit's identifier
 	// (hotserve-sandbox-probe), so a refused host can be diagnosed
-	// from `journalctl -t hotserve-sandbox-probe`. systemd applies its
-	// own escaping to ExecStart arguments before the shell sees them:
-	// "$$" becomes "$" (systemd.service, "Command lines"), so the
-	// shell's own pid is spelled "$$$$" here; "$n" inside a word is
-	// left alone.
-	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; echo "sandbox probe: uid_map range $n, pid $$$$"; [ "$n" != 4294967295 ] && [ "$$$$" = 1 ]`}
+	// from `journalctl -t hotserve-sandbox-probe`. The argv reaches the
+	// shell byte for byte, as every unit's command does (no-env-expand,
+	// see unitProperties), so the script is spelled as a shell reads it.
+	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; echo "sandbox probe: uid_map range $n, pid $$"; [ "$n" != 4294967295 ] && [ "$$" = 1 ]`}
 }
 
 // sandboxProbeTimeout bounds one probe unit: a shell that exits at

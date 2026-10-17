@@ -226,9 +226,10 @@ Bun: `Bun.serve({ unix: process.env.SOCKET, fetch })`. Hono on Node:
 -b unix://{socket}`. Rust: axum/hyper on a `tokio::net::UnixListener`.
 Where the path goes on the command line, as in those three, write the
 `{socket}` placeholder (see [Placeholders](#placeholders)) in
-`command`, not `$SOCKET`: `command` runs without a shell, and systemd
-expands a bare `$SOCKET` only as a whole argument, never inside one
-like `unix:$SOCKET`.
+`command`, not `$SOCKET`: `command` and `pre_start` run without a
+shell and without systemd's `$VAR` substitution, so every word reaches
+the app as written and `$SOCKET` arrives as those seven characters. A
+command that needs a variable's value reads it from its environment.
 
 Framework CLIs that only bind TCP (`next start`, Astro's node adapter)
 need a small custom server that calls the framework's request handler

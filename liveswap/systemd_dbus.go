@@ -266,6 +266,15 @@ func dialPrivate(socket string) (*godbus.Conn, net.Conn, error) {
 // means the whole tree), NoNewPrivileges (no setuid escalation),
 // LimitCORE=0 on both limits (no core dump), and both output streams
 // to the journal under the app's identifier.
+//
+// The command goes through ExecStartEx with no-env-expand, never the
+// plain ExecStart: that one carries no flags, and through it systemd
+// substitutes the unit's environment into every argv word at exec
+// time ("$VAR" word-splits, "$$" becomes "$", a word naming an unset
+// variable leaves argv). With the flag the argv execs byte for byte,
+// as no shell is in the way either — the unit-file spelling is a ":"
+// before the path. The manager still reports it as ExecStart, which
+// is what propExecStart reads back.
 func unitProperties(u unitSpec) []sddbus.Property {
 	typ := "simple"
 	if u.Oneshot {
@@ -284,7 +293,9 @@ func unitProperties(u unitSpec) []sddbus.Property {
 	props := []sddbus.Property{
 		sddbus.PropDescription(u.Description),
 		sddbus.PropType(typ),
-		sddbus.PropExecStart(u.ExecStart, false),
+		{Name: "ExecStartEx", Value: godbus.MakeVariant([]execCommandEx{
+			{Path: u.ExecStart[0], Args: u.ExecStart, Flags: []string{"no-env-expand"}},
+		})},
 		{Name: "WorkingDirectory", Value: godbus.MakeVariant(u.WorkingDirectory)},
 		{Name: "Environment", Value: godbus.MakeVariant(env)},
 		{Name: "Restart", Value: godbus.MakeVariant("no")},
@@ -322,6 +333,16 @@ type execCommand struct {
 	Path          string
 	Args          []string
 	IgnoreFailure bool
+}
+
+// execCommandEx is the D-Bus shape of one Exec*Ex= entry, "(sasas)":
+// the binary, its argv, and flag names in place of the bool
+// ("ignore-failure", "no-env-expand", ...; systemd ≥ 245, and the
+// package's floor is 257).
+type execCommandEx struct {
+	Path  string
+	Args  []string
+	Flags []string
 }
 
 // D-Bus shapes of the sandbox properties, as systemd's own
