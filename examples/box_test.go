@@ -1094,7 +1094,8 @@ func TestBoxApply(t *testing.T) {
 		if g.box.seen().mints < 3 {
 			t.Errorf("%d tokens for a GET, a POST and a poll", g.box.seen().mints)
 		}
-		if b, _ := os.ReadFile(summary); !strings.Contains(string(b), "**deploy.example.com:** "+head[:7]+" applied") {
+		// The summary says what the log says happened, names in backticks.
+		if b, _ := os.ReadFile(summary); !strings.Contains(string(b), "**deploy.example.com:** "+head[:7]+" applied\n- loaded; running apps are not restarted; apps `example`\n") {
 			t.Errorf("the job summary:\n%s", b)
 		}
 		// A checkout that is not the run's commit: its token would name another.
@@ -1121,7 +1122,8 @@ func TestBoxApply(t *testing.T) {
 		}
 		g.write(boxFile, strings.Replace(g.read(boxFile), "# env_file /etc/hotserve/secrets/example.env", "env_file /etc/hotserve/secrets/example.env", 1))
 		head := g.commit("example: DATABASE_URL")
-		out, code := g.apply()
+		summary := filepath.Join(t.TempDir(), "summary")
+		out, code := g.apply("GITHUB_STEP_SUMMARY=" + summary)
 		for _, want := range []string{
 			"apply: deploy.example.com secrets: example: added DATABASE_URL\n",
 			"deploy.example.com at " + head[:7] + ": loaded; running apps are not restarted; apps example\n",
@@ -1134,6 +1136,15 @@ func TestBoxApply(t *testing.T) {
 		if code != 0 || g.box.seen().baseline != head {
 			t.Fatalf("exit %d, baseline %s\n%s", code, g.box.seen().baseline, out)
 		}
+		// The job summary has the same lines, names in backticks (an _
+		// would turn Markdown italic), never a value.
+		if b, _ := os.ReadFile(summary); !strings.Contains(string(b), "**deploy.example.com:** "+head[:7]+" applied\n"+
+			"- secrets: `example`: added `DATABASE_URL`\n"+
+			"- loaded; running apps are not restarted; apps `example`\n"+
+			"- `example` reads its secrets at its next launch; a deploy of a new version launches it now\n") ||
+			strings.Contains(string(b), "postgres://") {
+			t.Errorf("the job summary:\n%s", b)
+		}
 
 		// Secrets alone: a value changed and one added in one push, the
 		// added one a copy of the other's file, so one blob, which the
@@ -1144,10 +1155,15 @@ func TestBoxApply(t *testing.T) {
 		}
 		g.write("deploy.example.com/secrets/example/COPY.age", g.read(db))
 		head = g.commit("two")
-		out, code = g.apply()
+		summary = filepath.Join(t.TempDir(), "summary")
+		out, code = g.apply("GITHUB_STEP_SUMMARY=" + summary)
 		if code != 0 || !strings.Contains(out, "apply: deploy.example.com secrets: example: added COPY; changed DATABASE_URL\n") ||
 			!strings.Contains(out, "deploy.example.com at "+head[:7]+": secrets updated; the Caddyfile is unchanged, nothing reloaded; apps example\n") {
 			t.Fatalf("secrets alone: exit %d\n%s", code, out)
+		}
+		if b, _ := os.ReadFile(summary); !strings.Contains(string(b), "- secrets: `example`: added `COPY`; changed `DATABASE_URL`\n"+
+			"- secrets updated; the Caddyfile is unchanged, nothing reloaded; apps `example`\n") {
+			t.Errorf("the job summary, secrets alone:\n%s", b)
 		}
 		// A recipients file written on Windows reads as age reads it.
 		g.write(recipientsFile, strings.ReplaceAll(g.read(recipientsFile), "\n", "\r\n"))
