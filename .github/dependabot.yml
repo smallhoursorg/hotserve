@@ -68,9 +68,9 @@ updates:
         patterns: ["*"]
 
   # Image pins in docker-compose.yml (golang toolchain, golangci-lint,
-  # nfpm, curl). If your GitHub instance predates docker-compose
-  # support in Dependabot, delete this block and bump those four pins
-  # by hand now and then.
+  # gitleaks, nfpm, python, curl). If your GitHub instance predates
+  # docker-compose support in Dependabot, delete this block and bump
+  # those pins by hand now and then.
   - package-ecosystem: docker-compose
     directory: "/"
     schedule:

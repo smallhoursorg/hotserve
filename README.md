@@ -214,6 +214,8 @@ make lint vet tidy     # golangci-lint (gofmt-gated), go vet, go mod tidy
 make tidy-check        # fails if go mod tidy would change a module's go.mod/go.sum; CI runs it on every PR
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks secret scan: full history, or the working tree in a git worktree (same image as the CI gate)
+make usage             # what building this costs (Claude Code, Actions minutes, Copilot) → usage/*.csv + docs/footprint.md; needs gh auth login
+make usage-check       # usage.py's tests, then fails if docs/footprint.md no longer matches usage/*.csv; CI runs it on every PR
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make fuzz-list         # what fuzz will run (discovered per module, not listed by hand); CI runs it on every PR
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions; CI runs it per merge to main and weekly
@@ -228,6 +230,10 @@ privileged container, which needs a cgroup-v2 Docker host — Docker
 Desktop (macOS/Windows) or Linux with systemd both qualify; the targets
 check and say so up front. That is also how liveswap's systemd runner
 is developed and tested on a Mac: nothing here needs a Linux VM.
+
+What building hotserve costs — Claude Code sessions, runner minutes,
+Copilot reviews, in money, kWh and CO2 — is a committed ledger:
+[docs/footprint.md](docs/footprint.md).
 
 The repo is a Go multi-module workspace: `liveswap/` and `penaltybox/`
 are lean, independently usable Caddy modules

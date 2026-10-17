@@ -68,9 +68,13 @@ func readOwnFile(path string, maxBytes int, what string) ([]byte, time.Time, err
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) //nolint:gosec // a path under an app's own dir, built by the caller
 	if err != nil {
 		// O_NOFOLLOW refuses a link at the name as ELOOP, which reads
-		// as a loop; say what it is.
+		// as a loop; say what it is. Readlink answers only at a link
+		// and follows none. (Not Lstat: gosec's G703 taint rule counts
+		// Lstat as a sink and reaches this line in about half of its
+		// runs — it walks a call graph built in map order — so a
+		// directive here was "unused" in the other half.)
 		if errors.Is(err, syscall.ELOOP) {
-			if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 { //nolint:gosec // the path the open above was given; Lstat follows no link at it
+			if _, lerr := os.Readlink(path); lerr == nil {
 				return nil, time.Time{}, fmt.Errorf("%s is a link (a planted link is not followed)", path)
 			}
 		}

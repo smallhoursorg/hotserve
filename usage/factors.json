@@ -1,0 +1,64 @@
+{
+  "_about": "Prices and conversion factors for docs/footprint.md, applied by .github/scripts/usage.py at render time to the facts in the CSVs beside this file. Each block names its source; change a number only with its source.",
+  "_sources": {
+    "prices": "Anthropic's published API prices (https://platform.claude.com/docs/en/about-claude/pricing), as recorded in claude-carbon's data/prices.json (https://github.com/gwittebolle/claude-carbon, _updated 2026-10-09), except Sonnet 5.5's cache reads, $0.20 on Anthropic's page where that file says 0.10. The family rows are claude-carbon's fallbacks for a model with no row of its own; the renderer warns when one is used.",
+    "claude_co2": "Per-token gCO2e factors from claude-carbon's data/factors.json (https://github.com/gwittebolle/claude-carbon/blob/main/METHODOLOGY.md): a fit to the per-query energies Jegham et al. 2025 estimated for Claude 3.7 Sonnet (https://arxiv.org/abs/2505.09598; model outputs on assumed GPU nodes, not telemetry), Opus at 2x Sonnet, Fable at 2x Opus by list-price ratio, Haiku at 0.25x; AWS PUE 1.14 and an AWS-region grid of 0.287 kgCO2e/kWh.",
+    "reference_prompt": "Google's published median of 0.24 Wh per Gemini Apps text prompt, August 2025 (https://www.datacenterdynamics.com/en/news/google-median-gemini-prompt-uses-024-watt-hours-of-power-and-consumes-026ml-of-water/).",
+    "transcripts": "Claude Code's settings reference (https://code.claude.com/docs/en/settings): cleanupPeriodDays, the days a transcript is kept, defaults to 30.",
+    "actions_retention": "GitHub changelog, 2026-07-17 (https://github.blog/changelog/2026-07-17-actions-retention-will-cover-checks-workflow-runs-and-statuses/): from 2026-10-01 workflow runs follow the Actions retention setting, at most 90 days for a public repository.",
+    "actions": "GitHub's runner reference (https://docs.github.com/en/actions/reference/runners/github-hosted-runners): Ubuntu runners are hosted in Azure, and a public repository's standard Linux x64 and arm64 runners are 4 CPU / 16 GB. Energy by Cloud Carbon Footprint's Azure coefficients (https://www.cloudcarbonfootprint.org/docs/methodology): 0.78 W per vCPU idle, 3.76 W at 100%, 0.000392 kWh per GB-hour of memory, PUE 1.185 (its PUE section; the appendix table says 1.125), 50% utilisation being its default.",
+    "actions_grid": "A US national average, as cited in claude-carbon's METHODOLOGY.md; GitHub does not publish a runner's region.",
+    "actions_price": "GitHub's billing page (https://docs.github.com/en/billing/managing-billing-for-your-products/about-billing-for-github-actions): usage is free for public repositories on standard hosted runners; otherwise $0.006 per minute for a 2-core x64 Linux runner, applied to every runner here as a rough floor (arm64 lists $0.005, and the 4-core machines a public repository gets would bill as larger runners).",
+    "copilot": "GitHub estimates $0.05–1 of AI credits per review at Lite effort and $0.25–5 at Balanced (https://docs.github.com/en/copilot/code-review); the typed-in figure is the actual bill."
+  },
+  "prices_usd_per_mtok": {
+    "cache_write_multiplier": {"5m": 1.25, "1h": 2.0},
+    "models": {
+      "claude-fable-5-1": {"input": 10, "output": 50, "cache_read": 0.25},
+      "claude-mythos-5-1": {"input": 10, "output": 50, "cache_read": 0.25},
+      "claude-opus-5-5": {"input": 4, "output": 20, "cache_read": 0.20},
+      "claude-opus-5": {"input": 5, "output": 25, "cache_read": 0.50},
+      "claude-opus-4-8": {"input": 5, "output": 25, "cache_read": 0.50},
+      "claude-opus-4-7": {"input": 5, "output": 25, "cache_read": 0.50},
+      "claude-opus-4-6": {"input": 5, "output": 25, "cache_read": 0.50},
+      "claude-opus-4-5": {"input": 5, "output": 25, "cache_read": 0.50},
+      "claude-sonnet-5-5": {"input": 2, "output": 10, "cache_read": 0.20},
+      "claude-sonnet-4-6": {"input": 3, "output": 15, "cache_read": 0.30},
+      "claude-sonnet-4-5": {"input": 3, "output": 15, "cache_read": 0.30},
+      "claude-sonnet-4": {"input": 3, "output": 15, "cache_read": 0.30},
+      "claude-haiku-4-5": {"input": 1, "output": 5, "cache_read": 0.10}
+    },
+    "families": {
+      "fable": {"input": 10, "output": 50, "cache_read": 1.0},
+      "opus": {"input": 4, "output": 20, "cache_read": 0.4},
+      "sonnet": {"input": 2, "output": 10, "cache_read": 0.2},
+      "haiku": {"input": 0.1, "output": 0.5, "cache_read": 0.01}
+    }
+  },
+  "claude_gco2e_per_mtok": {
+    "families": {
+      "fable": {"input": 156, "output": 3304},
+      "opus": {"input": 78, "output": 1652},
+      "sonnet": {"input": 39, "output": 826},
+      "haiku": {"input": 10, "output": 207}
+    },
+    "cache_read_factor": 0.08,
+    "cache_write_factor": 1.0,
+    "grid_gco2e_per_kwh": 287,
+    "reference_prompt_wh": 0.24
+  },
+  "actions": {
+    "vcpu_min_w": 0.78,
+    "vcpu_max_w": 3.76,
+    "gb_hour_kwh": 0.000392,
+    "pue": 1.185,
+    "cpu_utilisation": 0.5,
+    "runners": {
+      "ubuntu-latest": {"vcpu": 4, "gb": 16},
+      "ubuntu-24.04-arm": {"vcpu": 4, "gb": 16},
+      "default": {"vcpu": 4, "gb": 16}
+    },
+    "grid_gco2e_per_kwh": 380,
+    "usd_per_minute_private_repo": 0.006
+  }
+}

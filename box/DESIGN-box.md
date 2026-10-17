@@ -996,14 +996,14 @@ can do both by other means.
 | A box server whose TLS policies are in an order no Caddyfile adapts to passes as walked: a list in which no policy is sure to apply to the host (Caddy then refuses the handshake), or, past 30 policies, one matching the host by wildcard or by matcher ahead of one naming it exactly (Caddy looks at that one first) | Reachability, "The connection" | 4 | 1 | 3 | 12; the input is always the adapter's, which ends every list with a catch-all and writes a policy naming a host ahead of any other matching it |
 | A box server limit at or above its floor still bounds a push's upload: a 16 MiB bundle under `read_body 30s` needs about 550 KiB/s, and a runner that cannot sustain it fails its body read | Reachability, "The request limits" | 2 | 2 | 1 | 4; a hardened limit and a slow runner together; red and named (400, `could not read the bundle`), a retry is the remedy, the floors are sized for a runner's upload with room, and a bundle without secrets is kilobytes |
 | A box server limit under its floor that the loaded server already runs (set at the console, and this push's own handshake, headers and token arrived under it) is refused all the same by the next push that keeps it, since the floors are asked of the file alone | Reachability, "The request limits" | 2 | 5 | 1 | 10; red and named, the remedy is the limit at its floor in the file, and the door's shape (refuse only a value that differs from the loaded server's) would need the six loaded fields threaded from the request's context beside the door (size 2) for a case the floors were sized to make rare: the owner chose floors over a compare for these limits (2026-10-16) |
-| A `timeouts` read setting past its floor is refused though, on v2.11.7, the server's own idle reader (on by default) re-arms the connection's deadline after the handler's on every read, so the handler's deadline cuts a push only where the server's `read_idle_timeout` is negative | Reachability, the handler table | 2 | 5 | 1 | 10; red and named, the remedy is the setting at its floor, or dropped; the floor is asked of the file's words, since the handler's contract is to bound the route and a Caddy patch that lets it would reopen the strand (S4) with no one re-reading the source; gating the row on the server's `read_idle_timeout` threads that setting into the walk (size 2) for a line a box site has no reason to carry |
+| A `timeouts` read setting past its floor is refused though, on v2.11.7, the server's own idle reader (on by default) re-arms the connection's deadline after the handler's on every read, so the directive's deadline cuts a push only where the server's `read_idle_timeout` is negative (the push's own 120 s bound on the body, Caps, stands whatever the directive says) | Reachability, the handler table | 2 | 5 | 1 | 10; red and named, the remedy is the setting at its floor, or dropped; the floor is asked of the file's words, since the handler's contract is to bound the route and a Caddy patch that lets it would reopen the strand (S4) with no one re-reading the source; gating the row on the server's `read_idle_timeout` threads that setting into the walk (size 2) for a line a box site has no reason to carry |
 | A `request_body` with a `set` or a low `max_size`, or a `timeouts` with a read setting past its floor, under a matcher that admits only the `GET` (`method GET`) is refused, though neither the status nor the poll reads a body, so those requests would work | Reachability, the handler table | 2 | 5 | 1 | 10; red and named, the remedy is a path or the default order; a `request_header` under the same matcher is refused the same way, and weighing the body's settings for the `POST` alone is a branch on the method in the walk (size 2) |
 
 **Owed** (over the bar, not yet fixed):
 
 | Finding | S | O | D | Where the fix lands |
 |---|---|---|---|---|
-| The handler's 120 s upload deadline does not bound a body that keeps trickling: Caddy's idle reader re-arms the connection's read deadline before every read (Caps, "bundle upload"), so a client that sends a byte inside each idle window holds the one push slot until the server's `read_timeout`, which Caddy's defaults leave unset, and every other push is 409 meanwhile | 4 | 2 | 3 | 24; found building the floors. A runner does not trickle, and a signer who would is one who can push any file; the fix is the handler's own bound on the body, independent of the connection's deadline (a timer that closes the body at 120 s), measured against the real server first; the owner decides |
+| (none at present; the last two, the `timeouts` directive's floors and the handler's own upload bound, are built — History, 2026-10-17) | | | | |
 
 ## Admission
 
@@ -1182,7 +1182,7 @@ Every numeric bound, in one place, with its reason.
 |---|---|---|
 | bundle body | 16 MiB | a bundle without secrets is kilobytes. With them it carries their ciphertext too: about the values' length plus some 200 bytes per reader per secret, which does not compress. The secrets caps below would allow more, so this cap is the one that binds, and `hotserve box describe` warns when a box's secrets pass 12 MiB (75%) of ciphertext, in the pull request's check run, before a push meets the 413 |
 | pushes in memory | one per hotserve process, from its body to its drop, shared across reloads; another push is 409 "a push is being admitted; retry in a moment", its body unread | the body is read before the admission lock (step 2), so without this nothing would bound how many authenticated requests hold 16 MiB each; honest runs are one at a time already (the workflow's `concurrency` group) |
-| bundle upload | 120 s, a read deadline the handler sets on the connection while the push slot is held; past it 400 "could not read the bundle" and a `box push upload failed` line. On Caddy v2.11.7 the server's idle reader re-arms that deadline before every body read (`read_idle_timeout`, a minute by default, plus the rate's credit, capped at `read_timeout` when one is set), so from the first read the body is bounded by the server's limits: a stall ends at the idle bound, and a trickle that never stalls that long runs to `read_timeout`, or on with none set (owed, "Triage") | a stalled upload would otherwise hold the one slot until its connection ends; a bundle is kilobytes |
+| bundle upload | 120 s, the handler's own bound on the body while the push slot is held: a read past it fails, whatever deadline the connection has by then, with 400 "could not read the bundle: the upload outlasted 2m0s" and a `box push upload failed` line, and the slot given back before the answer is written (writing it makes net/http drain what is left of the body first). The handler sets the same bound as the connection's read deadline, for a stall — nothing arriving — on a server without an idle reader. On Caddy v2.11.7 the server's idle reader re-arms that deadline before every body read (`read_idle_timeout`, a minute by default, plus the rate's credit, capped at `read_timeout` when one is set), so a stall ends the read, and frees the slot, at the idle bound — though its 400 may never leave: that reader clears the connection's deadline after its error (caddy#8103), and the drain then has none until the client goes, a connection's cost and not the box's. A body that keeps arriving a byte at a time holds the slot until the read in flight at 120 s returns with its next byte, and is answered once the drain ends, at the idle deadline that read armed — the bound and at most one idle window, 180 s at the defaults (measured in the e2e box, "box apply 3b": a byte every 20 s, the slot free at 140 s and the push answered at 180 s; before this bound, the slot was held until the trickle's bytes stopped) | a stalled or trickled upload would otherwise hold the one slot until its connection ends, with every other push 409 meanwhile; a bundle is kilobytes |
 | the box server's `max_header_bytes`, floor | 8 KB (8000 bytes): a positive value under it is refused at step 6 ("The request limits") | a push's headers are the request line, a few short headers and `Authorization: Bearer` with the workflow's OIDC token — an RS256 JWT of some thirty claims, about 2 KiB (estimated from GitHub's documented example and a 2048-bit signature, not measured), so the floor is two to three times what a push sends. 8000 rather than 8192, since Caddy reads `max_header_size` with SI prefixes and `8KB`, the usual hardening spelling, must pass. Caddy's default is 16 KiB; under the floor a push could be answered 431 by Go's server before any route, and the next push too |
 | the box server's `read_header_timeout`, floor | 5 s | Go's `net/http` bounds the TLS handshake by the smallest positive one of `read_header_timeout`, `read_timeout` and `write_timeout` (`Server.tlsHandshakeTimeout`), then reads the headers under it; a runner's handshake and headers take well under a second, and 5 s leaves room for a loaded box. Caddy's default is a minute |
 | the box server's `read_timeout`, floor | 30 s | the one hard deadline on the whole upload (Caddy's idle reader caps every reset at it): a bundle at the 16 MiB cap then needs about 550 KiB/s, far under a runner's upload; 30 s over 60 s so that a hardened app site keeps a tight bound (the owner's choice, 2026-10-17). Caddy's default is none |
@@ -2533,11 +2533,24 @@ Dated one-liners; the full text of each is in git.
   words naming the setting and the floor; `request_body`'s `set`, and a
   `max_size` under the bundle's cap, refuse by name. Sized by the owner
   (Caps); the `timeouts` handler stays owed.
-- 2026-10-17, later — The `timeouts` directive ahead of `box_webhook`
-  (the handler table): a `read_timeout` under the server's read idle
-  floor, or a `read_min_rate` over its ceiling under a positive
-  `read_timeout`, is refused by name, in the handler's own words; the
-  write settings get no floor. Noted: on v2.11.7 the server's own idle
-  reader re-arms the deadline after the handler's on every read, so the
-  strand needed the server's reader off as well; refused on the file's
-  words all the same (Accepted residuals).
+- 2026-10-17, later — The upload's bound is the handler's own on the
+  body, not the connection's read deadline alone, which Caddy's idle
+  reader re-arms before every read: a body that kept arriving a byte at
+  a time held the push slot until the server's `read_timeout`, unset by
+  default, and every other push was 409 meanwhile (S4 O2 D3, 24).
+  Measured against the real server first, and after: a read past 120 s
+  now fails, the slot is given back, and the e2e box pins it (Caps,
+  "bundle upload"). Found on the way: once a body's bytes stop under
+  Caddy's idle reader, its error clears the connection's deadline, and
+  net/http's drain of the rest before the answer then has none — the
+  400 never leaves while the client holds the connection, a cost the
+  connection bears and the slot does not.
+- 2026-10-17, later still — The `timeouts` directive ahead of
+  `box_webhook` (the handler table): a `read_timeout` under the
+  server's read idle floor, or a `read_min_rate` over its ceiling under
+  a positive `read_timeout`, is refused by name, in the handler's own
+  words; the write settings get no floor. Noted: on v2.11.7 the
+  server's own idle reader re-arms the deadline after the directive's
+  on every read, so the strand needed the server's reader off as well;
+  refused on the file's words all the same (Accepted residuals). The
+  Owed table is empty.
