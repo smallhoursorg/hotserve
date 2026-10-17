@@ -380,9 +380,9 @@ runs as the hotserve user, so one bare app could read every sibling's
 data and hotserve's own keys. That is why there is no per-app opt-out
 either.
 
-**An app sees its release dir, its `shared/`, a private `/tmp`, the OS
-runtime. Nothing else on the host
-exists in its view.**
+**An app sees its release dir, its `shared/`, its instance's
+`run/<nonce>/`, a private `/tmp`, the OS runtime. Nothing else on the
+host exists in its view.**
 
 That is the whole guarantee. The view is built deny-by-default
 (`TemporaryFileSystem=/:ro` plus explicit binds), so it is a policy
@@ -406,9 +406,10 @@ actually has — a dozen or so — and `ls /var/lib` shows exactly one,
 the liveswap root.
 
 The working directory is the release dir and `HOME` defaults to
-`shared/`; both are writable. `HOME` is applied before `env_file` and
-inline `env`, so you can point it elsewhere — inside the release dir,
-say. Point it somewhere the sandbox does not bind and
+`shared/`. Those two and the instance's `run/<nonce>/`, where it binds
+its socket, are the writable binds (`BindPaths=`). `HOME` is applied
+before `env_file` and inline `env`, so you can point it elsewhere —
+inside the release dir, say. Point it somewhere the sandbox does not bind and
 the app gets a `HOME` that does not exist inside its unit; liveswap
 warns at every launch rather than refusing, since you asked for it.
 The network namespace is shared by design — apps make outbound calls
