@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -119,19 +120,25 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 		return p.respond(http.StatusConflict, errorBody(msgAdmitting))
 	}
 	defer release()
-	// The deadline bounds the body until its first read; from then on
-	// Caddy's idle reader re-arms the connection's deadline before every
-	// read, within the server's own limits (DESIGN-box.md, Caps, "bundle
-	// upload"; the floors on those limits, "The request limits").
-	// HTTP/1.1, HTTP/2 and HTTP/3 all take one; a writer in the chain
-	// that hides the method is said in the journal, since the slot then
-	// has no bound but the connection's.
+	// Two bounds on the body, the handler's own and the connection's
+	// (DESIGN-box.md, Caps, "bundle upload"). The deadline on the
+	// connection bounds a stall: a read that blocks until nothing more
+	// arrives. It holds until the first read; from then on Caddy's idle
+	// reader re-arms it before every read, within the server's own
+	// limits (the floors on those, "The request limits"), and a body that
+	// keeps arriving a byte at a time would hold the slot for as long as
+	// the server lets it. So boundedBody refuses every read once the
+	// bound has passed, whatever the connection's deadline says. HTTP/1.1,
+	// HTTP/2 and HTTP/3 all take the deadline; a writer in the chain that
+	// hides the method is said in the journal, since a stall then has no
+	// bound but the connection's.
 	rc := http.NewResponseController(w)
 	upload := h.upload
 	if upload == 0 {
 		upload = uploadTimeout
 	}
-	if err := rc.SetReadDeadline(time.Now().Add(upload)); err != nil {
+	until := time.Now().Add(upload)
+	if err := rc.SetReadDeadline(until); err != nil {
 		h.logger.Warn("box webhook: the upload has no deadline", zap.String("id", p.id), zap.String("error", proof.Bound(err.Error())))
 	}
 	// Never cleared here: once a body ends, net/http clears the deadline
@@ -139,14 +146,22 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 	// startBackgroundRead), so admission and the wait may outlast it; and
 	// after a body that did not arrive whole it must stay, so the
 	// server's drain of what is left of it ends too.
-	body, err := readCapped(r.Body, "the bundle", maxBody)
-	var big *tooLargeError
-	if errors.As(err, &big) {
-		return p.respond(http.StatusRequestEntityTooLarge, errorBody(msgTooLarge))
-	}
+	body, err := readCapped(&boundedBody{r: r.Body, until: until, bound: upload}, "the bundle", maxBody)
 	if err != nil {
-		// The caller's connection, not the box: nothing was admitted. A
-		// line all the same, since the slot was held while it stalled.
+		// Nothing was admitted. The slot is given back before the answer:
+		// before its header goes out, net/http drains what is left of the
+		// body (chunkWriter.writeHeader, up to 256 KiB), which a body
+		// still arriving holds until the connection's deadline — one idle
+		// window. For an answer this small that is after the handler
+		// returns, past the deferred release; said here so the slot's
+		// bound does not rest on the answer's size.
+		release()
+		var big *tooLargeError
+		if errors.As(err, &big) {
+			return p.respond(http.StatusRequestEntityTooLarge, errorBody(msgTooLarge))
+		}
+		// The caller's connection, not the box. A line all the same,
+		// since the slot was held while it stalled.
 		h.logger.Warn("box push upload failed", zap.String("id", p.id), zap.String("error", proof.Bound(err.Error())),
 			zap.String("via", p.via), zap.String("remote", r.RemoteAddr))
 		return p.respond(http.StatusBadRequest, errorBody("could not read the bundle: "+proof.Bound(err.Error())))
@@ -287,6 +302,31 @@ func (p *pushing) answer(res *result, err error) error {
 		return p.respond(http.StatusGatewayTimeout, map[string]string{"id": p.id})
 	}
 	return respondResult(p.w, res)
+}
+
+// boundedBody is the handler's own bound on a push's body: once until
+// has passed, every Read fails instead of reading, whatever deadline
+// the connection has by then. A Read already blocked in the server
+// returns with the next bytes or at the connection's deadline (Caddy's
+// idle window), so the slot is held at most the bound and one idle
+// window. Wall time, as the connection's deadline is, not the handler's
+// Clock, which is step 8's wait. Not a timer that closes the body: on
+// HTTP/1.1 the server's body Close is a drain under the body's own
+// lock, which waits behind the read in flight and then reads on, so it
+// would end nothing sooner, and each protocol's Close does something
+// else (HTTP/2 breaks the stream's pipe, HTTP/3 cancels the stream's
+// read side).
+type boundedBody struct {
+	r     io.Reader
+	until time.Time
+	bound time.Duration // until - the slot's taking, for the error
+}
+
+func (b *boundedBody) Read(p []byte) (int, error) {
+	if !time.Now().Before(b.until) {
+		return 0, errors.New("the upload outlasted " + b.bound.String())
+	}
+	return b.r.Read(p)
 }
 
 // pushSlot is the process's one push in memory, shared by every

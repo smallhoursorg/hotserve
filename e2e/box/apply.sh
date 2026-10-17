@@ -426,6 +426,52 @@ CP=$(commit alice "$work/fcapped")
 push "$CP"
 refused "a file that caps the body under the bundle's" "the new Caddyfile does not reach box_webhook on /: request_body's max_size caps the body under 16 MiB first"
 
+echo "=== box apply 3b: a trickled upload gives the push slot back at the handler's bound ==="
+# Caddy's idle reader re-arms the connection's read deadline before
+# every body read (read_body_idle, a minute by default), so a body that
+# keeps arriving is never idle, and the deadline the handler set bounds
+# nothing past the first byte. The handler's own bound on the body ends
+# the push at 120 s: the read in flight then returns with the next byte
+# (within 20 s here) and the slot is given back; the answer follows
+# once the server has given up draining the rest, at the idle deadline
+# that read armed when it began, before the bound — so by 180 s (Caps,
+# "bundle upload"). The client: openssl's s_client, sending a byte
+# every 20 s of a body it declared as 1000 bytes, 15 bytes in all, under
+# a 400 s timeout: before the bound, the slot was held until the bytes
+# stopped, and the answer then never left — the idle deadline's error
+# made Caddy's reader clear the deadline, and net/http's drain of the
+# rest before the answer had none (measured: hours, until the client
+# was killed). The probe: a push whose body is no bundle, 409 while the
+# slot is held and 422 once it is free, nothing written either way.
+probe() {
+	req -X POST -H "Authorization: Bearer $(tok)" -H "X-Box-Request-Id: $(newid)" -H 'Content-Type: application/gzip' --data-binary 'not a bundle' "$URL"
+}
+trickle_start=$(date +%s)
+{
+	printf 'POST / HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nX-Box-Request-Id: %s\r\nContent-Type: application/gzip\r\nContent-Length: 1000\r\n\r\n' "$HOST" "$(tok)" "$(newid)"
+	i=0
+	while [ "$i" -lt 15 ]; do
+		sleep 20
+		printf x
+		i=$((i + 1))
+	done
+} 2>/dev/null | timeout 400 openssl s_client -quiet -connect 127.0.0.1:8443 -servername "$HOST" >"$work/trickle" 2>&1 &
+trickle_pid=$!
+sleep 100
+probe
+[ "$CODE" = 409 ] && resp | grep -qF "a push is being admitted" && pass "100 s in, the trickled upload holds the slot: another push is 409" || fail "probe at 100 s: $CODE $(resp)"
+wait "$trickle_pid"
+trickle_took=$(($(date +%s) - trickle_start))
+grep -q '^HTTP/1.1 400' "$work/trickle" && grep -qF 'could not read the bundle: the upload outlasted 2m0s' "$work/trickle" \
+	&& pass "the trickled upload is answered 400 at the bound" || fail "trickle: $(tail -c 400 "$work/trickle")"
+[ "$trickle_took" -ge 120 ] && [ "$trickle_took" -le 195 ] \
+	&& pass "answered after ${trickle_took}s: the bound and at most one idle window" || fail "answered after ${trickle_took}s"
+journalctl -u hotserve --since "@$trickle_start" --no-pager -o cat | grep -q 'box push upload failed' \
+	&& pass "the journal has the upload failed line" || fail "no 'box push upload failed' line in the journal"
+probe
+[ "$CODE" = 422 ] && pass "the slot is free: the next push is read and refused" || fail "probe after the bound: $CODE $(resp)"
+settled "trickle"
+
 echo "=== box apply 4: a config that validates but does not load is rolled back ==="
 # Validation binds no listener; loading does, and 192.0.2.1 (TEST-NET-1)
 # is on no interface here.
