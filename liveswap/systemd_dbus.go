@@ -263,8 +263,9 @@ func dialPrivate(socket string) (*godbus.Conn, net.Conn, error) {
 // unitProperties renders a unitSpec as transient-unit properties. The
 // hardening set is fixed here for every unit hotserve creates:
 // Restart=no (the watchdog restarts), KillMode=control-group (stop
-// means the whole tree), NoNewPrivileges (no setuid escalation), and
-// both output streams to the journal under the app's identifier.
+// means the whole tree), NoNewPrivileges (no setuid escalation),
+// LimitCORE=0 on both limits (no core dump), and both output streams
+// to the journal under the app's identifier.
 func unitProperties(u unitSpec) []sddbus.Property {
 	typ := "simple"
 	if u.Oneshot {
@@ -289,6 +290,13 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		{Name: "Restart", Value: godbus.MakeVariant("no")},
 		{Name: "KillMode", Value: godbus.MakeVariant("control-group")},
 		{Name: "NoNewPrivileges", Value: godbus.MakeVariant(true)},
+		// The manager's default is soft 0 under an unlimited hard
+		// limit, which an app may raise with one setrlimit; a hard 0
+		// is the one it cannot. A dump would hold the app's memory,
+		// env values included, past the unit's life
+		// (DESIGN-threat-model.md, "Where env_file values sit").
+		{Name: "LimitCORE", Value: godbus.MakeVariant(uint64(0))},
+		{Name: "LimitCORESoft", Value: godbus.MakeVariant(uint64(0))},
 		{Name: "TimeoutStopUSec", Value: godbus.MakeVariant(stopUSec)},
 		{Name: "SyslogIdentifier", Value: godbus.MakeVariant(u.SyslogIdentifier)},
 		{Name: "StandardOutput", Value: godbus.MakeVariant("journal")},

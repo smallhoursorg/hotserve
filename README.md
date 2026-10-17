@@ -135,7 +135,10 @@ GitHub Actions with no stored secret.
 
 - **A server product, distributed like Caddy.** Same CLI, same
   Caddyfile, same admin API — `hotserve run`, `hotserve reload`,
-  `hotserve validate` all behave exactly as Caddy's do.
+  `hotserve validate` all behave exactly as Caddy's do. The config is
+  a Caddyfile, though: a JSON config (a `.json` file, or JSON posted
+  to the admin API) is unsupported, because Caddy deletes every
+  `"@id"` key from JSON before hotserve's checks can see it.
 - **Made for one cheap server.** Apps run as systemd units under
   hotserve's own user manager, reached over unix sockets; no container
   runtime anywhere. That's why there's deliberately no Docker image.
@@ -151,7 +154,9 @@ rests on:
 - **The admin API is not on localhost.** It listens on a unix socket
   rather than TCP: "localhost-only" would include every app you run,
   and one SSRF bug in an app could otherwise reconfigure the server.
-  Apps themselves run unprivileged, with `NoNewPrivileges`.
+  Apps themselves run unprivileged, with `NoNewPrivileges`, and write
+  no core dump (`LimitCORE=0`), so a crash cannot leave an app's
+  memory on disk.
 - **Every app is sandboxed, with no opt-out.** Apps share the
   `hotserve` user, so each runs in its own systemd sandbox: it sees
   its own release, its `shared/` data, a private `/tmp`, and the parts
@@ -208,7 +213,7 @@ make e2e               # full stack: the liveswap and penaltybox suites against 
 make lint vet tidy     # golangci-lint (gofmt-gated), go vet, go mod tidy
 make tidy-check        # fails if go mod tidy would change a module's go.mod/go.sum; CI runs it on every PR
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
-make secretscan        # gitleaks full-history secret scan (same image as the CI gate)
+make secretscan        # gitleaks secret scan: full history, or the working tree in a git worktree (same image as the CI gate)
 make usage             # what building this costs (Claude Code, Actions minutes, Copilot) → usage/*.csv + docs/footprint.md; needs gh auth login
 make usage-check       # fails if docs/footprint.md no longer matches usage/*.csv; CI runs it on every PR
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)

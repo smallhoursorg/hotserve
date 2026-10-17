@@ -18,8 +18,10 @@ a security problem — a public report on a deploy server puts every
 operator at risk before a fix exists.
 
 What helps: the config that reproduces it (redact your secrets), the
-version (`hotserve version`), and what an attacker gains. Proof-of-
-concept payloads are welcome inside the private advisory.
+version (`hotserve version`; up to v0.3.1 it names only the Caddy it
+was built with, so name your hotserve release too), and what an
+attacker gains. Proof-of-concept payloads are welcome inside the
+private advisory.
 
 ## What to expect
 

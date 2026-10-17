@@ -36,8 +36,11 @@ The diagram shows a **URL pull**; the same pipeline serves two more
 sources (see [Webhook API](#webhook-api)): a **push** streams the
 tarball in the request body (skips `downloading`), and a **rollback**
 relaunches an on-disk release (skips `downloading`/`extracting`, and
-`preparing` runs no `pre_start`). Versions are immutable — a re-deploy of an existing
-version is rejected; rollback is how you relaunch one.
+`preparing` runs no `pre_start`). Versions are immutable — a deploy of an
+existing version with other bytes is rejected; rollback is how you
+relaunch one, the running version included, and a deploy of the
+running version with the same artifact relaunches it too (see
+[Relaunching the running version](#relaunching-the-running-version)).
 
 The cutover is an atomic pointer swap inside a `reverse_proxy` dynamic
 upstream source — no config reload, no socket juggling, and every
@@ -684,7 +687,9 @@ Presets:
 Sub-directives: `audience` (required for OIDC — never trust an
 unaudienced token; for `local`, the name of this box, see below),
 `claim <name> <value>` (exact-match, repeatable — pin `repository`,
-`ref`, `environment`, etc.), `subject` (sugar for `claim sub`),
+`ref`, `environment`, etc.; a claim named `@id` is refused, because
+Caddy deletes that key from the config before hotserve reads it),
+`subject` (sugar for `claim sub`),
 `issuer` (oidc/gitlab), `public_key` (local).
 
 The OIDC presets also **require an identity claim** — one of
@@ -834,8 +839,9 @@ so GitHub's S3 redirect works). The URL must pass `artifact_allowlist`.
 and refuses a mismatch with a `422` naming both digests, so a host
 that serves other bytes than CI built cannot deploy them. Without it,
 the download is trusted on the strength of the allowlist and the
-token alone. The example workflows send it; a push carries no pin,
-because its bytes are the request itself. The pin is kept as `sha256`
+token alone. The example workflows send it; a push takes no pin,
+because its bytes are the request itself — the box hashes them as
+they land, and that digest is the push's pin. The pin is kept as `sha256`
 in the version's deploy record and in `last_deploy` (see
 [Deploy records](#deploy-records)), so "are the bytes serving the ones
 CI built?" can still be answered after the journal has rotated, for as
@@ -877,9 +883,12 @@ and `deploys`, what each recorded version's latest deploy came to
 
 **Versions are immutable.** A deploy (URL or push) never overwrites an
 existing on-disk release, so a version you can roll back to can't be
-silently replaced — re-deploying an existing version is a `422`. Use a
-new version, or roll back to relaunch an existing one. (A deploy that
-*fails* before cutover is cleaned up, so that version stays retriable.)
+silently replaced — re-deploying an existing version with other bytes
+is a `422`. Use a new version, or roll back to relaunch an existing
+one. (A deploy that *fails* before cutover is cleaned up, so that
+version stays retriable.) The running version is the one exception,
+relaunched rather than refused when the artifact is the same — see
+[Relaunching the running version](#relaunching-the-running-version).
 
 The response is synchronous:
 
@@ -892,7 +901,7 @@ The response is synchronous:
 | 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |
-| 422 | Bad request — missing/invalid version, version already running, **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, a pre-flight refusal (the command or `pre_start` does not resolve inside the sandbox view, or is an executable built for another machine — the body names the box's architecture and the `runs-on` to build on), or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
+| 422 | Bad request — missing/invalid version, the running version asked for again without a matching digest (see [Relaunching the running version](#relaunching-the-running-version)), **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, a pre-flight refusal (the command or `pre_start` does not resolve inside the sandbox view, or is an executable built for another machine — the body names the box's architecture and the `runs-on` to build on), or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 5xx | Deploy failed — **the old version, if there was one, is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
 
 Because the response is synchronous through the whole pipeline, the
@@ -999,6 +1008,37 @@ code. Every line passes the response filter. The examples'
 `scripts/deploy.sh` streams, prints each line as it arrives, and exits
 on the last line's code — or on the real one when nothing streamed.
 
+### Relaunching the running version
+
+A rollback to the version that is running, or a deploy of it that is
+for the same artifact, relaunches it: the same pipeline from
+`preparing` on, with no download or extraction and no `pre_start` — a
+second instance of the installed release on a fresh socket, soaked,
+promoted, the first drained and stopped. Zero downtime, as any deploy,
+and how a changed `env_file` value or app definition reaches the app
+without a new version (a reload never restarts a running app). "The
+same artifact" is decided by digest, with nothing fetched: a URL
+deploy's `sha256` pin, or the digest of a push's upload, must equal
+the `sha256` in the version's deploy record. A request without a
+digest, a version whose record has none (an unpinned pull, or a push
+made by a hotserve older than this one, before pushes were hashed), or
+a different digest is a `422` saying so and naming the way in — a
+rollback to the running version needs no digest, since it is the same
+release by definition. A URL deploy's `url` still has to pass the
+scheme and `artifact_allowlist` checks a fetch gives it, though
+nothing is fetched. The response is the status as for any deploy,
+with `last_deploy.note` set: `relaunched v1.4.2 (same artifact); it
+reads its env file now` (the second clause when the app has an
+`env_file`). A relaunch is not a new deploy: the version's record
+keeps the deploy that put it there, with its pin and times, and
+`deploys` gains no entry. The cost is the cost of any deploy —
+in-memory state goes — now also paid by an accidental re-run or a CI
+retry that sends the same artifact again; and for the overlap the two
+instances share the release dir (it is the working directory, bound
+read-write), as two versions already share `HOME`, so an app that
+keeps state in its release dir rather than under `HOME` may see its
+two instances contend there.
+
 ### Deploy records
 
 Every deploy writes its outcome — the same `last_deploy` object, with
@@ -1011,14 +1051,17 @@ curl --fail-with-body -H "Authorization: Bearer $JWT" \
 ```
 
 The record is the latest deploy of that version (a rollback to it
-replaces it; a request refused before any phase — the version already
-running, or already on disk — writes none); a version never deployed
-is a `404`. `GET /<app>` lists
+replaces it, unless it is the version running: a relaunch keeps the
+record of the deploy that put it there; a request refused before any
+phase — a version already on disk, or the running one asked for with
+another artifact or none to compare — writes none); a version never
+deployed is a `404`. `GET /<app>` lists
 every recorded version's outcome in `deploys`, newest first:
 `version`, `status`, the failing `phase`, `deployed_by`, the `sha256`
 the deploy was pinned to, and the times. `sha256` is what the
-deployer asserted and the download was checked against, absent when
-there was no pin (a push, an unpinned pull). A rollback copies the
+deployer asserted and the download was checked against, or the digest
+of the bytes a push uploaded; absent for an unpinned pull (and for a
+push made by a hotserve older than this one). A rollback copies the
 pin from the record it replaces: a version's release cannot be
 replaced while it is on disk, and its record is normally written
 with it. Not always — a version whose release GC pruned can be
@@ -1199,9 +1242,16 @@ the job log, and until it expires anyone who reads the log can deploy;
 if a later step must have it, pass it through `env:` and keep the
 `::add-mask::`.
 
-A version the box already has gets a `422` — versions are immutable —
-so a re-run of a job that deployed fails at this step rather than
-deploying twice. A URL or push deploy that fails has its extracted
+A re-run of a job that deployed sends the same version again. With
+the same tarball — its digest equals the one on record — the box
+relaunches the running version from its disk ([Relaunching the
+running version](#relaunching-the-running-version)); with other bytes
+under that version it is a `422` — versions are immutable — so a
+re-run never deploys other bytes under a version the box has. The
+example workflows rebuild the tarball on a re-run, and `tar -czf`
+stamps it with the build time, so their re-run is the `422`; to
+relaunch the running version from the Actions tab, **Run workflow**
+with it as the rollback target. A URL or push deploy that fails has its extracted
 release removed, so its version can be deployed again (a failed
 rollback leaves its on-disk release alone) — unless the 5xx body says
 `release <version> left
@@ -1306,7 +1356,9 @@ and `shared/` of this tree (see [Sandbox](#sandbox)).
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply at the app's next launch** — a
   deploy, a rollback, or a relaunch after a crash, a sustained health failure, or a reboot — never by
-  restarting a running app mid-reload.
+  restarting a running app mid-reload. To give an app one now, roll
+  back to the running version ([Relaunching the running
+  version](#relaunching-the-running-version)).
 - **No post-promote *auto*-revert.** Once traffic cuts over, the deploy
   is done; if the new version misbehaves later, roll back explicitly
   with `?rollback=<version>` (its release dir is still on disk — that's

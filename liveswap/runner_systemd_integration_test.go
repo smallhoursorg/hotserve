@@ -829,6 +829,9 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		"hotserve_lib": "closed", "run_hotserve": "closed", "etc_hotserve": "closed",
 		"admin_socket": "closed", "mgr_socket": "closed",
 		"cgroup": "readonly", "tmp": "writable", "home": shared, "xdg_runtime": "unset",
+		// No core dump of a crashed app, and no way to raise the soft
+		// limit back: LimitCORE=0 on both, read back from inside.
+		"core_soft": "0", "core_hard": "0",
 		// The base view: an OS the app can actually run on. Without
 		// these, "absent" below would only mean the unit is empty.
 		"binsh": "ok", "usrbinenv": "ok", "etcssl": "ok", "resolvconf": "ok",
@@ -876,8 +879,8 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		t.Errorf("nprocs = %q, want a handful (own PID namespace)", got["nprocs"])
 	}
 	unit := h.state().Unit
-	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths")
-	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectControlGroups=yes", "TemporaryFileSystem=/:ro"} {
+	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths,LimitCORE,LimitCORESoft")
+	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectControlGroups=yes", "TemporaryFileSystem=/:ro", "LimitCORE=0", "LimitCORESoft=0"} {
 		if !strings.Contains(props, want) {
 			t.Errorf("unit lacks %s:\n%s", want, props)
 		}

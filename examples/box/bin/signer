@@ -58,7 +58,7 @@ esac
 
 # Every box: <host>/Caddyfile at the top of the repository, tracked or
 # about to be (make check holds the layout).
-boxes=$(git ls-files --cached --others --exclude-standard | grep -E '^[^/]+/Caddyfile$' | LC_ALL=C sort || true)
+boxes=$(git -c core.quotePath=false ls-files --cached --others --exclude-standard | grep -E '^[^/]+/Caddyfile$' | LC_ALL=C sort || true)
 [ -n "$boxes" ] || fail "no box here: a box is <host>/Caddyfile at the top of the repository"
 # One path a line; a name never splits.
 IFS='

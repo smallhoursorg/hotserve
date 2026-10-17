@@ -266,12 +266,15 @@ cross-references throughout.
    The same step reads the file's adaptation (`hotserve adapt
    --adapter caddyfile --config <staged file>`, a third child bounded
    per the Caps table, whose JSON leaves the handler as nothing but a
-   verdict) for **reachability**: a `GET` and a `POST` for `/` on the
+   verdict) for **reachability**: the server that carries
+   `box_webhook` must let the workflow's connection through to its
+   routes, and a `GET` and a `POST` for `/` on the
    `box_webhook` host must meet `box_webhook` before any handler that
    can answer them — not an `order` option, not a second site for that
-   host (`host/*`, which Caddy sorts ahead), not anything else. What may
-   stand in front, and how a matcher is decided, are the "Reachability"
-   tables; a push that fails them is refused by the handler's name. Like
+   host (`host/*`, which Caddy sorts ahead), not anything else. What the
+   connection may meet, what may stand in front, and how a matcher is
+   decided, are the "Reachability" tables; a push that fails them is
+   refused by the setting's or the handler's name. Like
    the rest of this step it is a courtesy against a signer's mistake,
    not a boundary: root never adapts, so step 15 checks presence alone.
    Last, the secrets' consistency checks, on the token walk of the
@@ -534,13 +537,15 @@ earlier site for `<host>` answers first". `handle` blocks share a
 group: once one member has matched, Caddy skips the later members, and
 so does this walk — a member under a route decided per request
 satisfies its group only as far as that route does, since Caddy's
-group map is one per request across nesting.
+group map is one per request across nesting. Before the walk, the
+handler asks whether the workflow's connection reaches that server's
+routes at all ("The connection", below).
 
 | Handler (module) | Treated as | Why |
 |---|---|---|
 | `box_webhook` | reached | |
 | `subroute` | recursed, its routes in order | a site, `handle`, `route` and `handle_path` adapt to one |
-| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent and its answer comes back with the status and body it wrote: the first four touch only variables, a log field or a trace span; `headers` here edits response headers, never the status or the body the workflow reads; `request_body` and `timeouts` bound the read; `encode` compresses what the client asked for, `push` adds HTTP/2 pushes; `hint_penaltybox` answers 429 only to a client in its box, which the workflow reports red with its status and body: `box_webhook` itself never answers 429 |
+| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent and its answer comes back with the status and body it wrote: the first four touch only variables, a log field or a trace span; `headers` here edits response headers, never the status or the body the workflow reads; `request_body` and `timeouts` bound the read (`request_body`'s `set`, which replaces the body, and a `max_size` below every bundle are owed, "Triage"); `encode` compresses what the client asked for, `push` adds HTTP/2 pushes; `hint_penaltybox` answers 429 only to a client in its box, which the workflow reports red with its status and body: `box_webhook` itself never answers 429 |
 | `rewrite`; `headers` with a `request` section | refused: `<handler> changes the request first` | `rewrite` (also `uri`, `try_files` and `handle_path`'s strip) moves `/` away before `box_webhook` sees it; `request_header -Authorization` turns every push into a 401 with nothing in the answer to say why |
 | anything else — `static_response`, `reverse_proxy`, `file_server`, `error`, `authentication`, `acme_server`, `metrics`, `invoke`, `intercept`, `templates`, `liveswap_webhook`, a handler this table does not list | refused: `<handler> answers first` | fail-closed: a handler the table has not weighed is one that may answer; `invoke`'s named route is not followed; `intercept` lets `box_webhook` run and then replaces its answer with its own `handle_response`, and `templates` renders whatever types it is told to (`mime application/json` included) over a body whose `diff` is bundle-derived text — so the workflow never sees the result it is told to poll |
 
@@ -572,7 +577,80 @@ to whatever follows. The cost of "may": a
 remedy is to move it behind `box_webhook`, where the default order
 already puts every responder, or to give it a path.
 
-Not caught here, by design. `init` runs no pre-check (the reload is the
+**The connection.** Before any route runs, the workflow's connection
+meets the server that carries `box_webhook`: its listeners'
+protocols, its listener wrappers, its TLS connection policies and its
+strict SNI check. The handler asks those first (and no other server
+setting: "Not caught here"), of the connection `bin/apply`'s curl
+makes on the workflow's Ubuntu runner: HTTP/1.1 or HTTP/2 over TLS,
+both offered by ALPN, the host as its SNI — none for an IP address,
+to which curl sends none — no client certificate, no PROXY header.
+Each setting is read in Caddy's shape for it, client authentication
+in Caddy's own type, and one written as `null` as Caddy reads it:
+absent. Each of that server's listeners must serve `h1` or `h2` — its
+`protocols`, from the `servers` option or a `bind` block, are `h1 h2
+h3` when none are set — or the push is refused `a listener's
+protocols include neither h1 nor h2`: with neither, Caddy opens no TCP
+listener for it, or (`h2c`) one the workflow's TLS connection cannot
+use. Its listener wrappers and the TLS connection policy for the host
+are the next two tables, fail-closed as the first: what they have not
+weighed refuses.
+
+| Listener wrapper | Treated as | Why |
+|---|---|---|
+| `tls` | passes | where the TLS handshake stands among the wrappers |
+| `http_redirect` ahead of `tls` | passes | it answers only a connection whose first bytes are plaintext HTTP; the workflow's are a TLS ClientHello |
+| `proxy_protocol` whose `fallback_policy` is not `REQUIRE` | passes | a connection without a PROXY header is served as sent: of the policies, only `REQUIRE` refuses one |
+| anything else — `http_redirect` behind `tls`, or with no `tls` listed (Caddy then puts every wrapper behind the handshake), `proxy_protocol` with `fallback_policy REQUIRE`, a wrapper this table does not list | refused: `the <wrapper> listener wrapper may refuse the connection` | behind the handshake `http_redirect` reads the request and redirects an HTTP/1.1 one; `REQUIRE` closes a connection without a header, and whether the workflow's address is in `allow` is not the file's to know |
+
+Caddy hands the handshake to the first TLS connection policy whose
+matchers all match. `sni` is decided statically, by Caddy's own
+matcher, for the host; a policy with no matcher matches every
+handshake; any other matcher (`remote_ip`, `local_ip`, `sni_regexp`),
+or an `sni` name holding a placeholder, is decided per connection, so
+that policy is weighed and so are the ones after it, and its refusal
+reads `a TLS connection policy that may apply to <host> <what> (its
+<matcher> matcher is decided per connection)`. The Caddyfile writes a
+policy for each site with `tls` options, matched by its names, and a
+catch-all last; a wildcard site's client authentication never reaches
+the box host, which has a site of its own: the adapter puts that
+site's own policy, or a copy of the wildcard's without client
+authentication, ahead of it. The policies are walked in the order
+written: past 30 of them Caddy looks first at those naming the host
+exactly, which the adapter writes ahead of any other that matches it,
+and a list in which none is sure to apply passes, since the adapter
+ends every list with a catch-all (Accepted residuals).
+
+| TLS policy setting | Treated as | Why |
+|---|---|---|
+| `match`, `certificate_selection`, `protocol_min`, `protocol_max`, `default_sni`, `fallback_sni`, `insecure_secrets_log` | passes | curl speaks TLS 1.2 and 1.3, the two versions Caddy offers; `tls <cert> <key>` adapts to a `certificate_selection` of the loaded certificate (whether the host has a certificate at all is not asked here); the SNI defaults apply only to a handshake without SNI or without a certificate for it; the log only records |
+| `client_authentication` that Caddy counts as inactive (nothing in it set), or in mode `request` or `verify_if_given` with no `verifiers` and no `trusted_leaf_certs` | passes | a client without a certificate is let through |
+| `client_authentication` otherwise: `mode require` or `require_and_verify`, a trust pool and no mode, any verifier | refused: `a TLS connection policy for <host> requires a client certificate` | Caddy runs each verifier on every connection, and `trusted_leaf_certs` becomes the leaf verifier, which fails a connection with no certificate |
+| `drop` | refused: `… drops the connection` | |
+| `alpn` naming neither `h2` while a listener serves `h2` nor `http/1.1` while one serves `h1`, or an empty `alpn` where none serves `h1` | refused: `… offers neither h2 nor http/1.1 by ALPN` | Caddy takes out of ALPN what no listener serves, and Go's TLS server refuses a handshake whose ALPN lists share nothing; an empty list negotiates no protocol, so curl speaks HTTP/1.1 |
+| anything else — `cipher_suites`, `curves`, `handshake_context`, a setting this table does not list | refused: `… sets <setting>, which may refuse the handshake` | fail-closed: which suites and curves the workflow's TLS library shares with a list is the runner image's to say, and a handshake module may fail |
+
+Last, the strict SNI check: with `strict_sni_host` on, Caddy answers
+a request whose SNI is not its Host with an error, and it turns the
+check on itself, when the file leaves it unset, for a server where
+any policy authenticates clients. A box host that is an IP address,
+whose requests carry no SNI, is then refused `the server's
+strict_sni_host refuses a request to an IP address, which carries no
+SNI`.
+
+The cost, as with "may": the questions are asked of the connection
+as curl makes it, not as whatever stands in front of the box passes it
+on. A box host that a proxy reaches with a client certificate
+(Cloudflare's Authenticated Origin Pulls), or a balancer with PROXY
+headers where `proxy_protocol` falls back to `REQUIRE`, refuses every
+push, though the workflow's connection through them would arrive; so
+does a cipher or curve list on a policy for the box host. The remedies:
+client certificates on the app sites, not the box host, whose gate is
+`deploy_trust`; `allow` the balancer's range and leave the fallback
+at its default; ciphers and curves only on sites whose names do not
+cover the box host (Accepted residuals).
+
+Not caught here. `init` runs no pre-check (the reload is the
 check, and a reload loads an unreachable `/` as happily as any other),
 so a file `init` installs that serves `/` first is found by the first
 push, which meets the front handler's answer instead of this one's;
@@ -581,12 +659,18 @@ the console is the way back ("At 3am"), and whether the workflow asks
 call. A `request_body` cap below the bundle's 16 MiB, or a `timeouts`
 read deadline shorter than the upload, ahead of `box_webhook` is not
 caught either: the push reaches the handler and fails its body read
-(400), which names the bundle. Nor is anything that refuses the
-connection before a route runs: the walk reads each server's routes,
-not its TLS connection policies (a required client certificate), its
-listener wrappers (`proxy_protocol`) or its `protocols`, so a signed
-push that sets one the workflow's connection cannot pass strands the
-box until root undoes it ("At 3am").
+(400), which names the bundle; one below every bundle strands the box
+(owed, "Triage"). No other server setting is read: a
+push that sets the server's request limits below what the workflow
+sends (`timeouts { read_header }` shorter than a handshake from the
+runner, `max_header_size` below its headers and their OIDC token)
+passes, and the next push is refused before any route (owed,
+"Triage"). Nor is where the server listens: a push that moves the box
+host's server where the workflow's `https://<host>/` does not arrive
+(`https_port`, a `bind` to an address the host's name does not lead
+to) passes, since a port forward or a NAT'd address makes the same
+lines right, and strands the box until root undoes it ("At 3am";
+owed, "Triage"). Nor is a host without a certificate.
 
 ## The install transaction
 
@@ -811,7 +895,17 @@ can do both by other means.
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
 | A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4 (the triage skill): a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
 | An app's `env_file` outside `/etc/hotserve/secrets/` that is not on the box: the push applies green, since config load is silent about an absent file (`warnEnvFileModeOf`, liveswap/app.go). A deploy fails at its launch, named, and the old version keeps serving; but a crash's relaunch fails the same way, so the app stays down until the console makes the file | "Which checks run where" | 4 | 4 | 1 | 16; every launch names the missing file. A warning at config load would fire on every CI check, where the file cannot exist; reporting root's own stat in the push's result is a new field (size 3, risk 2) |
-| `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the latest stable, or the one `HOTSERVE_VERSION` names), whose install step's line names it. `hotserve version` prints Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
+| `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the box's `HOTSERVE_VERSION` file; without one, the latest stable, or the one the `HOTSERVE_VERSION` variable names), whose install step's line names it; a box with a file is checked with `hotserve-<version>`, which the box's green line names. `hotserve version` on a release that old prints only Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
+| A box host that a proxy reaches with a client certificate (Cloudflare's Authenticated Origin Pulls), or that a balancer reaches through a `proxy_protocol` falling back to `REQUIRE`, or whose TLS policy sets ciphers or curves: every push is refused, though the workflow's connection would arrive | Reachability, "The connection" | 2 | 5 | 1 | 10; red and named, and each remedy there keeps the box reachable. Admitting the setting needs the comparison the owed row below names (size 3) |
+| A box server whose TLS policies are in an order no Caddyfile adapts to passes as walked: a list in which no policy is sure to apply to the host (Caddy then refuses the handshake), or, past 30 policies, one matching the host by wildcard or by matcher ahead of one naming it exactly (Caddy looks at that one first) | Reachability, "The connection" | 4 | 1 | 3 | 12; the input is always the adapter's, which ends every list with a catch-all and writes a policy naming a host ahead of any other matching it |
+
+**Owed** (over the bar, not yet fixed):
+
+| Finding | S | O | D | Where the fix lands |
+|---|---|---|---|---|
+| A push moves the box host's server where the workflow's `https://<host>/` does not arrive (`https_port`, a `bind` to an address the host's name does not lead to) with nothing forwarding to it: it applies green, and the next push finds no answer | 4 | 5 | 3 | 60; not decidable from the file alone, since a port forward or a NAT'd address makes the same lines right (the e2e box listens on 8443). Decided 2026-10-16, compare rule, console moves: a follow-up PR refuses, named, a push that changes the listen settings of the server carrying `box_webhook` (found by its route, not its name) from those of the running configuration, which the push arrived through; a deliberate move is made at the console. An allowance scoped to a target is a possible later addition, not decided |
+| A push sets the box server's request limits below what the workflow sends (`timeouts { read_header }` shorter than a handshake from the runner, `max_header_size` below its headers and their OIDC token): it applies green, and the next push is refused before any route | 4 | 5 | 3 | 60; found while fixing the connection check. Decided 2026-10-16, floors sized together: the box host shares its server with every app site on :443, so a compare rule would block ordinary app hardening. A follow-up refuses only values the workflow cannot work with, for `read_header_timeout`, `read_timeout`, `read_idle_timeout`, `read_min_rate` and `max_header_bytes`; the `write_*` limits get none, since the poll recovers a cut POST. The sizes are agreed with the owner before it is built |
+| A `request_body` ahead of `box_webhook` passes the walk whatever it sets: a `set` replaces every push's body, and a `max_size` below the smallest bundle refuses every push; the push that adds it applies green, and the box is reachable only from the console | 4 | 5 | 3 | 60; found answering a question on this change. `set` is one branch in the handler table ("changes the request first"); `max_size` is a floor, sized with the floors above (the box site's routes are its own, so app hardening is not in its way); the owner decides |
 
 ## Admission
 
@@ -874,7 +968,7 @@ an empty cell means nobody, by design.
 <!-- table: paths (box/units_test.go reads it) -->
 | Path | Mode | Owner | Creates | Writes | Reads | Removes |
 |---|---|---|---|---|---|---|
-| `/etc/hotserve/Caddyfile` | 0644 | root:root | postinstall (the starter, where nothing stands) | applier, `init`, console; postinstall (the new starter, only while the file is byte-identical to the starter it last wrote) | hotserve, handler, applier, postinstall | — |
+| `/etc/hotserve/Caddyfile` | 0644 | root:root | postinstall (the starter, where nothing stands) | applier, `init`, console; postinstall (the new starter, only while the file is byte-identical to the starter it last wrote) | hotserve, handler, applier, postinstall | postremove (`apt purge`; a regular file only, never a symlink) |
 | `/etc/hotserve/.Caddyfile.box-<id>` | 0644 | root:root | applier, `init` | applier, `init` | — | applier, `init` (renamed over `Caddyfile`, or removed on failure) |
 | `/etc/hotserve/.Caddyfile.package-<pid>` | 0644 | root:root | postinstall | postinstall | — | postinstall (renamed over `Caddyfile`, or removed on failure; the next run removes a crash's) |
 | `/etc/hotserve/age/` | 0700 | root:root | tmpfiles.d | `box key` | applier, `box key` | — |
@@ -885,7 +979,7 @@ an empty cell means nobody, by design.
 | `/etc/hotserve/secrets/` | 2750 | root:hotserve | tmpfiles.d | applier | hotserve, handler, applier | — |
 | `/etc/hotserve/secrets/<app>.env` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | hotserve (each launch of `<app>`, and its response filter), handler (step 4's digest), applier | applier (when `applied.json` lists the app and HEAD has no `secrets/<app>/`) |
 | `/etc/hotserve/secrets/.<app>.env.box-<id>` | 0640 | root:hotserve (born in the setgid dir) | applier | applier | — | applier (renamed over `<app>.env`, or removed on failure; recovery removes a crash's) |
-| `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | — |
+| `/var/lib/hotserve-box/` | 2750 | root:hotserve | tmpfiles.d | — | — | postremove (`apt purge`; the tree whole, with every row under it, unless something is mounted at or under it) |
 | `…/stage/` | 0700 | hotserve:hotserve | tmpfiles.d | handler (bundle temporaries) | handler, applier (sweep) | handler (its own temporaries) |
 | `…/stage/lock` | 0600 | hotserve:hotserve | handler | — | handler (`flock`) | — |
 | `…/stage/<id>.auth` | 0600 | hotserve:hotserve | handler, after the rename into `in/` | — | handler (pending, a poll's `admitted`), applier (sweep) | applier (sweep) |
@@ -900,9 +994,9 @@ an empty cell means nobody, by design.
 | `…/out/.<id>.json.tmp` | 0640 | root:hotserve | applier | applier | — | applier (renamed over `<id>.json`, or removed on failure; recovery removes a crash's) |
 | `…/applied.json` | 0640 | root:hotserve | `init` | applier, `init`, `baseline` (all under `lock`) | handler (`GET /`), applier | — |
 | `…/.applied.json.tmp` | 0640 | root:hotserve (born in the setgid dir) | applier, `init`, `baseline` | applier, `init`, `baseline` | — | the writer (renamed over `applied.json`, or removed on failure); the applier's recovery removes a crash's |
-| `…/lock` | 0600 | root:hotserve (born in the setgid dir) | whichever of applier, `init`, `baseline` takes it first | — | applier, `init`, `baseline` (blocking `flock`) | — |
+| `…/lock` | 0600 | root:hotserve (born in the setgid dir) | whichever of applier, `init`, `baseline` takes it first | — | applier, `init`, `baseline` (blocking `flock`); postremove (`apt purge`: a `flock` waited for up to 30s, held through the removals) | — |
 | `/usr/share/hotserve/Caddyfile` | 0644 | root:root | package | package | postinstall | package |
-| `/var/lib/hotserve-package/` | 0700 | root:root | package | — | — | — |
+| `/var/lib/hotserve-package/` | 0700 | root:root | package | — | — | postremove (`apt purge`, whole) |
 | `/var/lib/hotserve-package/starter.sha256` (and its `.<pid>` temporary) | 0644 | root:root | postinstall | postinstall (by rename: after each starter it writes, and when `Caddyfile` already is the starter but the record does not say so) | postinstall | postinstall (the temporary: renamed over the record, or removed on failure; the next run removes a crash's) |
 
 Notes that the table cannot hold:
@@ -920,6 +1014,17 @@ Notes that the table cannot hold:
   `.Caddyfile.box-` prefix (`sweepTemporaries`).
 - `/var/lib/hotserve-box` joins `sandboxHotservePaths`
   (liveswap/sandbox.go): never a bind source for an app.
+- `apt purge` is the one removal that is not a process of the design:
+  `packaging/postremove.sh` removes the exchange tree whole, the
+  record and `applied.json` with it, the box's `Caddyfile` (a regular
+  file only) and the starter's record — both under `lock`, waited for
+  up to 30s, so a run under way cannot swap a Caddyfile in after the
+  removal; a run still holding it then keeps both, named — and keeps
+  `/etc/hotserve/age/`,
+  `age.pub` and `secrets/`, naming them: the key is the one way to
+  read the secrets the repository holds, and only the person purging
+  knows whether that is over. A plain `apt remove` removes none of
+  these.
 - The applier reaches `stage/` and anything the hotserve uid created
   through `CAP_DAC_OVERRIDE`/`CAP_FOWNER`, so the "Removes" column can
   be honoured against a hostile creator (a `mkdir in/x && chmod 000
@@ -1010,7 +1115,7 @@ Every numeric bound, in one place, with its reason.
 | request id | 32 lowercase hex, random for each push | 128 bits: two honest runs never collide; one spelling, so one id names one push |
 | validate children (`hotserve validate`, `hotserve-backup validate`) | 120 s each and a 1 s `WaitDelay`; output kept: the last 4 KiB, of which the refusal quotes the `Error:` line (else the last line), redacted, then bounded as quoted input | validate provisions every module; a legitimate run is about a second, and a loaded box or a slow issuer discovery must not refuse a good push |
 | the adapt child (`hotserve adapt`) | 120 s and a 1 s `WaitDelay`, as validate's; run after `hotserve validate` passed, so a non-zero exit is the box's error (500), never a refusal | the adapter validate just ran; a loaded box must not refuse a good push |
-| the adaptation | 16 MiB of stdout kept, bytes past it counted and dropped (never an error to the pipe: a child blocked on a full pipe would run to its deadline), stderr discarded; past the cap the push is refused `the new Caddyfile's adaptation is larger than 16 MiB`; the JSON reaches nothing but the reachability walk, since it holds every expanded `{$VAR}`; the walk decodes it once and converts it in one pass, linear in its size however deep its routes nest | a 1 MiB Caddyfile adapts to a few MiB; the bundle's own figure |
+| the adaptation | 16 MiB of stdout kept, bytes past it counted and dropped (never an error to the pipe: a child blocked on a full pipe would run to its deadline), stderr discarded; past the cap the push is refused `the new Caddyfile's adaptation is larger than 16 MiB`; the JSON reaches nothing but the reachability walk, since it holds every expanded `{$VAR}`; the walk decodes it once and converts it in one pass, then encodes the box server's connection settings again into their shapes: linear in its size however deep its routes nest | a 1 MiB Caddyfile adapts to a few MiB; the bundle's own figure |
 | handler poll interval for the first result | 1 s | how long a result root has written can wait before the handler reads it and answers the POST: `verified`, or a final result if root was that quick ("Why 202 and a poll") |
 | workflow poll | 30 minutes, then red naming the journal | past root's worst case at its own deadlines, with room for the `is-active` calls and recovery: a 10-minute chain, the 300 s `activating` wait, and the 300 s deadline on each of the reload and the rollback reload come to 25 minutes |
 | `activating` / `reloading` wait (step 16, recovery, `init`) | 300 s elapsed, one budget per run from its first sight of either state, never reset | hotserve's `TimeoutStartSec=240s` plus `RestartSec`; an elapsed bound, since `Restart=on-failure` can keep a unit activating across attempts; one budget, so a hotserve that flaps cannot hold root's lock for 300 s per bundle |
@@ -1113,6 +1218,21 @@ again from the renamed directory, a console step; a host rename needs a
 certificate first in any case. A repository whose box file sits
 elsewhere (`examples/box` before this rule kept one `Caddyfile` at the
 top) moves it once.
+
+Beside the file, the template may keep `<host>/HOTSERVE_VERSION`: the
+release that box runs, one line, which `make check` checks the box's
+files with (`bin/install-hotserve` installs each release the boxes'
+files name as `hotserve-<version>`, and the default — the
+`HOTSERVE_VERSION` variable's, else the latest stable — as `hotserve`;
+a file that names no release, or a release with no build, is said and
+skipped there and refused by `make check`, never read as the latest).
+It is the repository's alone: the bundle carries `<host>`'s tree, which
+names it, but never its blob, and the proof reads only the entries it
+walks (`walkTree`, box/proof/prove.go) and `hotserve box describe` only
+`<host>/secrets`, so neither the box nor root ever sees it. `GET /`
+does not report the box's release, so `bin/apply` cannot compare the
+two: the box's own `validate` is what refuses a file its release does
+not read.
 
 ## Secrets
 
@@ -1305,12 +1425,13 @@ listed.
 
 The app reads its env file at its next launch. A push of secrets
 alone reloads nothing ("Running apps are never restarted", after the trust chain), and it
-does not relaunch the app: liveswap refuses a deploy, and a rollback,
-to the version that is already running (`version … is already
-running; bump the version to redeploy`, `managedApp.deployLocked`, liveswap/app.go),
-and root asking the serving process for a relaunch would be root
-consuming its word. So the workflow's line says what launches the app
-now: a deploy of a new version. Open question 4.
+does not relaunch the app: root asking the serving process for a
+relaunch would be root consuming its word. The relaunch is the
+deployer's, through the webhook — a rollback to the running version,
+or a deploy of it with the same artifact (`relaunchRefusal`,
+liveswap/app.go; docs/secrets.md, "When a value reaches the app") —
+so the workflow's line says what launches the app now: a deploy of a
+new version. Open question 4.
 
 ### Which checks run where
 
@@ -1407,6 +1528,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository: move it there` (the recorded path is already `<host>/Caddyfile`) / `…: hotserve init, run again from that directory, records it` (it is not) | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
+| 422 | `refused` | `the new Caddyfile does not reach box_webhook on /: a listener's protocols include neither h1 nor h2` / `… : the <wrapper> listener wrapper may refuse the connection` / `… : the server's strict_sni_host refuses a request to an IP address, which carries no SNI` / `… : a TLS connection policy for <host> <what>` / `… : a TLS connection policy that may apply to <host> <what> (its <matcher> matcher is decided per connection)` — `<what>` is `requires a client certificate`, `drops the connection`, `offers neither h2 nor http/1.1 by ALPN` or `sets <setting>, which may refuse the handshake` ("The connection", in "Reachability") | handler | fail |
 | 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` / `<path> does not decrypt: <reason>` (one of the four reasons in "Values and the env file") / `<app>/<VAR>: the value has a line break` / `<app>/<VAR>: the value has a NUL byte` / `<app>/<VAR>: the value is not UTF-8` / `app <app>'s env file would be <n> bytes; the cap is 65536` (step 15a) | applier | fail |
@@ -1769,6 +1891,10 @@ under way, which stays in `in/` for the first run after the next
 install, held to every check any push is. It neither disables the path
 unit (an install after the removal finds it enabled and starts it) nor
 stops the service (a run under way settles by its own tables).
+`postremove.sh` then masks the path unit, as dh_installsystemd has it,
+so that nothing of it comes back until an install unmasks it; a purge
+drops its enable state and the mask, and removes the exchange tree
+(the Paths table's note on `apt purge`).
 
 ## Sequences
 
@@ -1973,6 +2099,7 @@ computer (Open question 6).
 | A client-chosen random id per push; a result poll authenticated by `deploy_trust`, the workflow minting a fresh token for each | A per-push poll secret (its digest sent with the push, the secret to poll); a box-issued id in the response | The poll secret let a push that removed its own workflow from `deploy_trust` read its result, at the price of a second credential, its own header scheme, and a marker that authenticates — and with it a question no answer suited: what a poll gets when that marker cannot be read. A fresh token per poll outlives a slow apply; the rare self-locking push reads 401 and the catalogue names the journal. A box-issued id: a lost POST response left the run with nothing to poll. |
 | The body read and parsed, and the fast path answered, before the admission lock | The lock before the body | A slow upload would hold the lock, and a replay of the applied `HEAD` sent while a push is pending would be refused instead of answered `no_change`. The cost: a body of up to 16 MiB read before a 409 for a pending push; memory is bounded by the one push slot (Caps), so a replay sent while another push is in memory is told to retry. |
 | A handler fast path for a replay of the applied `HEAD` | Rate-limiting successful admissions | Nothing would change on disk, so no root work is the right amount; a rate limit would also slow honest runs. |
+| A box's release in `<host>/HOTSERVE_VERSION`, read by the template's `bin/install-hotserve` and `bin/check` alone, with the repository variable as every box's default | A repository variable per box; one `make check` run per distinct release; the box reporting its release in `GET /` | The variable is the repository's, and one run per release still checks every box with every release, so a stable box's file passes under the candidate. The file sits where the box is described, in the signed commit, beside the file it is about; it is never sent, since the box runs what was installed on it and the file only tells the early check which release that is. `GET /` naming the release would let `bin/apply` compare the two, and stays open (#223). |
 | Host and recorded path as identity, the path `<host>/Caddyfile` derived by `init` | Host alone; a path typed at `init` (a directory argument, `--path`); a `path` line in the file | Host alone cannot pick between two files naming the same host; a typed path is free text checked only at the first push, and a directory argument a wrong-directory risk; a `path` line states the location a second time, in the signed file. The cost: one top-level directory per box, named for its host — no single `Caddyfile` at the root, no grouping, and a host rename moves the directory. |
 | Every chain commit signed | HEAD's signature only | An unsigned commit would ride in under the next signed one. |
 | Bundle rename before marker | Marker before bundle | A crash between them would answer 409 to every push until the marker aged out. |
@@ -1984,7 +2111,7 @@ computer (Open question 6).
 | A classic X25519 box key | A post-quantum hybrid key (ML-KEM-768 + X25519, age v1.3's `age1pq`) | age refuses to mix a post-quantum recipient with SSH-key recipients in one file, and the readers are the signers' SSH keys. Open question 6. |
 | The previous bytes of each env file in the record | Hard-link each previous file aside in `secrets/` | One durable artifact recovery reasons from (I8), as the Caddyfile's `prev` already is; a second artifact would need crash rows of its own. The cost: the record's read cap, 16 MiB. |
 | A set of env files alone reloads nothing | Reload anyway | hotserve reads an env file at an app's launch, never at a load ("Running apps are never restarted", after the trust chain). |
-| No relaunch after a secrets change | Relaunch each app whose secrets changed | liveswap refuses a deploy, and a rollback, to the running version, so it would be a liveswap feature of its own, and root asking the serving process for it would be root consuming its word (backups' D10). Open question 4. |
+| No relaunch after a secrets change | Relaunch each app whose secrets changed | Root asking the serving process for it would be root consuming its word (backups' D10). The relaunch is the deployer's, through the webhook: a rollback to the running version (liveswap/DESIGN-liveswap.md, Behavior specification). Open question 4. |
 | Readers per box, in each box's `recipients` | One list of readers for the repository | A person may read one box's secrets and not another's; signers must match across boxes because every commit is on every box's chain, and readers have no such cause. |
 | The consistency checks in the handler and CI, not in root | In root | They catch mistakes and guard nothing; root installs what a signer signed and reads no more of an app block than the walk does. |
 | `init` installs no secrets | `init` decrypts the copied directory's secrets | `init` has no objects to prove them against and, on a fresh box, no key until it ends; the first push installs them by the whole chain. |
@@ -2020,12 +2147,17 @@ computer (Open question 6).
 3. **Host rename ergonomics.** Moving the directory in the commit that
    changes the host, then `init` again, is a console step. Lean: leave
    it; a rename needs a certificate first anyway.
-4. **A relaunch after a secrets change.** Today a changed value
-   reaches an app at its next launch, and a deploy of a new version is
-   the way to launch it now. A relaunch of the running version would be
-   liveswap's to add, through its health check, with two instances of
-   one release sharing its directory during the overlap. Lean: not
-   until someone needs it.
+4. **A relaunch after a secrets change.** A changed value reaches an
+   app at its next launch, and the deployer gives it one through the
+   webhook: a rollback to the running version, or a deploy of it with
+   the same artifact, relaunches it through liveswap's health check
+   (liveswap/DESIGN-liveswap.md, Behavior specification; the two
+   instances share the release dir for the overlap, an accepted
+   residual there). What stays open is whether the box's run should
+   say so beside "a deploy of a new version launches it now", and
+   whether a push of secrets should ever ask for the relaunch itself.
+   Lean: name the rollback in the run's line; never relaunch from the
+   applier.
 5. **The backup credential through this channel.** It could ride as
    the reserved `secrets/_backup/`, rendered to
    `/etc/hotserve-backup/repository.env`, 0600 root:root, outside the
@@ -2254,3 +2386,13 @@ Dated one-liners; the full text of each is in git.
   not scored, a line a signer may commit is occurrence 5, severity 1
   clears only by a cheap fix and gets no residual row, and an issue's
   item is scored before a branch is cut.
+- 2026-10-16 — A release per box: `<host>/HOTSERVE_VERSION`, optional,
+  pins the release `make check` checks that box with;
+  `bin/install-hotserve` installs each release the files name as
+  `hotserve-<version>`, the default as `hotserve`. Read by the template
+  alone, never sent (#223).
+- 2026-10-16 — Step 6 asks the box server's connection settings
+  before its routes: its listeners' protocols, its listener wrappers,
+  the TLS connection policy for the host and its strict SNI check
+  ("The connection"). They had been stated as not caught; where the
+  server listens, and its request limits, stay uncaught and are owed.

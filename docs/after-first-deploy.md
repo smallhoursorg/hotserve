@@ -32,7 +32,8 @@ changes nothing, and the run says why.
 
 A reload never restarts a running app: a changed `app` block applies
 at the app's next launch — its next deploy or rollback, or a relaunch
-after a crash.
+after a crash. A rollback to the running version gives it one now
+([When a value reaches the app](secrets.md#when-a-value-reaches-the-app)).
 
 <details>
 <summary><b>If the app is a Deno app</b></summary>
@@ -210,7 +211,8 @@ A change that loads but misbehaves is reverted like any commit: `git
 revert`, push.
 
 A secret that has leaked is changed like any other (`make secret`, a
-push), and reaches the app only at its next launch: deploy a new
-version of the app to launch it with the new value. A hand edit of an
+push), and reaches the app at its next launch: roll back to the
+running version, or deploy a new one ([When a value reaches the
+app](secrets.md#when-a-value-reaches-the-app)). A hand edit of an
 env file under `/etc/hotserve/secrets/` is overwritten by the next
 push, as a hand edit of the Caddyfile is.

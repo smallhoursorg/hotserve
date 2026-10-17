@@ -65,9 +65,9 @@ v=${v##*/v}                         # the latest release's tag, without the v
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 mkdir -p /var/local/hotserve && cd /var/local/hotserve
-curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-apt install ./hotserve_${v}_${arch}.deb
+curl -fsSLO "$base/hotserve_${v}_${arch}.deb" && curl -fsSLO "$base/checksums.txt" &&
+  sha256sum -c --ignore-missing checksums.txt &&
+  apt install ./hotserve_${v}_${arch}.deb
 systemctl enable --now hotserve
 ```
 
@@ -84,16 +84,18 @@ arch=$(dpkg --print-architecture)   # amd64 or arm64
 deb=hotserve_$(echo "$v" | tr - .)_${arch}.deb
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
 mkdir -p /var/local/hotserve && cd /var/local/hotserve
-curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-apt install "./$deb"
+curl -fsSLO "$base/$deb" && curl -fsSLO "$base/checksums.txt" &&
+  sha256sum -c --ignore-missing checksums.txt &&
+  apt install "./$deb"
 systemctl enable --now hotserve
 ```
 
 The box's repository (step 3) then needs its Actions variable
 `HOTSERVE_VERSION` set to the same version, `0.3.0-rc2`: its workflow
 checks with the latest stable release unless told otherwise, and a
-release candidate is never that.
+release candidate is never that. (With more than one box, a
+`HOTSERVE_VERSION` file beside this box's Caddyfile pins this box
+alone: the template's README, "A box on another release".)
 
 </details>
 
@@ -479,9 +481,13 @@ app block changes that, `0` keeps them on the box). The full journal
 is `journalctl -t hotserve-example` on the box. Nothing was serving
 before, so nothing changed.
 
-A re-run of the same workflow run is refused with a 422: versions are
-immutable on the box, and that commit's version is already there. Push
-a new commit to deploy again.
+A re-run of the same workflow run rebuilds the tarball, and the box
+refuses it with a 422: versions are immutable on the box, that
+commit's version is already there, and the rebuilt bytes are not the
+ones it runs (the box relaunches a running version only for the very
+same artifact). Push a new commit to deploy again, or **Run workflow**
+with the running version as the rollback target to relaunch it as it
+is.
 
 ## What you have
 

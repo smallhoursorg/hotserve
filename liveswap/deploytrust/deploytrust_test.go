@@ -1,6 +1,7 @@
 package deploytrust
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -21,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
@@ -113,6 +115,30 @@ func TestSubjectAndClaimSubAreRefusedTogether(t *testing.T) {
 	_, err := Build([]TrustConfig{{Kind: "github", Audience: "a", Subject: "repo:o/r:pull_request", Claims: map[string]string{"repository": "o/r", "sub": "repo:o/r:ref:refs/heads/main"}}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "both set") {
 		t.Fatalf("subject and claim sub together must be refused at load, got %v", err)
+	}
+}
+
+func TestParseRefusesExactlyTheClaimKeysCaddyStrips(t *testing.T) {
+	// Caddy removes every "@id" pair from the raw JSON before decoding
+	// it (caddy.RemoveMetaFields), so a claim the parser let through
+	// under such a key would never be enforced. The parser must refuse
+	// the keys the strip changes, and no others: an issuer may emit any
+	// other name.
+	for _, key := range []string{"@id", `x"@id`, `"@id`, "@idx", "x@id", "@ID", "id", `@id"`, " @id", "@id ", "sub"} {
+		raw, err := json.Marshal(TrustConfig{Kind: "oidc", Claims: map[string]string{key: "v", "zz": "w"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stripped := !bytes.Equal(caddy.RemoveMetaFields(raw), raw)
+		d := caddyfile.NewTestDispenser("deploy_trust oidc {\n\tclaim \"" + strings.ReplaceAll(key, `"`, `\"`) + "\" v\n}")
+		d.Next()
+		tc, err := Parse(d)
+		switch {
+		case stripped && (err == nil || !strings.Contains(err.Error(), "cannot be pinned")):
+			t.Errorf("claim %q: Caddy strips it, so the parser must refuse it, got %v", key, err)
+		case !stripped && (err != nil || tc.Claims[key] != "v"):
+			t.Errorf("claim %q: Caddy keeps it, so the parser must too, got %+v, %v", key, tc, err)
+		}
 	}
 }
 

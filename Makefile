@@ -146,8 +146,25 @@ vulncheck:
 # Full-history secret scan — the same engine and image as CI's gitleaks
 # gate (the image is pinned in docker-compose.yml, where Dependabot
 # watches it), so local and CI can never drift.
+#
+# Inside the container the history is readable only when .git is a
+# directory: a git worktree's .git is a file naming a gitdir outside
+# the /src mount, and there gitleaks logs "not a git repository",
+# scans 0 commits and exits 0 with "no leaks found" — a false pass. So
+# a worktree gets --no-git and the scan covers the working tree
+# instead: every file on disk (ignored build output included), not
+# the branch's commits — those CI's git-mode run covers. A plain
+# checkout (and CI's) is unchanged.
+secretscan: GITLEAKS_FLAGS = $(shell test -d .git || echo --no-git)
 secretscan:
-	$(COMPOSE) run --rm gitleaks detect --source /src --redact -v
+	$(COMPOSE) run --rm gitleaks detect --source /src --redact -v $(GITLEAKS_FLAGS)
+
+# hotserve's release, linked in as Caddy's CustomVersion. Caddy puts it
+# in front of its full version (`hotserve version`, `--version`,
+# `environ`), which otherwise names only the Caddy built in. The short
+# version, in Caddy's ACME User-Agent, metrics, tracing and FastCGI
+# SERVER_SOFTWARE, stays Caddy's own.
+GO_LDFLAGS = -s -w -X github.com/caddyserver/caddy/v2.CustomVersion=v$(VERSION)
 
 # The public ledger of what building hotserve costs: Claude Code
 # sessions, Actions runner minutes and Copilot credits as month-level
@@ -173,10 +190,11 @@ usage-check:
 	git diff --exit-code -- docs/footprint.md
 
 # Cross-compiles the product binary for the release targets. GOFLAGS is
-# cleared so -buildvcs is back on: caddycmd stamps the version from the
-# checked-out tag via build info (the dev service disables it for test
-# cache friendliness). safe.directory is needed because /src is a bind
-# mount owned by a different uid than the container's root.
+# cleared so -buildvcs is back on: Go records the commit, and on a tag
+# the release, in the build info `hotserve build-info` prints (the dev
+# service disables it for test cache friendliness). safe.directory is
+# needed because /src is a bind mount owned by a different uid than the
+# container's root.
 # The trailing chmod is for Linux CI runners: the container runs as
 # root, so without it the bind-mounted build/ is unwritable to the
 # host user and package's cp/rm staging fails (macOS masks this).
@@ -185,8 +203,8 @@ usage-check:
 build:
 	$(COMPOSE) run --rm -e GOFLAGS= -e CGO_ENABLED=0 dev sh -c '\
 		git config --global --add safe.directory /src; \
-		GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-amd64 ./cmd/hotserve & p1=$$!; \
-		GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o build/hotserve-linux-arm64 ./cmd/hotserve & p2=$$!; \
+		GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(GO_LDFLAGS)" -o build/hotserve-linux-amd64 ./cmd/hotserve & p1=$$!; \
+		GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$(GO_LDFLAGS)" -o build/hotserve-linux-arm64 ./cmd/hotserve & p2=$$!; \
 		wait $$p1 || exit 1; wait $$p2 || exit 1; \
 		chmod -R a+rwX build'
 

@@ -28,6 +28,15 @@ func FuzzReach(f *testing.F) {
 	}
 	f.Add(reachJSON(`{"match":[{"not":[{"path":["/"]}]}],"handle":[{"handler":"static_response"}]},`, ""), "deploy.example.com")
 	f.Add(reachJSON(`{"handle":[{"handler":"headers","request":{}}]},`, ""), "deploy.example.com")
+	f.Add(connJSON(`"protocols":["h3"],`), "deploy.example.com")
+	f.Add(connJSON(`"listener_wrappers":[{"wrapper":"proxy_protocol","fallback_policy":"REQUIRE"},{"wrapper":"tls"}],`), "deploy.example.com")
+	f.Add(connJSON(`"tls_connection_policies":[{"match":{"remote_ip":{}}},{"match":{"sni":["*.example.com"]},"client_authentication":{"mode":"require"}}],`), "deploy.example.com")
+	f.Add(connJSON(`"strict_sni_host":true,`), "203.0.113.5")
+	// Names the bytes leave empty: the host (the walk never gives one),
+	// a setting, a matcher.
+	f.Add(connJSON(`"tls_connection_policies":[{"drop":true}],`), "")
+	f.Add(connJSON(`"tls_connection_policies":[{"":1}],`), "deploy.example.com")
+	f.Add(connJSON(`"tls_connection_policies":[{"match":{"":1},"drop":true}],`), "deploy.example.com")
 	f.Add([]byte("{"), "x")
 	f.Add([]byte(`{"apps":{"http":{"servers":{"a":{"routes":[{"match":[{"host":["{x}"]}],"handle":[{"handler":"box_webhook"}],"group":"g","terminal":true}]}}}}}`), "h")
 	f.Fuzz(func(t *testing.T, adapted []byte, host string) {
@@ -43,8 +52,17 @@ func FuzzReach(f *testing.F) {
 	})
 }
 
-// catalogueReach is the 422 row's reachability texts: what stands in
-// the way (a module name, an earlier site, a terminal route), then one
-// of the four verbs.
-var catalogueReach = regexp.MustCompile(`^the new Caddyfile does not reach box_webhook on /: ` +
-	`(.+) (answers first|changes the request first|may (answer|change the request) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\))$`)
+// catalogueReach is the 422 row's reachability texts: what refuses the
+// connection (the protocols, a listener wrapper, a TLS connection
+// policy and what it does), or what stands in the way of the request
+// (a module name, an earlier site, a terminal route) and one of the
+// four verbs.
+var catalogueReach = regexp.MustCompile(`^the new Caddyfile does not reach box_webhook on /: (` +
+	`a listener's protocols include neither h1 nor h2|` +
+	`the .+ listener wrapper may refuse the connection|` +
+	`the server's strict_sni_host refuses a request to an IP address, which carries no SNI|` +
+	`a TLS connection policy for .* ` + policyWhat + `|` +
+	`a TLS connection policy that may apply to .* ` + policyWhat + ` \(its .+ matcher is decided per connection\)|` +
+	`(.+) (answers first|changes the request first|may (answer|change the request) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\)))$`)
+
+const policyWhat = `(requires a client certificate|drops the connection|offers neither h2 nor http/1\.1 by ALPN|sets .+, which may refuse the handshake)`

@@ -18,7 +18,8 @@
 # applier and then with the real one, and stages 3 to 5 follow its path
 # unit through upgrade, removal and an install after removal. Stage 5b
 # follows the starter config through upgrades: none asks, a stock file
-# follows the starter, and no other file is touched.
+# follows the starter, and no other file is touched. Stage 6 purges:
+# what the package made goes, the apps' data and the key stay.
 set -eu
 
 # TOKEN is minted in stage 2 with a local deploy key (deploy_trust
@@ -115,7 +116,14 @@ runuser -u hotserve -- touch "${RECORD%/*}/smoke" 2>/dev/null \
 	&& die "the hotserve user can create files beside the record"
 echo "starter installed, no conffiles, the record root's alone"
 
-/usr/bin/hotserve version
+# A bug report quotes this line (SECURITY.md), so it names the release
+# ahead of the Caddy it was built with (the Makefile's GO_LDFLAGS). The
+# package carries the same release, with nfpm's "~" for a prerelease's
+# "-", which makes dpkg sort it before the release.
+want="v$(dpkg-query -W -f='${Version}' hotserve | tr '~' '-')"
+got=$(/usr/bin/hotserve version) || die "hotserve version failed"
+echo "$got"
+case "$got" in "$want "*) : ;; *) die "hotserve version printed '$got', want it to start with '$want ' (the package's release)" ;; esac
 for m in liveswap http.handlers.liveswap_webhook \
 	http.reverse_proxy.upstreams.liveswap http.handlers.hint_penaltybox \
 	http.handlers.cache storages.cache.otter; do
@@ -681,6 +689,17 @@ sd_version=$(systemctl --version | awk 'NR==1 {print $2}')
 [ "$mgr_nofile" = "1048576" ] \
 	|| die "systemd $sd_version: user@$uid DefaultLimitNOFILE is $mgr_nofile, not the drop-in's 1048576"
 echo "app NOFILE $app_nofile = user@$uid DefaultLimitNOFILE = the drop-in's 1048576 (systemd $sd_version)"
+# No core dump of a crashed app: LimitCORE=0 on both limits
+# (liveswap/systemd_dbus.go; the why is in DESIGN-threat-model.md,
+# "Where env_file values sit"). The unit's property, then the limit
+# the app itself saw from inside.
+[ "$(user_systemctl show -p LimitCORE --value "$unit")" = "0" ] \
+	|| die "app unit LimitCORE is '$(user_systemctl show -p LimitCORE --value "$unit")', want 0: a crash could write the app's memory to disk"
+[ "$(user_systemctl show -p LimitCORESoft --value "$unit")" = "0" ] \
+	|| die "app unit LimitCORESoft is '$(user_systemctl show -p LimitCORESoft --value "$unit")', want 0"
+expect_probe core_soft 0
+expect_probe core_hard 0
+echo "app core-dump limit 0/0: a crash writes no dump"
 echo "deployed as unit $unit under user@$uid; app output in the journal"
 
 # The sandbox tier: full — a PID namespace on top of the user namespace
@@ -997,7 +1016,25 @@ kill -0 "$pid_after" 2>/dev/null && die "deployed app (pid $pid_after) survived 
 systemctl is-active --quiet hotserve-box-apply.path && die "the box applier's path unit is still active after remove (preremove did not stop it)" || true
 [ ! -e /lib/systemd/system/hotserve-box-apply.path ] && [ ! -e /lib/systemd/system/hotserve-box-apply.service ] \
 	|| die "the box applier's units are still installed after remove"
-echo "removal stopped the service, the apps and the box applier's path unit, kept the config and the record"
+# postremove's daemon-reload, run after dpkg removed the unit files:
+# the manager no longer loads them. The path unit is masked, as
+# dh_installsystemd has it, until an install unmasks it (stage 5 finds
+# it enabled and active again); the mask is a /dev/null link where the
+# unit file was, and deb-systemd-helper's note of it is what lets
+# postinstall take it off without undoing an administrator's own mask.
+for u in hotserve.service hotserve-box-apply.service; do
+	[ "$(systemctl show -p LoadState --value "$u")" = not-found ] \
+		|| die "$u is still loaded after remove ($(systemctl show -p LoadState,FragmentPath --value "$u" | tr '\n' ' ')): postremove did not reload the manager"
+	[ -z "$(systemctl list-unit-files --no-legend "$u" 2>/dev/null)" ] \
+		|| die "$u is still a unit file after remove: $(systemctl list-unit-files --no-legend "$u")"
+done
+[ "$(systemctl is-enabled hotserve-box-apply.path 2>/dev/null)" = masked ] \
+	|| die "hotserve-box-apply.path is '$(systemctl is-enabled hotserve-box-apply.path 2>&1)' after remove, want masked (postremove's deb-systemd-helper mask)"
+[ "$(readlink /etc/systemd/system/hotserve-box-apply.path)" = /dev/null ] \
+	|| die "the mask of hotserve-box-apply.path is not a /dev/null link in /etc/systemd/system"
+[ -e /var/lib/systemd/deb-systemd-helper-masked/hotserve-box-apply.path ] \
+	|| die "deb-systemd-helper did not note the mask: postinstall's unmask would leave the path unit masked"
+echo "removal stopped the service, the apps and the box applier's path unit, kept the config and the record; the units unloaded, the path unit masked"
 
 stage "stage 5: install again after removal"
 # preremove stops the path unit and does not disable it, so an install
@@ -1147,6 +1184,151 @@ echo "a directory at a temporary's exact name: left as it was, $CONFIG and the r
 apt-get remove -y hotserve >/dev/null
 systemctl is-active --quiet hotserve-box-apply.path && die "the second remove left the path unit active" || true
 echo "stage 5b: removed again; the path unit stopped"
+
+stage "stage 6: purge"
+# postremove on purge removes what the package made and nothing else
+# holds — the box's config, the starter's record, the box applier's
+# exchange tree, the path unit's enable state and its mask — and never
+# Caddy's state, the deployed apps' data or the account. The box's key
+# for secrets stays in /etc/hotserve, and the purge says so on stderr.
+# Each path is checked to be there first, so that "gone" proves the
+# purge removed it; the installed postrm is copied for the mount case
+# below, since dpkg removes the script with the purge.
+cp /var/lib/dpkg/info/hotserve.postrm /tmp/hotserve.postrm
+: >/var/lib/hotserve/smoke-state
+for p in "$CONFIG" "$RECORD" "$B/in" "$B/out" /etc/hotserve/age/identity "$view" \
+	/var/lib/liveswap/other/shared/secret /var/lib/systemd/deb-systemd-helper-enabled/hotserve-box-apply.path.dsh-also \
+	/var/lib/systemd/deb-systemd-helper-masked/hotserve-box-apply.path; do
+	[ -e "$p" ] || die "the purge would prove nothing: $p is already gone"
+done
+apt-get purge -y hotserve >/tmp/purge.out 2>&1 || { cat /tmp/purge.out; die "apt-get purge failed"; }
+cat /tmp/purge.out
+case "$(dpkg-query -W -f='${Status}' hotserve 2>/dev/null)" in
+'' | *not-installed) : ;;
+*) die "hotserve is still '$(dpkg-query -W -f='${Status}' hotserve)' after purge" ;;
+esac
+[ ! -e "$CONFIG" ] && [ ! -L "$CONFIG" ] || die "purge left $CONFIG"
+[ ! -e "${RECORD%/*}" ] || die "purge left ${RECORD%/*}"
+[ ! -e "$B" ] || die "purge left $B: $(find "$B" | tr '\n' ' ')"
+[ -f /var/lib/hotserve/smoke-state ] || die "purge removed /var/lib/hotserve, Caddy's state"
+[ -f "$view" ] && [ -f /var/lib/liveswap/other/shared/secret ] || die "purge removed the apps' data under /var/lib/liveswap"
+id hotserve >/dev/null || die "purge removed the hotserve account"
+[ -f /etc/hotserve/age/identity ] && [ "$(cat /etc/hotserve/age.pub)" = "$box_key" ] \
+	|| die "purge removed the box's key for secrets, the one way to read the secrets its repository holds"
+grep -q 'kept /etc/hotserve: it still holds' /tmp/purge.out || die "the purge did not say it kept /etc/hotserve"
+grep -q 'age/identity is the box.s key for secrets' /tmp/purge.out || die "the purge did not name the key it kept"
+# The path unit's enable state and mask: gone, so a later install
+# starts from nothing (postinstall's was-enabled is true with no state).
+st=$(systemctl is-enabled hotserve-box-apply.path 2>&1) && die "hotserve-box-apply.path is still '$st' after purge" || true
+[ "$st" != masked ] || die "purge left hotserve-box-apply.path masked"
+[ "$(systemctl show -p LoadState --value hotserve-box-apply.path)" = not-found ] \
+	|| die "hotserve-box-apply.path is '$(systemctl show -p LoadState --value hotserve-box-apply.path)' after purge, want not-found"
+for p in /etc/systemd/system/hotserve-box-apply.path /etc/systemd/system/multi-user.target.wants/hotserve-box-apply.path \
+	/var/lib/systemd/deb-systemd-helper-enabled/hotserve-box-apply.path.dsh-also /var/lib/systemd/deb-systemd-helper-masked/hotserve-box-apply.path; do
+	[ ! -e "$p" ] && [ ! -L "$p" ] || die "purge left $p"
+done
+echo "purge: config, record and exchange tree gone; the key, Caddy's state, the apps' data and the account kept; the path unit's state and mask gone"
+
+# A mount at or under the exchange tree: nothing is removed through
+# it, the tree is kept whole and named, and the script still exits 0.
+# The tree is made again by hand and the saved postrm run as dpkg
+# runs it.
+mkdir -p "$B/work"
+mount -t tmpfs -o size=1m smoke "$B/work" || die "could not mount a tmpfs under $B; the mount case would prove nothing"
+: >"$B/work/through-the-mount"
+: >"$B/beside-the-mount"
+sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero with a mount under $B"; }
+[ -f "$B/work/through-the-mount" ] && [ -f "$B/beside-the-mount" ] \
+	|| die "postrm purge removed through or beside a mount under $B; left: $(find "$B" | tr '\n' ' ')"
+grep -q "kept $B: something is mounted at or under it" /tmp/postrm.out \
+	|| die "postrm purge did not say it kept $B: $(cat /tmp/postrm.out)"
+umount "$B/work"
+rm -rf "$B"
+echo "a mount under $B: postrm purge kept the tree whole, said so, exit 0"
+
+# The mount table names a mount point by its physical path. A tree
+# reached through a symlinked ancestor (/var -> /srv/var) must still be
+# seen as mounted: the function is taken out of the saved postrm and
+# asked about a stand-in reached through a link, since /var itself
+# cannot be made a link here.
+sed -n '/^mounted() {/,/^}/p' /tmp/hotserve.postrm >/tmp/mounted.sh
+grep -q '^mounted() {' /tmp/mounted.sh || die "could not take mounted() out of the postrm for the symlink case"
+mkdir -p /tmp/real-var/tree/work
+ln -sfn /tmp/real-var /tmp/link-var
+mount -t tmpfs -o size=1m smoke /tmp/real-var/tree/work || die "could not mount a tmpfs for the symlink case"
+if (. /tmp/mounted.sh && mounted /tmp/link-var/tree); then :; else
+	die "mounted() missed a tmpfs under a tree reached through a symlinked ancestor (/tmp/link-var -> /tmp/real-var)"
+fi
+if (. /tmp/mounted.sh && mounted /tmp/link-var/other); then
+	die "mounted() said a tree with nothing mounted under it is mounted (symlink case)"
+fi
+umount /tmp/real-var/tree/work
+rm -rf /tmp/real-var /tmp/link-var
+echo "a mount under a tree reached through a symlinked ancestor: mounted() saw it"
+
+# A physical path the mount table escapes (a space is written \040):
+# the comparison cannot see a mount under it, so the function fails
+# closed and says mounted whether or not anything is.
+mkdir -p "/tmp/real var/tree/work"
+ln -sfn "/tmp/real var" /tmp/link-spaced
+mount -t tmpfs -o size=1m smoke "/tmp/real var/tree/work" || die "could not mount a tmpfs for the escaped-path case"
+if (. /tmp/mounted.sh && mounted /tmp/link-spaced/tree); then :; else
+	die "mounted() missed a tmpfs under a tree whose physical path holds a space (written \\040 in the mount table)"
+fi
+umount "/tmp/real var/tree/work"
+if (. /tmp/mounted.sh && mounted /tmp/link-spaced/tree); then :; else
+	die "mounted() did not fail closed on a physical path holding a space"
+fi
+rm -rf "/tmp/real var" /tmp/link-spaced
+echo "a physical path the mount table escapes: mounted() fails closed, mount or not"
+
+# A scan that fails (awk exiting 2 with no answer) must count as
+# mounted: the tree is kept and named, not removed.
+mkdir -p /tmp/fakebin "$B/in"
+printf '#!/bin/sh\nexit 2\n' >/tmp/fakebin/awk
+chmod 0755 /tmp/fakebin/awk
+: >"$B/in/entry"
+PATH="/tmp/fakebin:$PATH" sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero with a failing awk"; }
+[ -f "$B/in/entry" ] || die "postrm purge removed $B although the mount scan failed; output: $(cat /tmp/postrm.out)"
+grep -q "kept $B: something is mounted at or under it" /tmp/postrm.out \
+	|| die "postrm purge did not say it kept $B when the scan failed: $(cat /tmp/postrm.out)"
+rm -rf /tmp/fakebin "$B"
+echo "a failing mount scan: postrm purge kept the tree, said so, exit 0"
+
+# A run of the applier under way holds root's lock for its whole run
+# and swaps the Caddyfile under it; preremove leaves a run alone. The
+# purge takes that lock first: it waits for a run to finish, then
+# removes the config and the tree; one that holds the lock past 30s
+# keeps both, named, and the script still exits 0. A flock on the lock
+# file stands in for the run, started and then seen held.
+hold_lock() { # <seconds>
+	mkdir -p "$B/in"
+	: >"$B/lock"
+	flock "$B/lock" sleep "$1" &
+	holder=$!
+	until ! flock -n "$B/lock" true 2>/dev/null; do sleep 0.1; done
+}
+cp /tmp/starter.prev "$CONFIG"
+hold_lock 4
+t0=$(date +%s)
+sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero while a run held the lock"; }
+t1=$(date +%s)
+wait "$holder" || true
+[ $((t1 - t0)) -ge 3 ] || die "postrm purge finished in $((t1 - t0))s with the lock held for 4s: it did not wait for the run"
+[ ! -e "$CONFIG" ] && [ ! -e "$B" ] || die "postrm purge waited for the lock but left $CONFIG or $B"
+echo "a run holding the lock for 4s: postrm purge waited $((t1 - t0))s, then removed the config and the tree"
+cp /tmp/starter.prev "$CONFIG"
+hold_lock 120
+t0=$(date +%s)
+sh /tmp/hotserve.postrm purge >/tmp/postrm.out 2>&1 || { cat /tmp/postrm.out; die "postrm purge exited non-zero with the lock held past its wait"; }
+t1=$(date +%s)
+kill "$holder" 2>/dev/null || true
+[ $((t1 - t0)) -ge 29 ] || die "postrm purge gave up on the lock after $((t1 - t0))s, want about 30"
+[ -f "$CONFIG" ] && [ -d "$B/in" ] || die "postrm purge removed $CONFIG or $B although a run held the lock"
+grep -q "kept $CONFIG and $B: a run of the box applier holds $B/lock" /tmp/postrm.out \
+	|| die "postrm purge did not say it kept both for the run: $(cat /tmp/postrm.out)"
+rm -rf "$B" "$CONFIG"
+echo "a run holding the lock past 30s: postrm purge kept the config and the tree, said so, exit 0"
 
 echo ""
 echo "ALL PACKAGE SMOKE STAGES PASSED ($deb on $(. /etc/os-release && echo "$PRETTY_NAME"))"

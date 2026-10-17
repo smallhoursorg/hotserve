@@ -1,6 +1,8 @@
 package deploytrust
 
 import (
+	"strings"
+
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 
 	"github.com/smallhoursorg/hotserve/liveswap/internal/dispenser"
@@ -73,6 +75,9 @@ func Parse(d *caddyfile.Dispenser) (TrustConfig, error) {
 			if !d.NextArg() {
 				return tc, d.ArgErr()
 			}
+			if caddyStripsKey(key) {
+				return tc, d.Errf("claim %q cannot be pinned: Caddy's removal of \"@id\" keys would drop it before deploy_trust reads the config", key)
+			}
 			if tc.Claims == nil {
 				tc.Claims = make(map[string]string)
 			}
@@ -85,4 +90,19 @@ func Parse(d *caddyfile.Dispenser) (TrustConfig, error) {
 		}
 	}
 	return tc, nil
+}
+
+// caddyStripsKey reports whether Caddy deletes a claim under this key
+// before deploy_trust can read it. caddy.RemoveMetaFields removes every
+// `"@id": <value>` pair it finds in the raw JSON with a regexp, meta
+// field or not (Caddy v2.11.7: idRegexp), so the constraint would go
+// unenforced and nothing would say so. The regexp matches the key @id,
+// and also a key ending in `"@id`, whose quote is written `\"`: the
+// match runs from that quote to the key's end, and what is left either
+// merges into the next key or does not decode. Every other name is kept
+// pinnable, since an issuer may emit it. A config written as JSON loses
+// the pair before any hotserve code runs, which is why a JSON config is
+// unsupported (README.md, "What hotserve is (and isn't)"; #251).
+func caddyStripsKey(key string) bool {
+	return key == "@id" || strings.HasSuffix(key, `"@id`)
 }

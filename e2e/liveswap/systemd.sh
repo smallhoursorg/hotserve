@@ -329,13 +329,16 @@ curl -fsS --max-time 5 http://127.0.0.1:8080/ | grep -q "probe" \
 	|| fail "the sandboxed release does not serve"
 # And the unit carries the properties the runner set.
 sunit=$(json_str "$(status)" unit)
-props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,InaccessiblePaths)
-for want in "PrivatePIDs=yes" "PrivateUsers=yes" "ProtectControlGroups=yes" "TemporaryFileSystem=/:ro"; do
+props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,InaccessiblePaths,LimitCORE,LimitCORESoft)
+for want in "PrivatePIDs=yes" "PrivateUsers=yes" "ProtectControlGroups=yes" "TemporaryFileSystem=/:ro" "LimitCORE=0" "LimitCORESoft=0"; do
 	case "$props" in
 	*"$want"*) pass "unit property $want" ;;
 	*) fail "unit lacks $want: $props" ;;
 	esac
 done
+# And the app saw the core-dump limit as 0/0 from inside.
+expect_probe core_soft 0
+expect_probe core_hard 0
 # The retired half of the old model, read back off the live unit: the
 # view names what exists rather than masking a list of names.
 for gone in "ProtectSystem=strict" "InaccessiblePaths=/"; do

@@ -457,8 +457,9 @@ file itself and hands the pairs to the manager as the transient unit's
 inline `Environment=` property (`unitProperties`,
 liveswap/systemd_dbus.go), never `EnvironmentFile=`. From then on the
 `hotserve` uid — the trust domain that read the file — holds them by
-four routes, with a host-dependent fifth, and nothing else holds them
-by any:
+four routes, and nothing else holds them by any; a fifth, a core dump,
+is closed by the unit's limit — enforced by the kernel under a file
+`core_pattern`, and under a piped one by the collector honouring it:
 
 - **The unit's property**, for as long as the unit exists:
   `systemctl --user -M hotserve@ show -p Environment <unit>` (as that
@@ -479,15 +480,24 @@ by any:
   a launch, or for the response filter, which reads the file without
   one (`managedApp.secrets` and `redactorFor`, liveswap/app.go) — for
   as long as the app stays configured, behind the non-dumpable floor.
-- **A core dump, where the host writes one.** Nothing makes an app
-  non-dumpable (the floor under "A non-dumpable supervisor is the
-  floor" is the supervisor's own) and no unit sets `LimitCORE=`, so an
-  app crash can write its memory, values included, past the unit's
-  life: under the kernel's default pattern into the crashing process's
-  working directory — the release dir unless the app moved, anywhere
-  writable in its view if it did; under systemd-coredump into its
-  store, with an access entry for the uid. Same uid and root. Closing
-  it (`LimitCORE=0` on app units) is a code change, not made here.
+- **Not a core dump.** App units run with `LimitCORE=0` on both the
+  soft and the hard limit (`unitProperties`, liveswap/systemd_dbus.go),
+  so a crash writes no dump of the app's memory, and the app cannot
+  raise the limit back. Without it the manager's defaults apply, soft
+  0 under an unlimited hard limit (measured on Debian 13, systemd
+  257.13, 2026-10-13, #234): one `setrlimit` from a dump. Nothing
+  makes an app non-dumpable (the floor under "A non-dumpable
+  supervisor is the floor" is the supervisor's own); the dump itself
+  is what is closed, since it would outlive the unit where the same
+  uid and root could read it later. Who enforces the limit depends on
+  the host's `core_pattern`: with a file pattern — Debian 13's
+  default, `core`, in the crashing process's working directory, the
+  release dir unless the app moved — the kernel writes nothing; with a
+  pipe pattern the kernel hands the process to the helper whatever the
+  limit, and it is systemd-coredump (not installed by default) that
+  declines to store a dump when the limit is 0, its own "resource
+  limits disable core dumping" rule. The cost is that no app can write
+  a core dump for debugging; there is no per-app opt-in.
 
 No account gains a read it did not already have: the file is
 root:hotserve 0640 by the tutorial's install line (nothing in hotserve
@@ -633,9 +643,11 @@ What it does not close. `systemctl reload`'s exit status is the
 hotserve uid's word; the `applied` phase trusts it, the file on disk
 does not depend on it, and `systemctl restart` is the remedy. Root's
 never-cut-the-branch guard checks presence, and the handler's
-reachability check covers only what stands before `box_webhook` on
-`/`: a `claim` typo passes both and strands the box until root fixes
-it on the box.
+reachability check covers only what the box server's protocols,
+listener wrappers, TLS policies and strict SNI check do to the
+workflow's connection and what stands before `box_webhook` on `/`: a
+`claim` typo passes both and strands the box until root fixes it on
+the box.
 The
 handler's validate is a courtesy, not a boundary. Plain `crypto/sha1`
 on the proof, not sha1dc. A signer's laptop is the operator; a
@@ -937,6 +949,8 @@ lifecycle properties and appends `sandboxProperties` for the rest
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
   restarter of apps; hotserve.service itself is restarted by systemd
   after a crash, never after a refused start), `KillMode=control-group`,
+  `LimitCORE=0` on both limits (no core dump of an app; "Where
+  `env_file` values sit", above),
   `UnsetEnvironment=XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS`.
 
 **The probe stays.** At `App.Start` — every config activation —
@@ -1036,13 +1050,16 @@ does not isolate the runtime.
   handler's.** A pushed Caddyfile that keeps a `box` block, a signer,
   the `box_webhook` site and the signing key passes root's guard. The
   handler also refuses one whose adaptation would answer a push to `/`
-  before `box_webhook` (box/DESIGN-box.md, step 6) — a check a
+  before `box_webhook`, or whose server would refuse the workflow's
+  connection first (its protocols, a listener wrapper, the host's TLS
+  connection policy, its strict SNI check) (box/DESIGN-box.md, step
+  6) — a check a
   supervisor RCE skips with the rest of the handler, and one `hotserve
   init` does not run. Neither catches a mistyped `claim`, a host
-  without a certificate, a key no laptop holds, or a server-level
-  setting that refuses the connection before any route runs (a
-  required client certificate, a listener wrapper, `protocols`), any of
-  which strands the box. The remedy is root on the box: `hotserve init`
+  without a certificate, a key no laptop holds, a server moved where
+  the workflow's connection does not arrive (`https_port`, a
+  `bind`), or request limits below what the workflow sends
+  (`timeouts`, `max_header_size`), any of which strands the box. The remedy is root on the box: `hotserve init`
   again, or a hand edit the next signed push overwrites.
 - **A signer's software-held key is the box.** Nothing on the box
   distinguishes a signature made by the operator from one made by
@@ -1236,3 +1253,9 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-13 — The template's secrets grant is gone (box PR 7e2):
   secrets are commits in the config repository, and an administrator
   is an account in `adm`, for the journal alone.
+- 2026-10-16 (#234) — App units run with `LimitCORE=0` on both limits:
+  a crash writes no dump of the app's memory, env values included, so
+  the fifth route for `env_file` values is closed — by the kernel
+  under a file `core_pattern` (Debian's default), by the collector's
+  own limit check under a piped one. No app can write a core dump for
+  debugging.

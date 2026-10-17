@@ -2,6 +2,8 @@ package box
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +147,162 @@ func TestReach(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			wantReach(t, reachOf(t, reachFile(c.order, c.before, c.inside, c.after)), c.want)
+		})
+	}
+}
+
+// TestReachTemplate: the template's own box file (examples/box) reaches
+// box_webhook, its connection included.
+func TestReachTemplate(t *testing.T) {
+	in, err := os.ReadFile("../examples/box/deploy.example.com/Caddyfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReach(t, reachOf(t, string(in)), "")
+}
+
+// TestReachConnection is the connection's tables (DESIGN-box.md,
+// "Reachability") on adapted Caddyfiles: the protocols the box
+// server's listeners serve, its listener wrappers, and the TLS
+// connection policy for the host. global goes in the global options.
+func TestReachConnection(t *testing.T) {
+	const (
+		servers    = "\tservers {\n%s\t}\n"
+		clientAuth = "\ttls {\n\t\tclient_auth {\n\t\t\tmode require\n\t\t}\n\t}\n"
+		noH1H2     = "a listener's protocols include neither h1 nor h2"
+		requires   = "a TLS connection policy for deploy.example.com requires a client certificate"
+	)
+	for name, c := range map[string]struct {
+		global, inside, after string
+		want                  string
+	}{
+		"the design's example":                    {},
+		"protocols h1":                            {global: fmt.Sprintf(servers, "\t\tprotocols h1\n")},
+		"protocols h2 and h3":                     {global: fmt.Sprintf(servers, "\t\tprotocols h2 h3\n")},
+		"protocols h3":                            {global: fmt.Sprintf(servers, "\t\tprotocols h3\n"), want: noH1H2},
+		"protocols h3 for another port's server":  {global: "\tservers :8443 {\n\t\tprotocols h3\n\t}\n"},
+		"a bind serving h3 alone":                 {inside: "\tbind 0.0.0.0 {\n\t\tprotocols h3\n\t}\n", want: noH1H2},
+		"a bind serving h1":                       {inside: "\tbind 0.0.0.0 {\n\t\tprotocols h1\n\t}\n"},
+		"http_redirect ahead of tls":              {global: fmt.Sprintf(servers, "\t\tlistener_wrappers {\n\t\t\thttp_redirect\n\t\t\ttls\n\t\t}\n")},
+		"http_redirect with no tls listed":        {global: fmt.Sprintf(servers, "\t\tlistener_wrappers {\n\t\t\thttp_redirect\n\t\t}\n"), want: "the http_redirect listener wrapper may refuse the connection"},
+		"a client certificate required":           {inside: clientAuth, want: requires},
+		"a trust pool and no mode":                {inside: "\ttls {\n\t\tclient_auth {\n\t\t\ttrust_pool file /etc/ca.pem\n\t\t}\n\t}\n", want: requires},
+		"a client certificate if given":           {inside: "\ttls {\n\t\tclient_auth {\n\t\t\tmode verify_if_given\n\t\t\ttrust_pool file /etc/ca.pem\n\t\t}\n\t}\n"},
+		"a client certificate requested":          {inside: "\ttls {\n\t\tclient_auth {\n\t\t\tmode request\n\t\t}\n\t}\n"},
+		"a client certificate on another site":    {after: "other.example.com {\n" + clientAuth + "\trespond x\n}\n"},
+		"a client certificate on a wildcard site": {after: "*.example.com {\n" + clientAuth + "\trespond x\n}\n"},
+		"a client certificate on a wildcard site, the host's own policy too": {inside: "\ttls {\n\t\tprotocols tls1.3\n\t}\n",
+			after: "*.example.com {\n" + clientAuth + "\trespond x\n}\n"},
+		"alpn h2":       {inside: "\ttls {\n\t\talpn h2\n\t}\n"},
+		"alpn http/1.1": {inside: "\ttls {\n\t\talpn http/1.1\n\t}\n"},
+		"alpn h3":       {inside: "\ttls {\n\t\talpn h3\n\t}\n", want: "a TLS connection policy for deploy.example.com offers neither h2 nor http/1.1 by ALPN"},
+		"alpn h2 where only h1 is served": {global: fmt.Sprintf(servers, "\t\tprotocols h1\n"), inside: "\ttls {\n\t\talpn h2\n\t}\n",
+			want: "a TLS connection policy for deploy.example.com offers neither h2 nor http/1.1 by ALPN"},
+		"TLS 1.3 only":                  {inside: "\ttls {\n\t\tprotocols tls1.3\n\t}\n"},
+		"a certificate from files":      {inside: "\ttls /etc/cert.pem /etc/key.pem\n"},
+		"the internal issuer":           {inside: "\ttls internal\n"},
+		"ciphers":                       {inside: "\ttls {\n\t\tciphers TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256\n\t}\n", want: "a TLS connection policy for deploy.example.com sets cipher_suites, which may refuse the handshake"},
+		"curves":                        {inside: "\ttls {\n\t\tcurves x25519\n\t}\n", want: "a TLS connection policy for deploy.example.com sets curves, which may refuse the handshake"},
+		"ahead of a responder in front": {global: fmt.Sprintf(servers, "\t\tprotocols h3\n") + "\torder respond first\n", inside: "\trespond ok\n", want: noH1H2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := strings.Replace(reachFile(nil, "", c.inside, c.after), "{\n", "{\n"+c.global, 1)
+			wantReach(t, reachOf(t, in), c.want)
+		})
+	}
+}
+
+// connJSON is an adaptation by hand: one server with settings (each
+// followed by a comma) and the box site's route.
+func connJSON(settings string) []byte {
+	return []byte(`{"apps":{"http":{"servers":{"srv0":{"listen":[":443"],` + settings +
+		`"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"}]}]}],"terminal":true}]}}}}}`)
+}
+
+// TestReachConnectionJSON is the connection's rows the adapter cannot
+// be made to produce in this module's tests: proxy_protocol (not
+// registered here), wrappers and policy settings no directive adapts
+// to, matchers on a policy, and shapes the box must not trust blindly.
+func TestReachConnectionJSON(t *testing.T) {
+	const (
+		requires = "a TLS connection policy for deploy.example.com requires a client certificate"
+		wrapper  = "the %s listener wrapper may refuse the connection"
+	)
+	const ip = "203.0.113.5"
+	for name, c := range map[string]struct {
+		settings string
+		host     string // deploy.example.com when empty
+		want     string // "" reachable; "error" a plain error; else the refusal
+	}{
+		"proxy_protocol":                                   {settings: `"listener_wrappers":[{"wrapper":"proxy_protocol"},{"wrapper":"tls"}],`},
+		"proxy_protocol after tls":                         {settings: `"listener_wrappers":[{"wrapper":"proxy_protocol"}],`},
+		"proxy_protocol falling back to USE":               {settings: `"listener_wrappers":[{"wrapper":"proxy_protocol","fallback_policy":"USE"},{"wrapper":"tls"}],`},
+		"proxy_protocol requiring a header":                {settings: `"listener_wrappers":[{"wrapper":"proxy_protocol","allow":["10.0.0.0/8"],"fallback_policy":"REQUIRE"},{"wrapper":"tls"}],`, want: fmt.Sprintf(wrapper, "proxy_protocol")},
+		"proxy_protocol requiring a header, in lower case": {settings: `"listener_wrappers":[{"wrapper":"proxy_protocol","fallback_policy":"require"},{"wrapper":"tls"}],`, want: fmt.Sprintf(wrapper, "proxy_protocol")},
+		"http_redirect behind tls":                         {settings: `"listener_wrappers":[{"wrapper":"proxy_protocol"},{"wrapper":"tls"},{"wrapper":"http_redirect"}],`, want: fmt.Sprintf(wrapper, "http_redirect")},
+		"a wrapper the table does not name":                {settings: `"listener_wrappers":[{"wrapper":"layer4"},{"wrapper":"tls"}],`, want: fmt.Sprintf(wrapper, "layer4")},
+		"a nameless wrapper":                               {settings: `"listener_wrappers":[{},{"wrapper":"tls"}],`, want: fmt.Sprintf(wrapper, "nameless")},
+		"h2c alone":                                        {settings: `"protocols":["h2c"],`, want: "a listener's protocols include neither h1 nor h2"},
+		"one listener of two serving h3 alone":             {settings: `"protocols":["h1","h2"],"listen_protocols":[["h3"],null],`, want: "a listener's protocols include neither h1 nor h2"},
+		"a listener adding h3 to the server's":             {settings: `"protocols":["h1"],"listen_protocols":[["","h3"]],`},
+		"a listener's empty list, the server's":            {settings: `"protocols":["h1"],"listen_protocols":[[]],`},
+		"drop":                                             {settings: `"tls_connection_policies":[{"drop":true}],`, want: "a TLS connection policy for deploy.example.com drops the connection"},
+		"drop false":                                       {settings: `"tls_connection_policies":[{"drop":false}],`},
+		"an empty client_authentication":                   {settings: `"tls_connection_policies":[{"client_authentication":{}}],`},
+		"a verifier, mode request":                         {settings: `"tls_connection_policies":[{"client_authentication":{"mode":"request","verifiers":[{"verifier":"leaf"}]}}],`, want: requires},
+		"trusted leaf certs, mode verify_if_given":         {settings: `"tls_connection_policies":[{"client_authentication":{"mode":"verify_if_given","trusted_leaf_certs":["AA=="]}}],`, want: requires},
+		"a setting the table does not name":                {settings: `"tls_connection_policies":[{"handshake_context":{"module":"x"}}],`, want: "a TLS connection policy for deploy.example.com sets handshake_context, which may refuse the handshake"},
+		// The first policy whose matchers all match is Caddy's: one
+		// for the host shields the ones after it; one decided per
+		// connection shields nothing.
+		"the host's policy ahead of a catch-all requiring": {settings: `"tls_connection_policies":[{"match":{"sni":["deploy.example.com"]}},{"client_authentication":{"mode":"require"}}],`},
+		"another host's policy requiring":                  {settings: `"tls_connection_policies":[{"match":{"sni":["other.example.com"]},"client_authentication":{"mode":"require"}},{}],`},
+		"a wildcard policy requiring":                      {settings: `"tls_connection_policies":[{"match":{"sni":["*.example.com"]},"client_authentication":{"mode":"require"}},{}],`, want: requires},
+		"a remote_ip policy requiring": {settings: `"tls_connection_policies":[{"match":{"remote_ip":{"ranges":["10.0.0.0/8"]}},"client_authentication":{"mode":"require"}},{}],`,
+			want: "a TLS connection policy that may apply to deploy.example.com requires a client certificate (its remote_ip matcher is decided per connection)"},
+		"a remote_ip policy ahead of a catch-all requiring": {settings: `"tls_connection_policies":[{"match":{"remote_ip":{"ranges":["10.0.0.0/8"]}}},{"client_authentication":{"mode":"require"}}],`, want: requires},
+		"an sni placeholder requiring": {settings: `"tls_connection_policies":[{"match":{"sni":["{env.HOST}"]},"client_authentication":{"mode":"require"}},{}],`,
+			want: "a TLS connection policy that may apply to deploy.example.com requires a client certificate (its sni matcher is decided per connection)"},
+		"another server's settings": {settings: `"protocols":["h1"]},"other":{"listen":[":8443"],"protocols":["h3"],"listener_wrappers":[{"wrapper":"layer4"}],"tls_connection_policies":[{"drop":true}],"routes":[]},"srv1":{"listen":[":444"],`},
+		// What Caddy reads as off, or as its default, is off or the
+		// default here: Caddy's own type for client authentication,
+		// and a setting written as null is absent.
+		"client_authentication with an empty mode":       {settings: `"tls_connection_policies":[{"client_authentication":{"mode":""}}],`},
+		"client_authentication with an empty trust list": {settings: `"tls_connection_policies":[{"client_authentication":{"trusted_ca_certs":[]}}],`},
+		"mode request with an empty verifier list":       {settings: `"tls_connection_policies":[{"client_authentication":{"mode":"request","verifiers":[]}}],`},
+		"alpn null, the default":                         {settings: `"tls_connection_policies":[{"alpn":null}],`},
+		"alpn empty, no protocol negotiated, h1 served":  {settings: `"tls_connection_policies":[{"alpn":[]}],`},
+		"alpn empty where only h2 is served":             {settings: `"protocols":["h2"],"tls_connection_policies":[{"alpn":[]}],`, want: "a TLS connection policy for deploy.example.com offers neither h2 nor http/1.1 by ALPN"},
+		"cipher_suites null":                             {settings: `"tls_connection_policies":[{"cipher_suites":null}],`},
+		// curl sends no SNI to an IP address: a policy naming it does
+		// not apply, and the strict SNI check refuses the request.
+		"an IP host's own policy ahead of a catch-all requiring": {host: ip, settings: `"strict_sni_host":false,"tls_connection_policies":[{"match":{"sni":["203.0.113.5"]}},{"client_authentication":{"mode":"require"}}],`,
+			want: "a TLS connection policy for 203.0.113.5 requires a client certificate"},
+		"an IP host's own policy requiring, strict SNI off": {host: ip, settings: `"strict_sni_host":false,"tls_connection_policies":[{"match":{"sni":["203.0.113.5"]},"client_authentication":{"mode":"require"}},{}],`},
+		"an IP host, strict SNI on":                         {host: ip, settings: `"strict_sni_host":true,`, want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
+		"an IP host, strict SNI on by another site's client authentication": {host: ip, settings: `"tls_connection_policies":[{"match":{"sni":["example.com"]},"client_authentication":{"mode":"require"}},{}],`,
+			want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
+		"a nameless setting":                 {settings: `"tls_connection_policies":[{"":1}],`, want: "a TLS connection policy for deploy.example.com sets nameless, which may refuse the handshake"},
+		"a nameless matcher":                 {settings: `"tls_connection_policies":[{"match":{"":1},"drop":true},{}],`, want: "a TLS connection policy that may apply to deploy.example.com drops the connection (its nameless matcher is decided per connection)"},
+		"a hostname, strict SNI on":          {settings: `"strict_sni_host":true,`},
+		"protocols that do not read":         {settings: `"protocols":"h1",`, want: "error"},
+		"listener wrappers that do not read": {settings: `"listener_wrappers":{"wrapper":"tls"},`, want: "error"},
+		"policies that do not read":          {settings: `"tls_connection_policies":[1],`, want: "error"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := c.host
+			if host == "" {
+				host = "deploy.example.com"
+			}
+			err := reach([]byte(strings.ReplaceAll(string(connJSON(c.settings)), "deploy.example.com", host)), host)
+			if c.want == "error" {
+				var r *refusal
+				if err == nil || errors.As(err, &r) {
+					t.Fatalf("got %v, want the box's own error", err)
+				}
+				return
+			}
+			wantReach(t, err, c.want)
 		})
 	}
 }
