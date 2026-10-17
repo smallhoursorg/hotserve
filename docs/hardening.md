@@ -112,13 +112,14 @@ each SSH login, and the `ssh-keygen` a push to the box's repository
 runs.
 
 What it does not do: update hotserve, whose `.deb` comes from no
-repository ([Upgrading](upgrading.md) is how); or reach what a running
-app or daemon has already loaded — apps run on the box's own `/usr`,
-so only a file one first reads afterwards is the new one — which waits
-for a relaunch, or the running kernel, which waits for a reboot, both
-at a time you choose — so an app launched long ago can be behind what the box has,
-and [Patching the host](upgrading.md#patching-the-host) says how to
-give it a launch. It never reboots the box: `Automatic-Reboot` is off
+repository ([Upgrading](upgrading.md) is how). Nor does it reach what
+a running app or daemon has already loaded, which waits for a
+relaunch, or the running kernel, which waits for a reboot, both at a
+time you choose; apps run on the box's own `/usr`, so a file an app
+first reads after the upgrade is the new one. An app launched long ago
+can thus be behind what the box has, and
+[Patching the host](upgrading.md#patching-the-host) says how to give
+it a launch. It never reboots the box: `Automatic-Reboot` is off
 unless you turn it on, and this page does not.
 
 As root on the box, first see whether it is already on, since a
