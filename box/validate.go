@@ -198,25 +198,27 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived
 // a refusal quotes them: validate's — the adapter expands `{$VAR}` into
 // an address from the same environment — primed also with each
 // whitespace-separated field of every value, since the Caddyfile lexer
-// splits a `{$VAR}` at whitespace, and a `bind {$ADDRS}` holding two
-// addresses writes two, neither of which is the value whole. Built on
-// the refusal path alone, which is rare; validate's own filter is not
-// widened, since its lines quote what the lexer read as one token.
+// splits a `{$VAR}` at whitespace and drops the whitespace around it:
+// a `bind {$ADDRS}` holding two addresses writes two, and one holding
+// an address with a space after it writes the address, neither of
+// which is the value whole. Built on the refusal path alone, which is
+// rare; validate's own filter is not widened, since its lines quote
+// what the lexer read as one token.
 func (c *childValidator) doorFilter() func(string) string {
 	r := liveswap.NewRedactor(fieldCandidates(secretCandidates(c.env)), nil)
 	return func(s string) string { s, _ = r.Redact(s); return s }
 }
 
-// fieldCandidates is kvs with, for each value of more than one field,
-// a `KEY=field` pair per field added after it.
+// fieldCandidates is kvs with a `KEY=field` pair added for each
+// whitespace-separated field of each value (a value that is one field
+// with no whitespace around it adds itself again, which the filter's
+// set absorbs).
 func fieldCandidates(kvs []string) []string {
 	out := slices.Clone(kvs)
 	for _, kv := range kvs {
 		key, value, _ := strings.Cut(kv, "=")
-		if fields := strings.Fields(value); len(fields) > 1 {
-			for _, f := range fields {
-				out = append(out, key+"="+f)
-			}
+		for _, f := range strings.Fields(value) {
+			out = append(out, key+"="+f)
 		}
 	}
 	return out
