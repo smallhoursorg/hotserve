@@ -1128,8 +1128,25 @@ func TestBoxCheckSecrets(t *testing.T) {
 	if err := os.WriteFile(old, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	tooOld := "deploy.example.com/Caddyfile: deploy.example.com/secrets holds values, and this hotserve does not read secrets: check with a release that does (the workflow takes the latest stable release, or the one its HOTSERVE_VERSION variable names)\n"
+	tooOld := "deploy.example.com/Caddyfile: deploy.example.com/secrets holds values, and this hotserve does not read secrets: check with a release that does (deploy.example.com/HOTSERVE_VERSION would name this box's; without it, the workflow takes the latest stable release, or the one its HOTSERVE_VERSION variable names)\n"
 	if out, code := r.run("check", "HOTSERVE="+old); code != 1 || !strings.Contains(out, tooOld) {
 		t.Fatalf("an old hotserve: exit %d\n%s", code, out)
+	}
+	// The same release, picked by the box's own HOTSERVE_VERSION file:
+	// the file is not the remedy, so the refusal says what is.
+	hs := filepath.Join(r.home, "bins", "hotserve")
+	if err := os.MkdirAll(filepath.Dir(hs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hs, []byte("#!/bin/sh\nexec \""+bin+"\" \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hs+"-0.2.9", []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.write("deploy.example.com/HOTSERVE_VERSION", "0.2.9\n")
+	pinnedOld := "deploy.example.com/Caddyfile: deploy.example.com/secrets holds values, and " + hs + "-0.2.9, the release deploy.example.com/HOTSERVE_VERSION names, does not read secrets: upgrade the box to a release that does and name that one in the file, or remove the values\n"
+	if out, code := r.run("check", "HOTSERVE="+hs); code != 1 || !strings.Contains(out, pinnedOld) {
+		t.Fatalf("an old hotserve, pinned by the file: exit %d\n%s", code, out)
 	}
 }

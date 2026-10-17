@@ -1,9 +1,17 @@
 package examples
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -12,17 +20,21 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	hsbox "github.com/smallhoursorg/hotserve/box"
 	"github.com/smallhoursorg/hotserve/box/proof"
@@ -1260,4 +1272,504 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("by directory: exit %d\n%s", code, out)
 		}
 	})
+}
+
+// recorder is a hotserve that writes a tag to $HOTSERVE_RAN each time
+// it runs, then runs this tree's: what a stub release looks like.
+func recorder(t *testing.T, path, tag, bin string) {
+	t.Helper()
+	script := "#!/bin/sh\nprintf '%s\\n' '" + tag + "' >>\"$HOTSERVE_RAN\"\nexec \"" + bin + "\" \"$@\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBoxCheckVersionFile: a box with a HOTSERVE_VERSION file is checked
+// with $HOTSERVE-<version>; one without, with $HOTSERVE; a file that
+// names no release is refused and named, never read as the latest.
+func TestBoxCheckVersionFile(t *testing.T) {
+	bin := hotserveBinary(t)
+	r := newBoxRepo(t)
+	r.key("id_ed25519")
+	if out, code := r.run("signer"); code != 0 {
+		t.Fatalf("signer: exit %d\n%s", code, out)
+	}
+	// $HOTSERVE and its releases, each a recorder, in a directory of
+	// this test's own.
+	bins := t.TempDir()
+	hs := filepath.Join(bins, "hotserve")
+	recorder(t, hs, "default", bin)
+	recorder(t, hs+"-0.3.1", "0.3.1", bin)
+	recorder(t, hs+"-0.3.1-rc1", "0.3.1-rc1", bin)
+	ran := filepath.Join(t.TempDir(), "ran")
+	check := func() (string, int) {
+		_ = os.Remove(ran)
+		return r.run("check", "HOTSERVE="+hs, "HOTSERVE_RAN="+ran)
+	}
+	runs := func() string {
+		b, _ := os.ReadFile(ran)
+		return string(b)
+	}
+	const vfile = "deploy.example.com/HOTSERVE_VERSION"
+	good := r.read(boxFile)
+	second := strings.Replace(good, "deploy.example.com {", "deploy2.example.com {", 1)
+
+	// No file: the default, twice a box (describe, validate).
+	if out, code := check(); code != 0 || out != "deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer)\n" || runs() != "default\ndefault\n" {
+		t.Fatalf("no file: exit %d\n%s\nran:\n%s", code, out, runs())
+	}
+	// A file: that release's binary, and the line says so. A second box
+	// without one keeps the default; the v comes off.
+	r.write("deploy2.example.com/Caddyfile", second)
+	for file, tag := range map[string]string{"0.3.1\n": "0.3.1", "v0.3.1-rc1\n": "0.3.1-rc1", "0.3.1": "0.3.1"} {
+		r.write(vfile, file)
+		want := "deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer), checked with " + hs + "-" + tag + "\n" +
+			"deploy2.example.com/Caddyfile → https://deploy2.example.com/ (1 app, 1 signer)\n"
+		if out, code := check(); code != 0 || out != want || runs() != tag+"\n"+tag+"\ndefault\ndefault\n" {
+			t.Fatalf("file %q: exit %d\n%s\nran:\n%s", file, code, out, runs())
+		}
+	}
+	r.remove("deploy2.example.com")
+
+	// A release that is not here: refused, naming the binary and what
+	// installs it; nothing ran.
+	r.write(vfile, "0.3.0\n")
+	if out, code := check(); code != 1 || !strings.Contains(out, "check: deploy.example.com/Caddyfile: "+vfile+" names 0.3.0, and "+hs+"-0.3.0 is not here to check it with: bin/install-hotserve installs one") || runs() != "" {
+		t.Fatalf("a release not installed: exit %d\n%s\nran:\n%s", code, out, runs())
+	}
+	// Not a release: refused and named, the file empty included; the
+	// default is not what an empty file means.
+	for _, file := range []string{"", "\n", "v", "v\n", "0.3", "0.3.1\n0.3.2\n", "0.3.1 \n", "latest\n", "0.3.1-rc1 # the candidate\n", "\xef\xbb\xbf0.3.1\n"} {
+		r.write(vfile, file)
+		out, code := check()
+		if code != 1 || !strings.Contains(out, "check: deploy.example.com/Caddyfile: "+vfile+" does not name a hotserve release: '") || !strings.Contains(out, "is not a release's version, 0.3.1 or v0.3.1-rc1, on one line") || runs() != "" {
+			t.Fatalf("file %q: exit %d\n%s\nran:\n%s", file, code, out, runs())
+		}
+		if empty := strings.TrimSpace(file) == ""; empty != strings.Contains(out, "an empty file pins nothing: name the release this box runs, or delete the file") {
+			t.Fatalf("file %q: the empty-file hint is for an empty file alone\n%s", file, out)
+		}
+	}
+	// A directory at the name, or a link to nothing: refused, not read
+	// as empty, and not as no file.
+	r.remove(vfile)
+	if err := os.Mkdir(filepath.Join(r.dir, vfile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := check(); code != 1 || !strings.Contains(out, vfile+" cannot be read: a box's HOTSERVE_VERSION is a regular file of one line") {
+		t.Fatalf("a directory: exit %d\n%s", code, out)
+	}
+	r.remove(vfile)
+	if err := os.Symlink("../versions/gone", filepath.Join(r.dir, vfile)); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := check(); code != 1 || !strings.Contains(out, vfile+" cannot be read: a box's HOTSERVE_VERSION is a regular file of one line") || runs() != "" {
+		t.Fatalf("a dangling link: exit %d\n%s", code, out)
+	}
+	r.remove(vfile)
+	// A pipe at the name: refused, not waited on (the test would hang).
+	if err := syscall.Mkfifo(filepath.Join(r.dir, vfile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := check(); code != 1 || !strings.Contains(out, vfile+" cannot be read: a box's HOTSERVE_VERSION is a regular file of one line") || runs() != "" {
+		t.Fatalf("a pipe: exit %d\n%s", code, out)
+	}
+	r.remove(vfile)
+
+}
+
+// releases is a stand-in for github.com's release pages: the latest's
+// redirect, and each release's tarball and checksums.txt. The tarball's
+// hotserve is a recorder tagged with its version.
+type releases struct {
+	t      *testing.T
+	srv    *httptest.Server
+	latest string
+	arch   string
+	bin    string
+
+	known []string // the releases that exist; any other address is a 404
+
+	mu        sync.Mutex
+	downloads map[string]int // tarballs served, by version
+	corrupt   string         // this version's checksums.txt names another digest
+}
+
+// newReleases serves as github.com, with a certificate for that name
+// (ca, in PEM, is what curl is told to trust).
+func newReleases(t *testing.T, latest, bin string) (g *releases, ca []byte) {
+	t.Helper()
+	g = &releases{t: t, latest: latest, arch: runtime.GOARCH, bin: bin, downloads: map[string]int{},
+		known: []string{"0.3.0", "0.3.1", "0.3.1-rc1"}}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "github.com"},
+		DNSNames:     []string{"github.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:         true, BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.srv = httptest.NewUnstartedServer(g)
+	g.srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
+	g.srv.StartTLS()
+	t.Cleanup(g.srv.Close)
+	return g, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+var releasePath = regexp.MustCompile(`^/smallhoursorg/hotserve/releases/download/v([0-9A-Za-z.-]+)/(.+)$`)
+
+func (g *releases) tarball(v string) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	script := "#!/bin/sh\nprintf '%s\\n' '" + v + "' >>\"$HOTSERVE_RAN\"\nexec \"" + g.bin + "\" \"$@\"\n"
+	for _, f := range []struct{ name, body string }{{"LICENSE", "a licence\n"}, {"hotserve", script}} {
+		if err := tw.WriteHeader(&tar.Header{Name: f.name, Mode: 0o755, Size: int64(len(f.body))}); err != nil {
+			g.t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(f.body)); err != nil {
+			g.t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		g.t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		g.t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func (g *releases) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/smallhoursorg/hotserve/releases/latest" {
+		http.Redirect(w, r, "https://github.com/smallhoursorg/hotserve/releases/tag/v"+g.latest, http.StatusFound)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/smallhoursorg/hotserve/releases/tag/") {
+		_, _ = io.WriteString(w, "a release page\n")
+		return
+	}
+	m := releasePath.FindStringSubmatch(r.URL.Path)
+	if m == nil {
+		http.NotFound(w, r)
+		return
+	}
+	v, name := m[1], m[2]
+	if !slices.Contains(g.known, v) {
+		http.NotFound(w, r)
+		return
+	}
+	tgz := "hotserve_" + v + "_linux_" + g.arch + ".tar.gz"
+	switch name {
+	case tgz:
+		g.mu.Lock()
+		g.downloads[v]++
+		g.mu.Unlock()
+		_, _ = w.Write(g.tarball(v))
+	case "checksums.txt":
+		g.mu.Lock()
+		corrupt := g.corrupt == v
+		g.mu.Unlock()
+		sum := digest(g.tarball(v))
+		if corrupt {
+			sum = digest([]byte("other bytes"))
+		}
+		other := "hotserve_" + v + "_linux_" + map[string]string{"amd64": "arm64", "arm64": "amd64"}[g.arch] + ".tar.gz"
+		_, _ = fmt.Fprintf(w, "%s  %s\n%s  %s\n%s  hotserve_%s_%s.deb\n", sum, tgz, digest([]byte(other)), other, digest([]byte("deb")), v, g.arch)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (g *releases) served() map[string]int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return maps.Clone(g.downloads)
+}
+
+func (g *releases) reset() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.downloads = map[string]int{}
+}
+
+// TestBoxInstallHotserve: bin/install-hotserve against a stand-in
+// github.com, with sudo a script that puts /usr/local/bin under a
+// directory of the test's. Every release the boxes name is installed
+// once, verified, as hotserve-<version>; the default as hotserve too;
+// and bin/check then picks each box's.
+func TestBoxInstallHotserve(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bin/install-hotserve installs Linux binaries, and refuses elsewhere")
+	}
+	for _, tool := range []string{"sha256sum", "tar"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Fatalf("bin/install-hotserve needs %s on PATH", tool)
+		}
+	}
+	bin := hotserveBinary(t)
+	r := newBoxRepo(t)
+	r.key("id_ed25519")
+	if out, code := r.run("signer"); code != 0 {
+		t.Fatalf("signer: exit %d\n%s", code, out)
+	}
+	gh, caPEM := newReleases(t, "0.3.1", bin)
+
+	// curl reaches the stand-in at github.com:443 by its own config file.
+	curlHome := t.TempDir()
+	ca := filepath.Join(curlHome, "github.pem")
+	if err := os.WriteFile(ca, caPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rc := "connect-to = github.com:443:" + gh.srv.Listener.Addr().String() + "\ncacert = " + ca + "\n"
+	if err := os.WriteFile(filepath.Join(curlHome, ".curlrc"), []byte(rc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// sudo: the command as given, /usr/local/bin under $root.
+	root := t.TempDir()
+	usrLocalBin := filepath.Join(root, "usr", "local", "bin")
+	if err := os.MkdirAll(usrLocalBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stubs := t.TempDir()
+	sudo := "#!/bin/sh\nn=$#\nfor a; do\n\tcase $a in /usr/local/bin/*) a=" + root + "$a ;; esac\n\tset -- \"$@\" \"$a\"\ndone\nshift \"$n\"\nexec \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(stubs, "sudo"), []byte(sudo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ran := filepath.Join(t.TempDir(), "ran")
+	env := []string{"CURL_HOME=" + curlHome, "PATH=" + stubs + string(os.PathListSeparator) + os.Getenv("PATH"), "HOTSERVE_RAN=" + ran}
+	installArgs := func(args []string, extra ...string) (string, int) {
+		t.Helper()
+		gh.reset()
+		_ = os.RemoveAll(usrLocalBin)
+		if err := os.MkdirAll(usrLocalBin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(filepath.Join(r.dir, "bin", "install-hotserve"), args...)
+		cmd.Dir, cmd.Env = r.dir, append(append(append([]string{}, r.env...), env...), extra...)
+		out, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return string(out), exit.ExitCode()
+		}
+		if err != nil {
+			t.Fatalf("bin/install-hotserve: %v\n%s", err, out)
+		}
+		return string(out), 0
+	}
+	install := func(extra ...string) (string, int) {
+		t.Helper()
+		return installArgs(nil, extra...)
+	}
+	installed := func() []string {
+		t.Helper()
+		entries, err := os.ReadDir(usrLocalBin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range entries {
+			info, err := e.Info()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o755 {
+				t.Fatalf("%s: mode %o, not 0755", e.Name(), info.Mode().Perm())
+			}
+			names = append(names, e.Name())
+		}
+		return names
+	}
+	// tagOf runs an installed hotserve and returns the version its
+	// recorder wrote: which release's bytes it is.
+	tagOf := func(name string) string {
+		t.Helper()
+		_ = os.Remove(ran)
+		cmd := exec.Command(filepath.Join(usrLocalBin, name), "box", "webhook", filepath.Join(r.dir, boxFile))
+		cmd.Env = append(append([]string{}, r.env...), "HOTSERVE_RAN="+ran)
+		out, err := cmd.CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "https://deploy.example.com/" {
+			t.Fatalf("%s box webhook: %v\n%s", name, err, out)
+		}
+		b, _ := os.ReadFile(ran)
+		return strings.TrimSpace(string(b))
+	}
+	arch := runtime.GOARCH
+	// ok is sha256sum's line for a verified tarball, before the install's.
+	ok := func(v string) string { return "hotserve_" + v + "_linux_" + arch + ".tar.gz: OK\n" }
+	stable := func(v string) string {
+		return ok(v) + "install-hotserve: hotserve " + v + " (" + arch + "), and hotserve-" + v + "\n"
+	}
+	pinned := func(v string) string {
+		return ok(v) + "install-hotserve: hotserve-" + v + " (" + arch + "), for the boxes whose HOTSERVE_VERSION names it\n"
+	}
+
+	// No file and no variable: the latest, once, as hotserve and
+	// hotserve-<latest>.
+	out, code := install()
+	if code != 0 || out != stable("0.3.1") {
+		t.Fatalf("the latest: exit %d\n%s", code, out)
+	}
+	if got := installed(); !slices.Equal(got, []string{"hotserve", "hotserve-0.3.1"}) {
+		t.Fatalf("installed %v", got)
+	}
+	if !maps.Equal(gh.served(), map[string]int{"0.3.1": 1}) || tagOf("hotserve") != "0.3.1" || tagOf("hotserve-0.3.1") != "0.3.1" {
+		t.Fatalf("downloads %v; hotserve is %s", gh.served(), tagOf("hotserve"))
+	}
+
+	// Four boxes, three releases between them: each release once,
+	// whatever the number of boxes naming it, the v off, with or without
+	// the line's newline.
+	good := r.read(boxFile)
+	box := func(host, version string) {
+		r.write(host+"/Caddyfile", strings.Replace(good, "deploy.example.com {", host+" {", 1))
+		if version != "" {
+			r.write(host+"/HOTSERVE_VERSION", version)
+		}
+	}
+	box("deploy2.example.com", "0.3.0\n")
+	box("deploy3.example.com", "v0.3.1-rc1\n")
+	box("deploy4.example.com", "0.3.0")
+	out, code = install()
+	want := stable("0.3.1") + pinned("0.3.0") + pinned("0.3.1-rc1")
+	if code != 0 || out != want {
+		t.Fatalf("three releases: exit %d\n%s", code, out)
+	}
+	if got := installed(); !slices.Equal(got, []string{"hotserve", "hotserve-0.3.0", "hotserve-0.3.1", "hotserve-0.3.1-rc1"}) {
+		t.Fatalf("installed %v", got)
+	}
+	if !maps.Equal(gh.served(), map[string]int{"0.3.1": 1, "0.3.0": 1, "0.3.1-rc1": 1}) {
+		t.Fatalf("downloads %v", gh.served())
+	}
+	for name, tag := range map[string]string{"hotserve": "0.3.1", "hotserve-0.3.0": "0.3.0", "hotserve-0.3.1": "0.3.1", "hotserve-0.3.1-rc1": "0.3.1-rc1"} {
+		if got := tagOf(name); got != tag {
+			t.Fatalf("%s is release %s, not %s", name, got, tag)
+		}
+	}
+	// And bin/check picks each box's.
+	_ = os.Remove(ran)
+	hs := filepath.Join(usrLocalBin, "hotserve")
+	out, code = r.run("check", "HOTSERVE="+hs, "HOTSERVE_RAN="+ran)
+	want = "deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer)\n" +
+		"deploy2.example.com/Caddyfile → https://deploy2.example.com/ (1 app, 1 signer), checked with " + hs + "-0.3.0\n" +
+		"deploy3.example.com/Caddyfile → https://deploy3.example.com/ (1 app, 1 signer), checked with " + hs + "-0.3.1-rc1\n" +
+		"deploy4.example.com/Caddyfile → https://deploy4.example.com/ (1 app, 1 signer), checked with " + hs + "-0.3.0\n"
+	b, _ := os.ReadFile(ran)
+	if code != 0 || out != want || string(b) != "0.3.1\n0.3.1\n0.3.0\n0.3.0\n0.3.1-rc1\n0.3.1-rc1\n0.3.0\n0.3.0\n" {
+		t.Fatalf("check with the installed releases: exit %d\n%s\nran:\n%s", code, out, b)
+	}
+
+	// The variable: the default, and a box's file naming the same
+	// release is one download.
+	out, code = install("HOTSERVE_VERSION=v0.3.0")
+	if code != 0 || out != stable("0.3.0")+pinned("0.3.1-rc1") {
+		t.Fatalf("the variable: exit %d\n%s", code, out)
+	}
+	if !maps.Equal(gh.served(), map[string]int{"0.3.0": 1, "0.3.1-rc1": 1}) || tagOf("hotserve") != "0.3.0" {
+		t.Fatalf("downloads %v; hotserve is %s", gh.served(), tagOf("hotserve"))
+	}
+
+	// A box's file that names no release is said, naming the file, and
+	// skipped: the other boxes' releases are still installed, and
+	// make check is what refuses the box. The variable's shape is the
+	// same, and its refusal is the run's: nothing to check with.
+	three := map[string]int{"0.3.1": 1, "0.3.0": 1, "0.3.1-rc1": 1}
+	four := []string{"hotserve", "hotserve-0.3.0", "hotserve-0.3.1", "hotserve-0.3.1-rc1"}
+	for _, c := range []struct{ file, said string }{
+		{"", "'' (from deploy2.example.com/HOTSERVE_VERSION): a release's version, 0.3.1 or v0.3.1-rc1, on one line; an empty file pins nothing: name a release, or delete it\n"},
+		{"\n", "'' (from deploy2.example.com/HOTSERVE_VERSION): a release's version, 0.3.1 or v0.3.1-rc1, on one line; an empty file pins nothing"},
+		{"v\n", "'v' (from deploy2.example.com/HOTSERVE_VERSION): a release's version, 0.3.1 or v0.3.1-rc1, on one line\n"},
+		{"0.3\n", "'0.3' (from deploy2.example.com/HOTSERVE_VERSION)"},
+		{"0.3.0\n0.3.1\n", "'0.3.0\n0.3.1' (from deploy2.example.com/HOTSERVE_VERSION)"},
+		{"latest\n", "'latest' (from deploy2.example.com/HOTSERVE_VERSION)"},
+	} {
+		r.write("deploy2.example.com/HOTSERVE_VERSION", c.file)
+		out, code := install()
+		if code != 0 || !strings.Contains(out, "install-hotserve: not a hotserve release: "+c.said) ||
+			!strings.Contains(out, "install-hotserve: deploy2.example.com/HOTSERVE_VERSION skipped; make check refuses this box\n") ||
+			!maps.Equal(gh.served(), three) || !slices.Equal(installed(), four) {
+			t.Fatalf("file %q: exit %d\n%s\ndownloads %v, installed %v", c.file, code, out, gh.served(), installed())
+		}
+	}
+	r.remove("deploy2.example.com/HOTSERVE_VERSION")
+	if err := os.Mkdir(filepath.Join(r.dir, "deploy2.example.com/HOTSERVE_VERSION"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, code = install()
+	if code != 0 || !strings.Contains(out, "install-hotserve: deploy2.example.com/HOTSERVE_VERSION cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1; skipped, and make check refuses this box\n") ||
+		strings.Contains(out, "not a hotserve release") || !maps.Equal(gh.served(), three) {
+		t.Fatalf("a directory: exit %d\n%s\ndownloads %v", code, out, gh.served())
+	}
+	r.remove("deploy2.example.com/HOTSERVE_VERSION")
+	// A pipe at the name: said, skipped, not waited on.
+	if err := syscall.Mkfifo(filepath.Join(r.dir, "deploy2.example.com/HOTSERVE_VERSION"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code = install()
+	if code != 0 || !strings.Contains(out, "install-hotserve: deploy2.example.com/HOTSERVE_VERSION cannot be read: a box's HOTSERVE_VERSION is a regular file of one line, 0.3.1 or v0.3.1-rc1; skipped, and make check refuses this box\n") || !maps.Equal(gh.served(), three) {
+		t.Fatalf("a pipe: exit %d\n%s\ndownloads %v", code, out, gh.served())
+	}
+	r.remove("deploy2.example.com/HOTSERVE_VERSION")
+	for _, v := range []string{"v", "0.3", "latest"} {
+		out, code := install("HOTSERVE_VERSION=" + v)
+		if code != 1 || !strings.Contains(out, "install-hotserve: not a hotserve release: '"+v+"' (from HOTSERVE_VERSION): a release's version, 0.3.1 or v0.3.1-rc1, on one line\n") || len(gh.served()) != 0 {
+			t.Fatalf("HOTSERVE_VERSION=%s: exit %d\n%s", v, code, out)
+		}
+	}
+
+	// A release that does not exist, or has no Linux build: a box's is
+	// said, naming the files that asked for it, and skipped; check then
+	// refuses that box and the others still pass. The default's is the
+	// run's.
+	tgz := func(v string) string {
+		return "https://github.com/smallhoursorg/hotserve/releases/download/v" + v + "/hotserve_" + v + "_linux_" + arch + ".tar.gz"
+	}
+	r.write("deploy2.example.com/HOTSERVE_VERSION", "0.3.9\n")
+	r.write("deploy4.example.com/HOTSERVE_VERSION", "v0.3.9\n")
+	out, code = install()
+	if code != 0 || !strings.Contains(out, "install-hotserve: no release at "+tgz("0.3.9")+", which deploy2.example.com/HOTSERVE_VERSION, deploy4.example.com/HOTSERVE_VERSION names; skipped, and make check refuses that box\n") ||
+		!maps.Equal(gh.served(), map[string]int{"0.3.1": 1, "0.3.1-rc1": 1}) || !slices.Equal(installed(), []string{"hotserve", "hotserve-0.3.1", "hotserve-0.3.1-rc1"}) {
+		t.Fatalf("a release with no build: exit %d\n%s\ndownloads %v, installed %v", code, out, gh.served(), installed())
+	}
+	out, code = r.run("check", "HOTSERVE="+hs, "HOTSERVE_RAN="+ran)
+	if code != 1 || !strings.Contains(out, "check: deploy2.example.com/Caddyfile: deploy2.example.com/HOTSERVE_VERSION names 0.3.9, and "+hs+"-0.3.9 is not here to check it with: bin/install-hotserve installs one for each box's file (in the workflow; there is no macOS build), and says when a release has no build to install\n") ||
+		!strings.Contains(out, "check: deploy4.example.com/Caddyfile: deploy4.example.com/HOTSERVE_VERSION names 0.3.9, and ") ||
+		!strings.Contains(out, "deploy.example.com/Caddyfile → https://deploy.example.com/ (1 app, 1 signer)\n") ||
+		!strings.Contains(out, "deploy3.example.com/Caddyfile → https://deploy3.example.com/ (1 app, 1 signer), checked with "+hs+"-0.3.1-rc1\n") {
+		t.Fatalf("check after a skipped release: exit %d\n%s", code, out)
+	}
+	if out, code := install("HOTSERVE_VERSION=0.3.9"); code != 1 || !strings.Contains(out, "install-hotserve: no release at "+tgz("0.3.9")+" (from HOTSERVE_VERSION)\n") || len(installed()) != 0 {
+		t.Fatalf("a default with no build: exit %d\n%s\ninstalled %v", code, out, installed())
+	}
+	r.write("deploy4.example.com/HOTSERVE_VERSION", "0.3.0")
+	r.write("deploy2.example.com/HOTSERVE_VERSION", "latest\n")
+	// `default`: the default alone, the boxes' files unread — the
+	// apply job's, which one box's bad file must not stop.
+	out, code = installArgs([]string{"default"})
+	if code != 0 || out != stable("0.3.1") || !maps.Equal(gh.served(), map[string]int{"0.3.1": 1}) || !slices.Equal(installed(), []string{"hotserve", "hotserve-0.3.1"}) {
+		t.Fatalf("default: exit %d\n%s\ndownloads %v", code, out, gh.served())
+	}
+	if out, code := installArgs([]string{"all"}); code != 1 || !strings.Contains(out, "install-hotserve: 'all'?") {
+		t.Fatalf("an unknown argument: exit %d\n%s", code, out)
+	}
+	r.write("deploy2.example.com/HOTSERVE_VERSION", "0.3.0\n")
+
+	// A tarball that does not match its checksums.txt is not installed,
+	// and the run fails there.
+	gh.mu.Lock()
+	gh.corrupt = "0.3.0"
+	gh.mu.Unlock()
+	out, code = install()
+	if code == 0 || !strings.Contains(out, "FAILED") || slices.Contains(installed(), "hotserve-0.3.0") {
+		t.Fatalf("a corrupt tarball: exit %d\n%s\ninstalled %v", code, out, installed())
+	}
 }

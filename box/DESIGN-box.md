@@ -945,7 +945,7 @@ can do both by other means.
 | An app launched (a deploy, a crash's relaunch) while a push's env files stand at `new` — between their swap and the Caddyfile's, or before a rollback puts them back — runs with those values, beside the Caddyfile it had, until its next launch | Transitions, installing → swapped | 2 | 2 | 3 | 12; the values are ones a signer committed, the push is red and named when it rolls back, and the app's next launch reads what is on disk |
 | A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4 (the triage skill): a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
 | An app's `env_file` outside `/etc/hotserve/secrets/` that is not on the box: the push applies green, since config load is silent about an absent file (`warnEnvFileModeOf`, liveswap/app.go). A deploy fails at its launch, named, and the old version keeps serving; but a crash's relaunch fails the same way, so the app stays down until the console makes the file | "Which checks run where" | 4 | 4 | 1 | 16; every launch names the missing file. A warning at config load would fire on every CI check, where the file cannot exist; reporting root's own stat in the push's result is a new field (size 3, risk 2) |
-| `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the latest stable, or the one `HOTSERVE_VERSION` names), whose install step's line names it. `hotserve version` on a release that old prints only Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
+| `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the box's `HOTSERVE_VERSION` file; without one, the latest stable, or the one the `HOTSERVE_VERSION` variable names), whose install step's line names it; a box with a file is checked with `hotserve-<version>`, which the box's green line names. `hotserve version` on a release that old prints only Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
 | A box host that a proxy reaches with a client certificate (Cloudflare's Authenticated Origin Pulls), or that a balancer reaches through a `proxy_protocol` falling back to `REQUIRE`, or whose TLS policy sets ciphers or curves: every push is refused, though the workflow's connection would arrive | Reachability, "The connection" | 2 | 5 | 1 | 10; red and named, and each remedy there keeps the box reachable. Admitting the setting needs the door's compare applied to the wrappers and policies, against the configuration the admin API serves, since the loaded server holds them as provisioned modules ("The door"; size 3) |
 | A box server whose TLS policies are in an order no Caddyfile adapts to passes as walked: a list in which no policy is sure to apply to the host (Caddy then refuses the handshake), or, past 30 policies, one matching the host by wildcard or by matcher ahead of one naming it exactly (Caddy looks at that one first) | Reachability, "The connection" | 4 | 1 | 3 | 12; the input is always the adapter's, which ends every list with a catch-all and writes a policy naming a host ahead of any other matching it |
 
@@ -1267,6 +1267,21 @@ again from the renamed directory, a console step; a host rename needs a
 certificate first in any case. A repository whose box file sits
 elsewhere (`examples/box` before this rule kept one `Caddyfile` at the
 top) moves it once.
+
+Beside the file, the template may keep `<host>/HOTSERVE_VERSION`: the
+release that box runs, one line, which `make check` checks the box's
+files with (`bin/install-hotserve` installs each release the boxes'
+files name as `hotserve-<version>`, and the default — the
+`HOTSERVE_VERSION` variable's, else the latest stable — as `hotserve`;
+a file that names no release, or a release with no build, is said and
+skipped there and refused by `make check`, never read as the latest).
+It is the repository's alone: the bundle carries `<host>`'s tree, which
+names it, but never its blob, and the proof reads only the entries it
+walks (`walkTree`, box/proof/prove.go) and `hotserve box describe` only
+`<host>/secrets`, so neither the box nor root ever sees it. `GET /`
+does not report the box's release, so `bin/apply` cannot compare the
+two: the box's own `validate` is what refuses a file its release does
+not read.
 
 ## Secrets
 
@@ -2150,6 +2165,7 @@ computer (Open question 6).
 | A client-chosen random id per push; a result poll authenticated by `deploy_trust`, the workflow minting a fresh token for each | A per-push poll secret (its digest sent with the push, the secret to poll); a box-issued id in the response | The poll secret let a push that removed its own workflow from `deploy_trust` read its result, at the price of a second credential, its own header scheme, and a marker that authenticates — and with it a question no answer suited: what a poll gets when that marker cannot be read. A fresh token per poll outlives a slow apply; the rare self-locking push reads 401 and the catalogue names the journal. A box-issued id: a lost POST response left the run with nothing to poll. |
 | The body read and parsed, and the fast path answered, before the admission lock | The lock before the body | A slow upload would hold the lock, and a replay of the applied `HEAD` sent while a push is pending would be refused instead of answered `no_change`. The cost: a body of up to 16 MiB read before a 409 for a pending push; memory is bounded by the one push slot (Caps), so a replay sent while another push is in memory is told to retry. |
 | A handler fast path for a replay of the applied `HEAD` | Rate-limiting successful admissions | Nothing would change on disk, so no root work is the right amount; a rate limit would also slow honest runs. |
+| A box's release in `<host>/HOTSERVE_VERSION`, read by the template's `bin/install-hotserve` and `bin/check` alone, with the repository variable as every box's default | A repository variable per box; one `make check` run per distinct release; the box reporting its release in `GET /` | The variable is the repository's, and one run per release still checks every box with every release, so a stable box's file passes under the candidate. The file sits where the box is described, in the signed commit, beside the file it is about; it is never sent, since the box runs what was installed on it and the file only tells the early check which release that is. `GET /` naming the release would let `bin/apply` compare the two, and stays open (#223). |
 | Host and recorded path as identity, the path `<host>/Caddyfile` derived by `init` | Host alone; a path typed at `init` (a directory argument, `--path`); a `path` line in the file | Host alone cannot pick between two files naming the same host; a typed path is free text checked only at the first push, and a directory argument a wrong-directory risk; a `path` line states the location a second time, in the signed file. The cost: one top-level directory per box, named for its host — no single `Caddyfile` at the root, no grouping, and a host rename moves the directory. |
 | Every chain commit signed | HEAD's signature only | An unsigned commit would ride in under the next signed one. |
 | Bundle rename before marker | Marker before bundle | A crash between them would answer 409 to every push until the marker aged out. |
@@ -2436,6 +2452,11 @@ Dated one-liners; the full text of each is in git.
   not scored, a line a signer may commit is occurrence 5, severity 1
   clears only by a cheap fix and gets no residual row, and an issue's
   item is scored before a branch is cut.
+- 2026-10-16 — A release per box: `<host>/HOTSERVE_VERSION`, optional,
+  pins the release `make check` checks that box with;
+  `bin/install-hotserve` installs each release the files name as
+  `hotserve-<version>`, the default as `hotserve`. Read by the template
+  alone, never sent (#223).
 - 2026-10-16 — Step 6 asks the box server's connection settings
   before its routes: its listeners' protocols, its listener wrappers,
   the TLS connection policy for the host and its strict SNI check
