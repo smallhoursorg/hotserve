@@ -15,9 +15,12 @@ import (
 
 // KeyRefetchInterval is the most often one OIDC source fetches its
 // issuer's keys. It fetches only for a token whose kid it holds no key
-// for, so a key rotation reaches it with the first token under the new
-// key that arrives this long after the last fetch; one that arrives
-// sooner is refused, and the deploy's retry goes through.
+// for, so a key rotation — a new key under a new kid — reaches it with
+// the first token under the new key that arrives this long after the
+// last fetch; one that arrives sooner is refused, and the deploy's
+// retry goes through. A key replaced under the same kid does not reach
+// it: its tokens fail under the held key, which never fetches, until a
+// fetch for another kid or a config reload (a new key set).
 const KeyRefetchInterval = time.Minute
 
 // keyFetchTimeout bounds one fetch of an issuer's keys. The fetch is

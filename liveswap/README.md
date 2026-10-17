@@ -827,7 +827,11 @@ within a minute of its last fetch such a token is refused, with that
 fetch's error if it failed. So the first deploy after the issuer
 rotates its key, or comes back from an outage, can be refused for up
 to a minute; its retry goes through. A forged token under a key the
-box does hold costs it no request to the issuer. Each entry's reason
+box does hold costs it no request to the issuer, which is also why an
+issuer that replaces a key but keeps its kid is not picked up: tokens
+under the new key are refused as a bad signature under the key the box
+holds, until the source fetches for another kid or `systemctl reload
+hotserve` starts every source with an empty key set. Each entry's reason
 is one line, cut at 300 bytes plus an ellipsis — an issuer's error
 quotes what the token carried, and a presented identity can be
 anything the issuer signed; the reason

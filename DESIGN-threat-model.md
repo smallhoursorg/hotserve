@@ -85,7 +85,7 @@ against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so no answer tells a caller which app names
 exist (`Handler.ServeHTTP`, liveswap/handler.go). **Residual: timing
-can** (S3 × O5 × D5 = 75, as #296 scored it; owed). A forged token
+can** (S3 × O5 × D5 = 75, as #296 scored it; owed, #306). A forged token
 naming an issuer an app's sources trust is refused after a local
 signature check when the source holds the token's kid, and, when it
 does not, after a fetch of the issuer's keys that each source makes at

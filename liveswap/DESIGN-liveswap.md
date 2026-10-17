@@ -47,7 +47,7 @@ Concept map from the Nomad-era stack:
   unauthenticated callers (unknown apps verify against the global trust
   sources, then 404; a refused token gets the same 401 either way). Its
   timing can, within a bound (DESIGN-threat-model.md, "Webhook
-  endpoint", the residual): a forged token naming an issuer an app's
+  endpoint", the residual; owed, #306): a forged token naming an issuer an app's
   sources trust is refused after a local signature check when the
   source holds the token's kid, and, when it does not, after a fetch of
   the issuer's keys that each source makes at most once a minute. A
