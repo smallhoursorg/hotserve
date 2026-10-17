@@ -124,7 +124,7 @@ As root on the box, first see whether it is already on, since a
 provider's image may ship it:
 
 ```sh
-apt-config dump APT::Periodic::Unattended-Upgrade    # prints "1": already on, skip the install
+apt-config dump APT::Periodic::Unattended-Upgrade    # "1": already on; nothing: not installed; "0": installed, turned off
 ```
 
 If that prints nothing:
@@ -133,7 +133,15 @@ If that prints nothing:
 apt install unattended-upgrades      # turns itself on: writes /etc/apt/apt.conf.d/20auto-upgrades
 ```
 
-Either way, check what it would do:
+If it prints `"0"`, the image installed the package and turned it
+off; installing again changes nothing, so write the file the package
+writes when it is on:
+
+```sh
+printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
+```
+
+In every case, check what it would do:
 
 ```sh
 apt-config dump Unattended-Upgrade::Origins-Pattern    # three origin=Debian lines, nothing else
