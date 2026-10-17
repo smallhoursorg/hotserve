@@ -11,10 +11,13 @@ Signed commits are the bar every change to the box's config meets: the
 box applies a commit only if a key on its own list signed it, and
 those keys stay on the signers' laptops, so a stolen GitHub login or a
 compromised workflow cannot change the config with anything a signer
-did not sign.
-The same check means GitHub's merge button cannot make a commit the
-box applies: a pull request someone reviewed is landed from a signer's
-laptop ([the rules](../examples/box/README.md#the-rules)).
+did not sign. Only the box's repository needs signed commits. An app's
+own repository does not: a push to its `main` deploys it, on the OIDC
+token its workflow mints, so whoever can push there can ship a new
+version of that app, but cannot change its trust, its sandbox or any
+other app. The same check means GitHub's merge button cannot make a
+commit the box applies: a pull request someone reviewed is landed from
+a signer's laptop ([the rules](../examples/box/README.md#the-rules)).
 
 You work as root on the box only to install software and, once, to
 tell the box which repository its config comes from (step 3);
