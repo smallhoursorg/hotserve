@@ -184,8 +184,7 @@ signer: commits from this checkout are signed with /home/alice/.ssh/id_ed25519
 
 It adds a `signer` line to the `box` block, named for your git email,
 and makes this checkout — this one only — sign every commit with that
-key. The other lines it prints are about staging the file and about
-adding a person to a box that already runs; ignore them today, since
+key. If it also says the file is not staged, ignore that today, since
 the commit below takes the file as it stands. The box README's
 [Set it up](../examples/box/README.md#set-it-up) says why a key that
 only signs is better than the one you push to GitHub with, and how to
