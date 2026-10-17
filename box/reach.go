@@ -14,6 +14,7 @@ package box
 // match, and one they do not know may fail.
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -127,14 +128,12 @@ func routeList(v any) ([]adaptedRoute, error) {
 }
 
 // door is where the loaded server the push arrived through listens,
-// and the filter its addresses, and the new file's, pass through when
-// a refusal quotes them: the adapter expands `{$VAR}` into a listen
-// address from the service's environment, and the filter runs over
-// the whole list before it is bounded, so no cut can leave a value's
-// prefix readable. nil redact is none (a test).
+// with the text of the Caddyfile this box runs, which is what a refusal
+// may quote of those addresses, and the pushed file's text, the same
+// for the new list's (said). nil text quotes no host.
 type door struct {
-	listen []string
-	redact func(string) string
+	listen          []string
+	running, pushed []byte
 }
 
 // reach asks the question of adapted for host, the box_webhook host
@@ -171,7 +170,7 @@ func reach(adapted []byte, host string, d *door) error {
 				return err
 			}
 			if from, to := canonical(d.listen), canonical(listen); !slices.Equal(from, to) {
-				return &refusal{msg: msgListenMoved(from, to, d.redact)}
+				return &refusal{msg: msgListenMoved(from, to, d.running, d.pushed)}
 			}
 		}
 		// The connection next: what refuses it stands before every
@@ -212,25 +211,50 @@ func dig(v any, keys ...string) any {
 }
 
 // msgListenMoved is the catalogue text for a push that moves the box
-// server's listen addresses: from the loaded server's to the new
-// file's, each list canonical, filtered whole by redact (nil: not
-// filtered), then bounded — in that order, since the filter matches
-// a whole value and a cut would leave its prefix. An empty list is a
-// server with no listener, which receives nothing and which the
-// adapter never writes; the text still has to read.
-func msgListenMoved(from, to []string, redact func(string) string) string {
-	where := func(l []string) string {
-		if len(l) == 0 {
-			return "no address"
-		}
-		s := strings.Join(l, ", ")
-		if redact != nil {
-			s = redact(s)
-		}
-		return proof.Bound(s)
-	}
-	return "this push changes where the box's server listens (" + where(from) + " → " + where(to) +
+// server's listen addresses: from the loaded server's, quoted from
+// running, to the new file's, quoted from pushed; each list canonical.
+func msgListenMoved(from, to []string, running, pushed []byte) string {
+	return "this push changes where the box's server listens (" + quoted(from, running) + " → " + quoted(to, pushed) +
 		"): a push cannot move the address it arrives on; make that change at the console"
+}
+
+// msgUnwritten stands in the refusal for an address text does not
+// have: one the adapter expanded from `{$VAR}`, or App.Provision from
+// `{env.*}`, which is the environment's to keep.
+const msgUnwritten = "an address not written in the file"
+
+// quoted is a canonical list as the refusal prints it: each address
+// said in text as it is, any other as msgUnwritten, the whole bounded;
+// "no address" for none (a server with no listener, which receives
+// nothing and which the adapter never writes; the text still has to
+// read).
+func quoted(list []string, text []byte) string {
+	if len(list) == 0 {
+		return "no address"
+	}
+	out := make([]string, 0, len(list))
+	for _, addr := range list {
+		if !said(addr, text) {
+			addr = msgUnwritten
+		}
+		out = append(out, addr)
+	}
+	return proof.Bound(strings.Join(out, ", "))
+}
+
+// said reports whether addr may be quoted from text: what of it could
+// carry a value — its host, as Caddy's address grammar reads it, or
+// the whole when the grammar does not read it — is written there. A
+// network and a port are the grammar's own words. What the file says
+// its signer knows; what the environment put there is quoted nowhere,
+// as validate's output has it (the redactor), and here there is
+// nothing to filter.
+func said(addr string, text []byte) bool {
+	na, err := caddy.ParseNetworkAddress(addr)
+	if err != nil {
+		return bytes.Contains(text, []byte(addr))
+	}
+	return na.Host == "" || bytes.Contains(text, []byte(na.Host))
 }
 
 // listenOf is a server's `listen` list as Caddy keeps it once loaded:

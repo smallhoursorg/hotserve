@@ -2,7 +2,6 @@ package box
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,74 +38,85 @@ func TestValidateAdapt(t *testing.T) {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
-	t.Run("a moved door refuses, its addresses filtered", func(t *testing.T) {
+	t.Run("a moved door refuses, an address the file does not have unwritten", func(t *testing.T) {
 		// The adapter expanded `bind {$BIND_ADDR}` into the listen list;
-		// the refusal names the move without the value.
+		// the pushed file does not have the address, so the refusal names
+		// the move without it.
 		addr := "198.51.100.77:443"
 		withListen := strings.Replace(reachableAdaptation, `"srv0":{`, `"srv0":{"listen":["'"$BIND_ADDR"'"],`, 1)
 		c, dir := stubChildren(t, "exit 0", "printf '%s' '"+withListen+"'; exit 0", "exit 0", "BIND_ADDR="+addr)
-		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, []string{":443"})
-		if err != nil || strings.Contains(msg, addr) || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → ") {
+		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, &door{listen: []string{":443"}})
+		if err != nil || msg != msgListenMoved([]string{":443"}, []string{msgUnwritten}, nil, nil) {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 		if exists(filepath.Join(dir, "hotserve-backup.args")) {
 			t.Fatal("backup validate ran after the refusal")
 		}
-		// The same door, kept: admitted, and the value never quoted.
+		// The same door, kept: admitted, and nothing quoted.
 		c, _ = stubChildren(t, "exit 0", "printf '%s' '"+withListen+"'; exit 0", "exit 0", "BIND_ADDR="+addr)
-		if msg, err := c.validate(context.Background(), randomID(t), file, stubHost, []string{addr}); msg != "" || err != nil {
+		if msg, err := c.validate(context.Background(), randomID(t), file, stubHost, &door{listen: []string{addr}}); msg != "" || err != nil {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
-		// The value across the refusal's bound (it begins at byte 290 of
-		// a list cut at 300): filtered whole before the cut, so not even
-		// its prefix is quoted.
-		var many strings.Builder
-		for i := range 20 {
-			fmt.Fprintf(&many, `"10.0.0.%d:443",`, i)
-		}
-		withMany := strings.Replace(reachableAdaptation, `"srv0":{`, `"srv0":{"listen":[`+many.String()+`"'"$BIND_ADDR"'"],`, 1)
-		c, _ = stubChildren(t, "exit 0", "printf '%s' '"+withMany+"'; exit 0", "exit 0", "BIND_ADDR="+addr)
-		msg, err = c.validate(context.Background(), randomID(t), file, stubHost, []string{":443"})
-		if err != nil || strings.Contains(msg, "198.51") || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → 10.0.0.0:443, ") {
+		// Written in the pushed file: quoted as it is; the loaded one,
+		// written in the running file: the same.
+		c, _ = stubChildren(t, "exit 0", "printf '%s' '"+withListen+"'; exit 0", "exit 0", "BIND_ADDR="+addr)
+		written := []byte("deploy.example.com {\n\tbind 198.51.100.77\n}\n")
+		msg, err = c.validate(context.Background(), randomID(t), written, stubHost, &door{listen: []string{"10.0.0.5:443"}, running: []byte("bind 10.0.0.5")})
+		if err != nil || msg != "this push changes where the box's server listens (10.0.0.5:443 → 198.51.100.77:443): a push cannot move the address it arrives on; make that change at the console" {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
 	// The adapter splices `{$BIND_ADDRS}` into the file before lexing
-	// it, so the real adaptation lists the value's tokens — split at
-	// whitespace, unquoted — never the value whole.
+	// it, so the real adaptation lists what the value held, in Caddy's
+	// spelling, and the pushed file has none of it: every form of the
+	// value, the quoting context included, is unwritten.
 	for name, value := range map[string]string{
 		"a value of two addresses":            "198.51.100.77 198.51.100.78",
 		"a value with whitespace around it":   " 198.51.100.77\t",
 		"a quoted value":                      `"198.51.100.77"`,
 		"a value of two quoted addresses":     `"198.51.100.77" "198.51.100.78"`,
 		"a value of two backticked addresses": "`198.51.100.77` `198.51.100.78`",
-		// The refusal prints the address as Caddy spells it: the
-		// network dropped, the port added. The host is what remains.
-		"a value with its network": "tcp/198.51.100.77",
+		"a value with its network":            "tcp/198.51.100.77",
 	} {
-		t.Run("a moved door from "+name+", each address filtered", func(t *testing.T) {
+		t.Run("a moved door from "+name+", unwritten", func(t *testing.T) {
 			t.Setenv("BIND_ADDRS", value)
-			cfg, _, err := adapt(t, reachFile(nil, "", "\tbind {$BIND_ADDRS}\n", ""))
+			in := reachFile(nil, "", "\tbind {$BIND_ADDRS}\n", "")
+			cfg, _, err := adapt(t, in)
 			if err != nil || !strings.Contains(string(cfg), `"198.51.100.77:443"`) {
 				t.Fatalf("adapt: %v\n%s", err, cfg)
 			}
 			c, _ := stubChildren(t, "exit 0", "printf '%s' '"+string(cfg)+"'; exit 0", "exit 0", "BIND_ADDRS="+value)
-			msg, err := c.validate(context.Background(), randomID(t), file, "deploy.example.com", []string{":443"})
-			if err != nil || strings.Contains(msg, "198.51") || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → ") {
+			msg, err := c.validate(context.Background(), randomID(t), []byte(in), "deploy.example.com", &door{listen: []string{":443"}})
+			if err != nil || strings.Contains(msg, "198.51") || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → "+msgUnwritten) {
 				t.Fatalf("msg %q err %v", msg, err)
 			}
 		})
 	}
-	t.Run("a moved door from a listen placeholder, the address filtered", func(t *testing.T) {
+	t.Run("a moved door from a quoted placeholder in the file, unwritten", func(t *testing.T) {
+		// `bind "{$BIND_ADDRS}"` with a value that closes and reopens the
+		// quotes: two addresses to the adapter, neither in the file.
+		const value = `198.51.100.77" "198.51.100.78`
+		t.Setenv("BIND_ADDRS", value)
+		in := reachFile(nil, "", "\tbind \"{$BIND_ADDRS}\"\n", "")
+		cfg, _, err := adapt(t, in)
+		if err != nil || !strings.Contains(string(cfg), `"198.51.100.78:443"`) {
+			t.Fatalf("adapt: %v\n%s", err, cfg)
+		}
+		c, _ := stubChildren(t, "exit 0", "printf '%s' '"+string(cfg)+"'; exit 0", "exit 0", "BIND_ADDRS="+value)
+		msg, err := c.validate(context.Background(), randomID(t), []byte(in), "deploy.example.com", &door{listen: []string{":443"}})
+		if err != nil || strings.Contains(msg, "198.51") || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → "+msgUnwritten) {
+			t.Fatalf("msg %q err %v", msg, err)
+		}
+	})
+	t.Run("a moved door from a listen placeholder, unwritten", func(t *testing.T) {
 		// A `{env.*}` placeholder in a listen address is replaced in the
-		// serving process (listenOf), the whole address from the value,
-		// and printed as Caddy spells it.
+		// serving process (listenOf), the whole address from the value.
 		const value = "tcp/198.51.100.77:443"
 		t.Setenv("BOX_TEST_LISTEN", value)
 		withPlaceholder := strings.Replace(reachableAdaptation, `"srv0":{`, `"srv0":{"listen":["{env.BOX_TEST_LISTEN}"],`, 1)
 		c, _ := stubChildren(t, "exit 0", "printf '%s' '"+withPlaceholder+"'; exit 0", "exit 0", "BOX_TEST_LISTEN="+value)
-		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, []string{":443"})
-		if err != nil || strings.Contains(msg, "198.51") || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → ") {
+		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, &door{listen: []string{":443"}})
+		if err != nil || msg != msgListenMoved([]string{":443"}, []string{msgUnwritten}, nil, nil) {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})

@@ -151,8 +151,8 @@ func TestReach(t *testing.T) {
 	}
 }
 
-// doorOf is a door with no filter for the addresses given; nil for
-// none.
+// doorOf is a door for the addresses given, with no text to quote
+// from; nil for none.
 func doorOf(listen []string) *door {
 	if listen == nil {
 		return nil
@@ -192,14 +192,19 @@ func TestReachDoor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("adapt: %v\n%s", err, in)
 			}
-			err = reach(cfg, "deploy.example.com", doorOf(c.door))
+			// The running file, for the test, is the door written out.
+			var d *door
+			if c.door != nil {
+				d = &door{listen: c.door, running: []byte(strings.Join(c.door, " ")), pushed: []byte(in)}
+			}
+			err = reach(cfg, "deploy.example.com", d)
 			if c.from == "" {
 				if err != nil {
 					t.Fatalf("refused: %v", err)
 				}
 				return
 			}
-			want := msgListenMoved(strings.Split(c.from, ", "), strings.Split(c.to, ", "), nil)
+			want := msgListenMoved(strings.Split(c.from, ", "), strings.Split(c.to, ", "), d.running, d.pushed)
 			var r *refusal
 			if !errors.As(err, &r) || r.msg != want {
 				t.Fatalf("got  %v\nwant %q", err, want)
@@ -220,22 +225,22 @@ func TestReachDoorJSON(t *testing.T) {
 		want   string // "" admitted; "error" the box's own; else the refusal
 	}{
 		"a placeholder resolving to the door": {listen: `"listen":["{env.BOX_TEST_ADDR}"],`, door: []string{":443"}},
-		"a placeholder resolving elsewhere":   {listen: `"listen":["{env.BOX_TEST_ADDR}"],`, door: []string{":8443"}, want: msgListenMoved([]string{":8443"}, []string{":443"}, nil)},
+		"a placeholder resolving elsewhere":   {listen: `"listen":["{env.BOX_TEST_ADDR}"],`, door: []string{":8443"}, want: msgListenMoved([]string{":8443"}, []string{":443"}, nil, nil)},
 		// Provision refuses an unresolved placeholder, and validate ran
 		// it on the same bytes: here it is the box's own.
 		"a placeholder that does not resolve":    {listen: `"listen":["{env.BOX_TEST_NOT_SET}"],`, door: []string{":443"}, want: "error"},
 		"no listen key":                          {door: []string{":443"}, want: "error"},
 		"listen null":                            {listen: `"listen":null,`, door: []string{":443"}, want: "error"},
-		"listen empty":                           {listen: `"listen":[],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, nil, nil)},
-		"an empty door":                          {listen: `"listen":[":443"],`, door: []string{}, want: msgListenMoved(nil, []string{":443"}, nil)},
+		"listen empty":                           {listen: `"listen":[],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, nil, nil, nil)},
+		"an empty door":                          {listen: `"listen":[":443"],`, door: []string{}, want: msgListenMoved(nil, []string{":443"}, nil, nil)},
 		"no listen key and no door":              {},
 		"an address that does not parse, twice":  {listen: `"listen":["x:y","x:y"],`, door: []string{"x:y"}},
-		"an address that does not parse, moved":  {listen: `"listen":["x:y"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{"x:y"}, nil)},
-		"a port range, as written":               {listen: `"listen":[":443-444"],`, door: []string{":443", ":444"}, want: msgListenMoved([]string{":443", ":444"}, []string{":443-444"}, nil)},
+		"an address that does not parse, moved":  {listen: `"listen":["x:y"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{"x:y"}, nil, nil)},
+		"a port range, as written":               {listen: `"listen":[":443-444"],`, door: []string{":443", ":444"}, want: msgListenMoved([]string{":443", ":444"}, []string{":443-444"}, nil, nil)},
 		"a listen that does not read":            {listen: `"listen":":443",`, door: []string{":443"}, want: "error"},
 		"a listen whose address does not read":   {listen: `"listen":[443],`, door: []string{":443"}, want: "error"},
 		"a listen that does not read, no door":   {listen: `"listen":":443",`},
-		"a control byte in the address, bounded": {listen: `"listen":[":443\n"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{":443\n"}, nil)},
+		"a control byte in the address, bounded": {listen: `"listen":[":443\n"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{":443\n"}, nil, nil)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			adapted := strings.Replace(string(connJSON("")), `"listen":[":443"],`, c.listen, 1)
@@ -255,20 +260,36 @@ func TestReachDoorJSON(t *testing.T) {
 			}
 		})
 	}
-	if got := msgListenMoved([]string{":443"}, []string{":443\n"}, nil); strings.Contains(got, "\n") {
+	// What the refusal quotes (said): an address whose host the file
+	// has, as it is; one it does not, as msgUnwritten; a hostless one
+	// always; one the grammar does not read, only when written whole.
+	// Then the bound: a control byte in a written host is quoted
+	// harmless, and a long list is cut after the choice, so no cut
+	// leaves a prefix of what the file does not have.
+	pushed := []byte("deploy.example.com {\n\tbind 10.0.0.5 ::1\n}\n")
+	for addr, want := range map[string]string{
+		":443":              ":443",
+		"10.0.0.5:443":      "10.0.0.5:443",
+		"[::1]:443":         "[::1]:443",
+		"198.51.100.77:443": msgUnwritten,
+		"x:y":               msgUnwritten,
+	} {
+		if got := quoted([]string{addr}, pushed); got != want {
+			t.Fatalf("quoted %q from the file: got %q, want %q", addr, got, want)
+		}
+	}
+	if got := quoted([]string{"x:y"}, []byte("bind x:y")); got != "x:y" {
+		t.Fatalf("an address the grammar does not read, written whole: got %q", got)
+	}
+	if got := msgListenMoved([]string{":443"}, []string{":443\n"}, nil, []byte(":443\n")); strings.Contains(got, "\n") {
 		t.Fatalf("a control byte reached the text: %q", got)
 	}
-	// The filter runs over the whole list before the bound cuts it, so
-	// a value across the cap (it begins at byte 290 of a list cut at
-	// 300) is replaced, not cut to a readable prefix.
-	value := "198.51.100.77:443"
-	long := make([]string, 0, 20)
+	long := make([]string, 0, 21)
 	for i := range 20 {
 		long = append(long, fmt.Sprintf("10.0.0.%d:443", i))
 	}
-	redact := func(s string) string { return strings.ReplaceAll(s, value, "[x]") }
-	if got := msgListenMoved([]string{":443"}, append(long, value), redact); strings.Contains(got, "198.51") {
-		t.Fatalf("a prefix of the value reached the text: %q", got)
+	if got := msgListenMoved([]string{":443"}, append(long, "198.51.100.77:443"), nil, nil); strings.Contains(got, "198.51") || strings.Contains(got, "10.0.0.") {
+		t.Fatalf("an address the file does not have reached the text: %q", got)
 	}
 }
 

@@ -48,15 +48,15 @@ type fakeValidator struct {
 	err   error
 	calls int
 	got   []byte
-	host  string   // the host reachability was asked for
-	door  []string // the loaded server's listen addresses it was given
+	host  string // the host reachability was asked for
+	door  *door  // the door it was given: the loaded server's listen addresses
 	// block, when set, is waited on inside validate: the admission lock
 	// is held meanwhile.
 	block   chan struct{}
 	entered chan struct{}
 }
 
-func (f *fakeValidator) validate(ctx context.Context, _ string, caddyfile []byte, host string, door []string) (string, error) {
+func (f *fakeValidator) validate(ctx context.Context, _ string, caddyfile []byte, host string, door *door) (string, error) {
 	f.mu.Lock()
 	f.calls++
 	f.got, f.host, f.door = caddyfile, host, door
@@ -667,22 +667,22 @@ func TestPushDoor(t *testing.T) {
 	c2, bundle := p.change()
 	srv := &caddyhttp.Server{Listen: []string{":8443", "tcp/127.0.0.1:8443"}}
 	ctx := context.WithValue(context.Background(), caddyhttp.ServerCtxKey, srv)
-	p.val.msg = msgListenMoved([]string{":8443"}, []string{":443"}, nil)
+	p.val.msg = msgListenMoved([]string{":8443"}, []string{":443"}, nil, nil)
 	id := randomID(t)
 	m := wantResult(t, p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle), ctx: ctx}), http.StatusUnprocessableEntity, id, phaseRefused)
-	if m["error"] != p.val.msg || !slices.Equal(p.val.door, srv.Listen) {
-		t.Fatalf("got %v, the door %q; want the server's %q", m, p.val.door, srv.Listen)
+	if m["error"] != p.val.msg || !slices.Equal(p.val.door.listen, srv.Listen) || !bytes.Equal(p.val.door.running, boxFile(1, p.alice)) {
+		t.Fatalf("got %v, the door %+v; want the server's %q and the installed file", m, p.val.door, srv.Listen)
 	}
 	p.untouched(t)
 
 	// A server with no addresses is an empty door, not none: compared,
 	// never skipped. (None receives a push; the sentinel is kept apart.)
 	none := context.WithValue(context.Background(), caddyhttp.ServerCtxKey, &caddyhttp.Server{})
-	p.val.msg = msgListenMoved(nil, []string{":443"}, nil)
+	p.val.msg = msgListenMoved(nil, []string{":443"}, nil, nil)
 	id = randomID(t)
 	wantResult(t, p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle), ctx: none}), http.StatusUnprocessableEntity, id, phaseRefused)
-	if p.val.door == nil || len(p.val.door) != 0 {
-		t.Fatalf("the door for a server with no addresses is %#v; want an empty list", p.val.door)
+	if p.val.door == nil || p.val.door.listen == nil || len(p.val.door.listen) != 0 {
+		t.Fatalf("the door for a server with no addresses is %+v; want an empty list", p.val.door)
 	}
 	p.untouched(t)
 
@@ -690,8 +690,8 @@ func TestPushDoor(t *testing.T) {
 	p.val.msg = ""
 	id = randomID(t)
 	w := p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle), ctx: ctx})
-	if w.Code != http.StatusGatewayTimeout || !exists(p.x("in/"+id+".tar")) || !slices.Equal(p.val.door, srv.Listen) {
-		t.Fatalf("got %d, the door %q", w.Code, p.val.door)
+	if w.Code != http.StatusGatewayTimeout || !exists(p.x("in/"+id+".tar")) || !slices.Equal(p.val.door.listen, srv.Listen) {
+		t.Fatalf("got %d, the door %+v", w.Code, p.val.door)
 	}
 }
 

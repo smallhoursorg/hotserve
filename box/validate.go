@@ -18,13 +18,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/caddyserver/caddy/v2"
-	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
 	"github.com/smallhoursorg/hotserve/liveswap"
@@ -49,15 +45,16 @@ const (
 const xOK = 0x1
 
 // validator is step 6. host is the box_webhook host the walk found in
-// caddyfile, which reachability is asked for; door is where the loaded
-// server the push arrived through listens, which the new file's box
-// server must keep (nil: no Caddy server received the push, so no door
-// to keep). msg is a refusal's whole catalogue text; err is the box's
-// own trouble (the staged file could not be written, a child could not
-// start, whether backups are installed could not be told, an adaptation
-// that does not read).
+// caddyfile, which reachability is asked for; d is the door — where the
+// loaded server the push arrived through listens, which the new file's
+// box server must keep, with the text of the file the box runs (nil:
+// no Caddy server received the push, so no door to keep). msg is a
+// refusal's whole catalogue text; err is the box's own trouble (the
+// staged file could not be written, a child could not start, whether
+// backups are installed could not be told, an adaptation that does not
+// read).
 type validator interface {
-	validate(ctx context.Context, id string, caddyfile []byte, host string, door []string) (msg string, err error)
+	validate(ctx context.Context, id string, caddyfile []byte, host string, d *door) (msg string, err error)
 }
 
 // childValidator runs the real children.
@@ -112,7 +109,7 @@ func serviceVariable(key string) bool {
 	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "XDG_")
 }
 
-func (c *childValidator) validate(ctx context.Context, id string, caddyfile []byte, host string, door []string) (string, error) {
+func (c *childValidator) validate(ctx context.Context, id string, caddyfile []byte, host string, d *door) (string, error) {
 	staged := filepath.Join(c.stage, stagedConfig(id))
 	if err := writeExclusive(staged, caddyfile, 0o600); err != nil {
 		return "", fmt.Errorf("staging the Caddyfile for validate: %w", err)
@@ -121,7 +118,7 @@ func (c *childValidator) validate(ctx context.Context, id string, caddyfile []by
 	if msg, err := c.run(ctx, "hotserve validate", c.hotserve, "validate", "--adapter", "caddyfile", "--config", staged); msg != "" || err != nil {
 		return msg, err
 	}
-	if msg, err := c.adapt(ctx, staged, host, door); msg != "" || err != nil {
+	if msg, err := c.adapt(ctx, staged, host, caddyfile, d); msg != "" || err != nil {
 		return msg, err
 	}
 	// `test -x`'s answer: no file, or one this uid cannot run, is "not
@@ -169,7 +166,7 @@ func (c *childValidator) run(ctx context.Context, what, program string, args ...
 // expanded value, and nothing of it but the walk's verdict — the listen
 // addresses of a refused move among them, filtered — leaves this
 // function.
-func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived []string) (string, error) {
+func (c *childValidator) adapt(ctx context.Context, staged, host string, caddyfile []byte, d *door) (string, error) {
 	out := newCappedBuffer(maxAdaptation)
 	exit, timedOut, err := c.exec(ctx, c.hotserve, out, nil, "adapt", "--adapter", "caddyfile", "--config", staged)
 	switch {
@@ -182,9 +179,10 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived
 	case out.over():
 		return msgAdaptationTooLarge, nil
 	}
-	var d *door
-	if arrived != nil {
-		d = &door{listen: arrived, redact: c.doorFilter()}
+	if d != nil {
+		// The pushed file is what the refusal may quote of the new
+		// list; the handler gave the running one.
+		d = &door{listen: d.listen, running: d.running, pushed: caddyfile}
 	}
 	err = reach(out.b, host, d)
 	var r *refusal
@@ -195,48 +193,6 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived
 		return "", fmt.Errorf("hotserve adapt: %w", err)
 	}
 	return "", nil
-}
-
-// doorFilter is the filter a moved door's addresses pass through when
-// a refusal quotes them: validate's — the adapter expands `{$VAR}` into
-// an address from the same environment — primed also with every token
-// the Caddyfile lexer reads from each value, and with each token's host
-// as Caddy's address grammar reads it. The adapter splices a `{$VAR}`
-// into the file's bytes before lexing them, so a `bind {$ADDRS}` writes
-// the value's tokens: split at whitespace, their quotes and backticks
-// removed, their escapes resolved, none of which need be the value
-// whole; and the refusal prints each address as Caddy spells it, the
-// network dropped and the port added, so what remains of the value in
-// it is the host. The lexer and the grammar say what those are. Built
-// on the refusal path alone, which is rare; validate's own filter is
-// not widened, since its lines quote what the lexer read as one token.
-func (c *childValidator) doorFilter() func(string) string {
-	r := liveswap.NewRedactor(addressCandidates(secretCandidates(c.env)), nil)
-	return func(s string) string { s, _ = r.Redact(s); return s }
-}
-
-// addressCandidates is kvs with, for each token the Caddyfile lexer
-// reads from each value, a `KEY=token` pair and, when the token reads
-// as a network address with a host, a `KEY=host` pair (a value that is
-// one plain token adds itself again, which the filter's set absorbs).
-// A value the lexer refuses adds nothing: nothing of it is said, and
-// the adapter refused the file that spliced it in.
-func addressCandidates(kvs []string) []string {
-	out := slices.Clone(kvs)
-	for _, kv := range kvs {
-		key, value, _ := strings.Cut(kv, "=")
-		tokens, err := caddyfile.Tokenize([]byte(value), "")
-		if err != nil {
-			continue
-		}
-		for _, tok := range tokens {
-			out = append(out, key+"="+tok.Text)
-			if na, err := caddy.ParseNetworkAddress(tok.Text); err == nil && na.Host != "" {
-				out = append(out, key+"="+na.Host)
-			}
-		}
-	}
-	return out
 }
 
 // exec runs one child in its own process group, bounded by the
