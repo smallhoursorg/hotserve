@@ -126,15 +126,26 @@ func routeList(v any) ([]adaptedRoute, error) {
 	return routes, nil
 }
 
+// door is where the loaded server the push arrived through listens,
+// and the filter its addresses, and the new file's, pass through when
+// a refusal quotes them: the adapter expands `{$VAR}` into a listen
+// address from the service's environment, and the filter runs over
+// the whole list before it is bounded, so no cut can leave a value's
+// prefix readable. nil redact is none (a test).
+type door struct {
+	listen []string
+	redact func(string) string
+}
+
 // reach asks the question of adapted for host, the box_webhook host
-// the walk found, and door, the listen addresses of the loaded server
-// the push arrived through — nil when no Caddy server received it (a
-// test), and the door is not compared. nil: the door is kept and both
-// requests meet box_webhook first. A *refusal: the catalogue text
-// naming what stands in the way. Any other error is the box's own: an
-// adaptation this code cannot read, or one with no box_webhook routed
-// for the host, which the walk of the same bytes rules out.
-func reach(adapted []byte, host string, door []string) error {
+// the walk found, and d, the door — nil when no Caddy server received
+// the push (a test), and the door is not compared. nil: the door is
+// kept and both requests meet box_webhook first. A *refusal: the
+// catalogue text naming what stands in the way. Any other error is
+// the box's own: an adaptation this code cannot read, or one with no
+// box_webhook routed for the host, which the walk of the same bytes
+// rules out.
+func reach(adapted []byte, host string, d *door) error {
 	var cfg any
 	if json.Unmarshal(adapted, &cfg) != nil {
 		return errAdaptation
@@ -154,13 +165,13 @@ func reach(adapted []byte, host string, door []string) error {
 		// The door first: the push arrived through the loaded server's
 		// addresses, which are thereby proven to work; a file that
 		// moves them is the console's to apply ("The door").
-		if door != nil {
+		if d != nil {
 			listen, err := listenOf(servers[name])
 			if err != nil {
 				return err
 			}
-			if from, to := canonical(door), canonical(listen); !slices.Equal(from, to) {
-				return &refusal{msg: msgListenMoved(from, to)}
+			if from, to := canonical(d.listen), canonical(listen); !slices.Equal(from, to) {
+				return &refusal{msg: msgListenMoved(from, to, d.redact)}
 			}
 		}
 		// The connection next: what refuses it stands before every
@@ -202,15 +213,21 @@ func dig(v any, keys ...string) any {
 
 // msgListenMoved is the catalogue text for a push that moves the box
 // server's listen addresses: from the loaded server's to the new
-// file's, each list canonical and bounded. An empty list is Caddy's
-// error at load, never the adapter's output; the text still has to
-// read.
-func msgListenMoved(from, to []string) string {
+// file's, each list canonical, filtered whole by redact (nil: not
+// filtered), then bounded — in that order, since the filter matches
+// a whole value and a cut would leave its prefix. An empty list is a
+// server with no listener, which receives nothing and which the
+// adapter never writes; the text still has to read.
+func msgListenMoved(from, to []string, redact func(string) string) string {
 	where := func(l []string) string {
 		if len(l) == 0 {
 			return "no address"
 		}
-		return proof.Bound(strings.Join(l, ", "))
+		s := strings.Join(l, ", ")
+		if redact != nil {
+			s = redact(s)
+		}
+		return proof.Bound(s)
 	}
 	return "this push changes where the box's server listens (" + where(from) + " → " + where(to) +
 		"): a push cannot move the address it arrives on; make that change at the console"
@@ -219,17 +236,15 @@ func msgListenMoved(from, to []string) string {
 // listenOf is a server's `listen` list as Caddy keeps it once loaded:
 // each address with its placeholders replaced by the global replacer
 // (`{env.*}`, `{system.*}`), as App.Provision replaces them before the
-// loaded server holds them, so the two sides are spelt alike. A list of
-// another shape is the adaptation's fault. A placeholder that does not
-// resolve leaves the address as written: Provision refuses it, and
-// validate ran Provision on the same bytes, so none reaches here.
+// loaded server holds them, so the two sides are spelt alike. The
+// adapter writes every server a list, so a server without one, or
+// with one of another shape, is the adaptation's fault, as in the
+// routes; so is a placeholder that does not resolve, since Provision
+// refuses it and validate ran Provision on the same bytes in the same
+// environment.
 func listenOf(server any) ([]string, error) {
 	m, _ := server.(map[string]any)
-	v, ok := m["listen"]
-	if !ok || v == nil {
-		return nil, nil
-	}
-	items, ok := v.([]any)
+	items, ok := m["listen"].([]any)
 	if !ok {
 		return nil, errAdaptation
 	}
@@ -240,21 +255,23 @@ func listenOf(server any) ([]string, error) {
 		if !ok {
 			return nil, errAdaptation
 		}
-		if out, err := repl.ReplaceOrErr(addr, true, true); err == nil {
-			addr = out
+		addr, err := repl.ReplaceOrErr(addr, true, true)
+		if err != nil {
+			return nil, errAdaptation
 		}
 		listen = append(listen, addr)
 	}
 	return listen, nil
 }
 
-// canonical is a listen list as a sorted set of addresses in Caddy's
-// own spelling — its network, host and port range as ParseNetworkAddress
+// canonical is a listen list as a sorted set of addresses as Caddy
+// spells them — the network, host and port range as ParseNetworkAddress
 // reads them and String prints them, the default network dropped — so
-// that two lists that open the same sockets compare equal however they
-// are written or ordered, and however often an address repeats. An
-// address Caddy cannot parse stands as written; a port range stands as
-// a range (the adapter writes none), never expanded.
+// that one list written with its network, in another order or with an
+// address twice compares equal to itself. Spelling, not sockets: `:443`
+// and `[::]:443` differ, as do `:443-444` and `:443, :444`; a port
+// range stands as a range (the adapter writes none), never expanded.
+// An address Caddy cannot parse stands as written.
 func canonical(listen []string) []string {
 	set := map[string]bool{}
 	for _, addr := range listen {

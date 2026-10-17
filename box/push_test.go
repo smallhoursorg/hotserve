@@ -667,11 +667,22 @@ func TestPushDoor(t *testing.T) {
 	c2, bundle := p.change()
 	srv := &caddyhttp.Server{Listen: []string{":8443", "tcp/127.0.0.1:8443"}}
 	ctx := context.WithValue(context.Background(), caddyhttp.ServerCtxKey, srv)
-	p.val.msg = msgListenMoved([]string{":8443"}, []string{":443"})
+	p.val.msg = msgListenMoved([]string{":8443"}, []string{":443"}, nil)
 	id := randomID(t)
 	m := wantResult(t, p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle), ctx: ctx}), http.StatusUnprocessableEntity, id, phaseRefused)
 	if m["error"] != p.val.msg || !slices.Equal(p.val.door, srv.Listen) {
 		t.Fatalf("got %v, the door %q; want the server's %q", m, p.val.door, srv.Listen)
+	}
+	p.untouched(t)
+
+	// A server with no addresses is an empty door, not none: compared,
+	// never skipped. (None receives a push; the sentinel is kept apart.)
+	none := context.WithValue(context.Background(), caddyhttp.ServerCtxKey, &caddyhttp.Server{})
+	p.val.msg = msgListenMoved(nil, []string{":443"}, nil)
+	id = randomID(t)
+	wantResult(t, p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle), ctx: none}), http.StatusUnprocessableEntity, id, phaseRefused)
+	if p.val.door == nil || len(p.val.door) != 0 {
+		t.Fatalf("the door for a server with no addresses is %#v; want an empty list", p.val.door)
 	}
 	p.untouched(t)
 

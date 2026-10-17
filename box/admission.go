@@ -84,7 +84,7 @@ func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 	// 6. Validate, as the serving process would load it, and reach
 	// box_webhook on / for the host the walk found, through the door
 	// this push came in by.
-	if msg, err := h.validator.validate(p.r.Context(), p.id, b.Caddyfile, vd.host, door(p.r)); err != nil {
+	if msg, err := h.validator.validate(p.r.Context(), p.id, b.Caddyfile, vd.host, arrivedAt(p.r)); err != nil {
 		return true, p.fail(err)
 	} else if msg != "" {
 		return true, p.refuse(b, &refusal{msg: msg})
@@ -105,15 +105,19 @@ func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 	return false, nil
 }
 
-// door is where the server that received r listens: the loaded
+// arrivedAt is where the server that received r listens: the loaded
 // server Caddy puts in every request's context, whose addresses this
 // push arrived through and so are proven to work (DESIGN-box.md, "The
 // door"). nil when no Caddy server received it — a test calling the
-// handler directly — and the door is not compared.
-func door(r *http.Request) []string {
+// handler directly — and the door is not compared; a server with no
+// addresses (none receives a push) is an empty door, compared.
+func arrivedAt(r *http.Request) []string {
 	srv, _ := r.Context().Value(caddyhttp.ServerCtxKey).(*caddyhttp.Server)
-	if srv == nil {
+	switch {
+	case srv == nil:
 		return nil
+	case srv.Listen == nil:
+		return []string{}
 	}
 	return srv.Listen
 }

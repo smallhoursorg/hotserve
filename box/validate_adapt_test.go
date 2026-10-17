@@ -2,6 +2,7 @@ package box
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,18 @@ func TestValidateAdapt(t *testing.T) {
 		// The same door, kept: admitted, and the value never quoted.
 		c, _ = stubChildren(t, "exit 0", "printf '%s' '"+withListen+"'; exit 0", "exit 0", "BIND_ADDR="+addr)
 		if msg, err := c.validate(context.Background(), randomID(t), file, stubHost, []string{addr}); msg != "" || err != nil {
+			t.Fatalf("msg %q err %v", msg, err)
+		}
+		// The value past the refusal's bound: filtered whole before the
+		// cut, so not even its prefix is quoted.
+		var many strings.Builder
+		for i := range 40 {
+			fmt.Fprintf(&many, `"10.0.0.%d:443",`, i)
+		}
+		withMany := strings.Replace(reachableAdaptation, `"srv0":{`, `"srv0":{"listen":[`+many.String()+`"'"$BIND_ADDR"'"],`, 1)
+		c, _ = stubChildren(t, "exit 0", "printf '%s' '"+withMany+"'; exit 0", "exit 0", "BIND_ADDR="+addr)
+		msg, err = c.validate(context.Background(), randomID(t), file, stubHost, []string{":443"})
+		if err != nil || strings.Contains(msg, "198.51") || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → 10.0.0.0:443, ") {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})

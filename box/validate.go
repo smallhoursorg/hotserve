@@ -163,8 +163,9 @@ func (c *childValidator) run(ctx context.Context, what, program string, args ...
 // error, not the push's; a deadline is the push's, as validate's.
 // Stdout is kept to the cap and stderr dropped: the JSON holds every
 // expanded value, and nothing of it but the walk's verdict — the listen
-// addresses of a refused move among them — leaves this function.
-func (c *childValidator) adapt(ctx context.Context, staged, host string, door []string) (string, error) {
+// addresses of a refused move among them, filtered — leaves this
+// function.
+func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived []string) (string, error) {
 	out := newCappedBuffer(maxAdaptation)
 	exit, timedOut, err := c.exec(ctx, c.hotserve, out, nil, "adapt", "--adapter", "caddyfile", "--config", staged)
 	switch {
@@ -177,15 +178,18 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, door []
 	case out.over():
 		return msgAdaptationTooLarge, nil
 	}
-	err = reach(out.b, host, door)
+	// The door's addresses, when quoted, go through the filter
+	// validate's error line goes through: the adapter expands `{$VAR}`
+	// into them from the same environment.
+	var d *door
+	if arrived != nil {
+		d = &door{listen: arrived, redact: func(s string) string { s, _ = c.redactor.Redact(s); return s }}
+	}
+	err = reach(out.b, host, d)
 	var r *refusal
 	switch {
 	case errors.As(err, &r):
-		// Through the filter validate's error line goes through: a
-		// moved door's text quotes listen addresses, and the adapter
-		// expands `{$VAR}` into them from the same environment.
-		msg, _ := c.redactor.Redact(r.msg)
-		return msg, nil
+		return r.msg, nil
 	case err != nil:
 		return "", fmt.Errorf("hotserve adapt: %w", err)
 	}

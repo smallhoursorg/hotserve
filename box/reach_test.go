@@ -151,6 +151,15 @@ func TestReach(t *testing.T) {
 	}
 }
 
+// doorOf is a door with no filter for the addresses given; nil for
+// none.
+func doorOf(listen []string) *door {
+	if listen == nil {
+		return nil
+	}
+	return &door{listen: listen}
+}
+
 // TestReachDoor is the door (DESIGN-box.md, "The door"): the new file's
 // box server must listen where the loaded server the push arrived
 // through does — `https_port`, `bind` and `default_bind` all move it —
@@ -183,14 +192,14 @@ func TestReachDoor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("adapt: %v\n%s", err, in)
 			}
-			err = reach(cfg, "deploy.example.com", c.door)
+			err = reach(cfg, "deploy.example.com", doorOf(c.door))
 			if c.from == "" {
 				if err != nil {
 					t.Fatalf("refused: %v", err)
 				}
 				return
 			}
-			want := msgListenMoved(strings.Split(c.from, ", "), strings.Split(c.to, ", "))
+			want := msgListenMoved(strings.Split(c.from, ", "), strings.Split(c.to, ", "), nil)
 			var r *refusal
 			if !errors.As(err, &r) || r.msg != want {
 				t.Fatalf("got  %v\nwant %q", err, want)
@@ -211,23 +220,26 @@ func TestReachDoorJSON(t *testing.T) {
 		want   string // "" admitted; "error" the box's own; else the refusal
 	}{
 		"a placeholder resolving to the door": {listen: `"listen":["{env.BOX_TEST_ADDR}"],`, door: []string{":443"}},
-		"a placeholder resolving elsewhere":   {listen: `"listen":["{env.BOX_TEST_ADDR}"],`, door: []string{":8443"}, want: msgListenMoved([]string{":8443"}, []string{":443"})},
-		// Left as written, which Caddy parses as a host with no port.
-		"a placeholder that does not resolve":    {listen: `"listen":["{env.BOX_TEST_NOT_SET}"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{"{env.BOX_TEST_NOT_SET}:0"})},
-		"no listen key":                          {door: []string{":443"}, want: msgListenMoved([]string{":443"}, nil)},
-		"listen null":                            {listen: `"listen":null,`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, nil)},
+		"a placeholder resolving elsewhere":   {listen: `"listen":["{env.BOX_TEST_ADDR}"],`, door: []string{":8443"}, want: msgListenMoved([]string{":8443"}, []string{":443"}, nil)},
+		// Provision refuses an unresolved placeholder, and validate ran
+		// it on the same bytes: here it is the box's own.
+		"a placeholder that does not resolve":    {listen: `"listen":["{env.BOX_TEST_NOT_SET}"],`, door: []string{":443"}, want: "error"},
+		"no listen key":                          {door: []string{":443"}, want: "error"},
+		"listen null":                            {listen: `"listen":null,`, door: []string{":443"}, want: "error"},
+		"listen empty":                           {listen: `"listen":[],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, nil, nil)},
+		"an empty door":                          {listen: `"listen":[":443"],`, door: []string{}, want: msgListenMoved(nil, []string{":443"}, nil)},
 		"no listen key and no door":              {},
 		"an address that does not parse, twice":  {listen: `"listen":["x:y","x:y"],`, door: []string{"x:y"}},
-		"an address that does not parse, moved":  {listen: `"listen":["x:y"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{"x:y"})},
-		"a port range, as written":               {listen: `"listen":[":443-444"],`, door: []string{":443", ":444"}, want: msgListenMoved([]string{":443", ":444"}, []string{":443-444"})},
+		"an address that does not parse, moved":  {listen: `"listen":["x:y"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{"x:y"}, nil)},
+		"a port range, as written":               {listen: `"listen":[":443-444"],`, door: []string{":443", ":444"}, want: msgListenMoved([]string{":443", ":444"}, []string{":443-444"}, nil)},
 		"a listen that does not read":            {listen: `"listen":":443",`, door: []string{":443"}, want: "error"},
 		"a listen whose address does not read":   {listen: `"listen":[443],`, door: []string{":443"}, want: "error"},
 		"a listen that does not read, no door":   {listen: `"listen":":443",`},
-		"a control byte in the address, bounded": {listen: `"listen":[":443\n"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{":443\n"})},
+		"a control byte in the address, bounded": {listen: `"listen":[":443\n"],`, door: []string{":443"}, want: msgListenMoved([]string{":443"}, []string{":443\n"}, nil)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			adapted := strings.Replace(string(connJSON("")), `"listen":[":443"],`, c.listen, 1)
-			err := reach([]byte(adapted), "deploy.example.com", c.door)
+			err := reach([]byte(adapted), "deploy.example.com", doorOf(c.door))
 			var r *refusal
 			switch {
 			case c.want == "error":
@@ -243,8 +255,19 @@ func TestReachDoorJSON(t *testing.T) {
 			}
 		})
 	}
-	if got := msgListenMoved([]string{":443"}, []string{":443\n"}); strings.Contains(got, "\n") {
+	if got := msgListenMoved([]string{":443"}, []string{":443\n"}, nil); strings.Contains(got, "\n") {
 		t.Fatalf("a control byte reached the text: %q", got)
+	}
+	// The filter runs over the whole list before the bound cuts it, so
+	// a value past the cap is replaced, not cut to a readable prefix.
+	value := "198.51.100.77:443"
+	long := make([]string, 0, 40)
+	for i := range 40 {
+		long = append(long, fmt.Sprintf("10.0.0.%d:443", i))
+	}
+	redact := func(s string) string { return strings.ReplaceAll(s, value, "[x]") }
+	if got := msgListenMoved([]string{":443"}, append(long, value), redact); strings.Contains(got, "198.51") {
+		t.Fatalf("a prefix of the value reached the text: %q", got)
 	}
 }
 

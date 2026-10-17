@@ -58,8 +58,8 @@ func FuzzReach(f *testing.F) {
 		if door != "" {
 			d = strings.Split(door, " ")
 		}
-		first := reach(adapted, host, d)
-		again := reach(adapted, host, d)
+		first := reach(adapted, host, doorOf(d))
+		again := reach(adapted, host, doorOf(d))
 		if (first == nil) != (again == nil) || (first != nil && first.Error() != again.Error()) {
 			t.Fatalf("two answers: %v then %v", first, again)
 		}

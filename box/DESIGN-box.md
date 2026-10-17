@@ -592,21 +592,31 @@ adaptations — and compares it with the listen addresses of the Caddy
 server that received the push, which Caddy puts in every request's
 context (`caddyhttp.ServerCtxKey`): the loaded server itself, no admin
 API call, no second copy of the configuration, and by construction the
-door. Both lists are compared as Caddy spells the addresses
-(`ParseNetworkAddress`, then its `String`: the default network
-dropped, a host and a port range kept as parsed), sorted, each once,
-so an address written with its network, in another order or twice
-changes nothing; a placeholder in the new list is replaced as Caddy's
-`App.Provision` replaces it before the loaded server keeps it, and an
-address Caddy cannot parse stands as written. A difference refuses the
-push, `this push changes where the box's server listens (<from> →
-<to>): a push cannot move the address it arrives on; make that change
-at the console`, the two canonical lists in the brackets. The same
-means admitted, and the checks below follow. `https_port`, `bind` on
-the box site, `default_bind` and anything else that changes that
-server's `listen` are all this one compare; a change to another
-server's addresses (`http_port`, a `bind` on an app site that gives it
-a server of its own) is not. What the compare does not read: the
+door. The door is that server's whole list, not the one address this
+connection came in on: adding an address, or dropping one the push did
+not use, is a move too, and made the same way. Both lists are compared
+as Caddy spells the addresses (`ParseNetworkAddress`, then its
+`String`: the default network dropped, a host and a port range kept as
+parsed), sorted, each once, so an address written with its network, in
+another order or twice changes nothing — spelling, not sockets: `:443`
+and `[::]:443` differ, as do `:443-444` and `:443, :444`. A
+placeholder in the new list is replaced as Caddy's `App.Provision`
+replaces it before the loaded server keeps it (one that does not
+resolve is the box's error, since validate ran that Provision on the
+same bytes and refused it first; so is a server without a `listen`
+list, which the adapter never writes), and an address Caddy cannot
+parse stands as written. A difference refuses the push, `this push
+changes where the box's server listens (<from> → <to>): a push cannot
+move the address it arrives on; make that change at the console`, the
+two canonical lists in the brackets, each passed whole through the
+filter validate's output passes through before it is bounded, since
+the adapter expands `{$VAR}` into an address from the service's
+environment. The same means admitted, and the checks below follow.
+`https_port`, `bind` on the box site, `default_bind` and anything else
+that changes that server's `listen` are all this one compare; a change
+to another server's addresses (`http_port`, a `bind` on an app site
+that gives it a server of its own) is not. What the compare does not
+read: the
 listener's protocols and wrappers, the TLS policies — those are the
 connection's tables, below, asked of the file alone; a compare with
 the loaded server's would admit what the push arrived through
@@ -616,7 +626,8 @@ configuration the admin API serves, and is not made here. A deliberate
 move is the console's: "At 3am" gives the steps. A push no Caddy
 server received (a test calling the handler) has no door, and the
 compare is skipped: the handler runs only inside a Caddy server, which
-sets the key on every request.
+sets the key on every request. A server with no addresses is an empty
+door, compared, never the skip (none receives a push).
 
 **The connection.** Before any route runs, the workflow's connection
 meets the server that carries `box_webhook`: its listeners'
@@ -1551,7 +1562,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository: move it there` (the recorded path is already `<host>/Caddyfile`) / `…: hotserve init, run again from that directory, records it` (it is not) | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
-| 422 | `refused` | `this push changes where the box's server listens (<from> → <to>): a push cannot move the address it arrives on; make that change at the console` — `<from>` the addresses of the loaded server the push arrived through, `<to>` the new file's, each list canonical, sorted, comma-separated ("The door", in "Reachability") | handler | fail; a deliberate move is made at the console ("At 3am"), after which the push of the same commit is admitted |
+| 422 | `refused` | `this push changes where the box's server listens (<from> → <to>): a push cannot move the address it arrives on; make that change at the console` — `<from>` the addresses of the loaded server the push arrived through, `<to>` the new file's, each list canonical, sorted, comma-separated, and filtered as `hotserve validate: <redacted>` is: an address the adapter expanded from the service's environment reads as the filter's marker ("The door", in "Reachability") | handler | fail; a deliberate move is made at the console ("At 3am"), after which the push of the same commit is admitted |
 | 422 | `refused` | `the new Caddyfile does not reach box_webhook on /: a listener's protocols include neither h1 nor h2` / `… : the <wrapper> listener wrapper may refuse the connection` / `… : the server's strict_sni_host refuses a request to an IP address, which carries no SNI` / `… : a TLS connection policy for <host> <what>` / `… : a TLS connection policy that may apply to <host> <what> (its <matcher> matcher is decided per connection)` — `<what>` is `requires a client certificate`, `drops the connection`, `offers neither h2 nor http/1.1 by ALPN` or `sets <setting>, which may refuse the handshake` ("The connection", in "Reachability") | handler | fail |
 | 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
