@@ -1213,7 +1213,7 @@ func TestBoxApply(t *testing.T) {
 		}
 		// A box that names no key.
 		g.box.set(func(s *standIn) { s.recipient = "" })
-		if out, code := g.apply(); code != 1 || !strings.Contains(out, "the box names no key for secrets (no recipient in GET /)") || g.box.seen().bundles != sent {
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "the box names no key for secrets (no recipient in GET /): run hotserve box key as root on it; nothing was sent") || g.box.seen().bundles != sent {
 			t.Fatalf("no key on the box: exit %d\n%s", code, out)
 		}
 		// Values, and no recipients file to check the key against.

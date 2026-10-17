@@ -189,13 +189,9 @@ func ProveSecrets(c *Commit, trees map[string]*Tree, blobs map[string][]byte, pa
 	if err := layout.Dir(e.Mode); err != nil {
 		return nil, err
 	}
-	// Every box repository has its own copy of the template's bin/apply,
-	// which an upgrade of the box does not touch; one from before
-	// secrets sends only the trees on the Caddyfile's path, and the
-	// refusal says so.
 	st, ok := trees[e.ID]
 	if !ok || st.ID != e.ID {
-		return nil, refuse("bundle: tree %s, needed for %s in %s, is not in the bundle; a bin/apply from before secrets sends only the Caddyfile's trees: update it from the template", oid(e.ID), shownDir, oid(c.ID))
+		return nil, refuse("bundle: tree %s, needed for %s in %s, is not in the bundle", oid(e.ID), shownDir, oid(c.ID))
 	}
 	// One scan over the tree's bytes, as everywhere in the proof, through
 	// the layout's one rule set (SecretsLayout).

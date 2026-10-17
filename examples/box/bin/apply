@@ -458,7 +458,7 @@ send() {
 			return 0
 		fi
 		if [ -z "$key" ]; then
-			red "the box names no key for secrets (no recipient in GET /): upgrade hotserve there to a release that installs secrets, or run hotserve box key as root on it; nothing was sent"
+			red "the box names no key for secrets (no recipient in GET /): run hotserve box key as root on it; nothing was sent"
 			return 0
 		fi
 		if [ "$key" != "$first" ]; then

@@ -569,18 +569,10 @@ back — reloading again — on failure. It never runs Caddy's validate or
 adapter: both execute module code on the input and expand `{$VAR}`
 from root's environment.
 
-What this closes. The `HOTSERVE_CONFIG` half of the administrator's
-sudoers grant — the eight commands with which the template's former
-laptop script moved and reloaded the Caddyfile over SSH — is gone from
-the template, and with it the only account that could change config
-(a box that installed the earlier file keeps those lines until it is
-replaced, as the template's README says). The `HOTSERVE_SECRETS` half
-(a root `install` that creates `/etc/hotserve/<app>.env` 0640
-root:hotserve, and `sudoedit` of it) is gone from the template too:
-secrets ride this channel (below), so no account on the box is given a
-way to write one, and an administrator is an account in `adm`, for the
-journal alone (a box that installed the earlier file keeps its lines
-until they are removed). A leaked PAT, a
+What this closes. No account on the box but root is given a way to
+change the config or write an env file: secrets ride this channel
+(below), and an administrator is an account in `adm`, for the journal
+alone. A leaked PAT, a
 stolen GitHub session or an OAuth app with `contents:write` can push
 to `main` and cannot produce the signature, so it cannot change the
 box with anything a signer did not sign: its own commit is refused on

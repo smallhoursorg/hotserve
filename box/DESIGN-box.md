@@ -1653,7 +1653,7 @@ says. The workflow's action is in the last column.
 
 Where a row gives a text that names the Caddyfile and one that names
 "the box's files", the first is said when the set is the Caddyfile
-alone, as it was before secrets, and the second when env files are in
+alone, and the second when env files are in
 it.
 
 **Console commands.** `hotserve init`, `hotserve box baseline` and

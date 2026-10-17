@@ -373,8 +373,7 @@ first line of `recipients`, and stops, with nothing sent, on:
   make rekey BOX_KEY=<age1…>, commit and push; nothing was sent`
   ([A rebuilt box](#a-rebuilt-box));
 - no key on the box: `the box names no key for secrets (no recipient in
-  GET /): upgrade hotserve there to a release that installs secrets, or
-  run hotserve box key as root on it; nothing was sent`;
+  GET /): run hotserve box key as root on it; nothing was sent`;
 - values with no recipients file: `<host>/secrets holds values but no
   recipients file names a key: make secret APP=… VAR=… BOX_KEY=$(ssh
   root@<host> hotserve box key) makes one; nothing was sent`.

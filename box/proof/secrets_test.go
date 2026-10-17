@@ -172,15 +172,15 @@ func TestProveSecrets(t *testing.T) {
 	t.Run("the secrets tree not bundled", func(t *testing.T) {
 		r := newSecretsRepo(t, secretsEntry(secrets))
 		_, err := r.prove()
-		refusalContaining(t, err, "bundle: tree "+ObjectID("tree", secrets)+", needed for deploy.example.com/secrets in "+r.commit.ID+", is not in the bundle; a bin/apply from before secrets sends only the Caddyfile's trees: update it from the template")
+		refusalContaining(t, err, "bundle: tree "+ObjectID("tree", secrets)+", needed for deploy.example.com/secrets in "+r.commit.ID+", is not in the bundle")
 		var ref *Refusal
 		if !asRefusal(err, &ref) || !slices.Contains(ref.IDs, ObjectID("tree", secrets)) {
 			t.Fatalf("the refusal does not name the tree's id: %v", ref)
 		}
 	})
-	t.Run("a bin/apply from before secrets, with no secrets, still passes", func(t *testing.T) {
-		// The trees on the Caddyfile's path are all it sends; with no
-		// secrets entry they are all the proof needs.
+	t.Run("no secrets entry needs only the Caddyfile's trees", func(t *testing.T) {
+		// With no secrets entry, the trees on the Caddyfile's path are
+		// all the proof needs.
 		s, err := newSecretsRepo(t, nil).prove()
 		if err != nil || s.Tree != "" {
 			t.Fatal(s, err)

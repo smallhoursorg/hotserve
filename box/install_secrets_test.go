@@ -440,8 +440,8 @@ func TestApplySecretsFailures(t *testing.T) {
 	}
 }
 
-// A HEAD with no secret reads no key and needs no directory: a box from
-// before secrets, with neither, applies it — and a push that removes the
+// A HEAD with no secret reads no key and needs no directory: a box with
+// neither applies it — and a push that removes the
 // env files applied.json lists reads no key either.
 func TestApplySecretsNeedNoKeyWithout(t *testing.T) {
 	b := newTestBox(t) // no key, no secrets directory
