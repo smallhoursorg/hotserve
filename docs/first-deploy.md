@@ -7,17 +7,17 @@ push a signed commit, a GitHub Actions workflow that deploys every
 push of the app with no stored secret, and the shape you copy for
 every app after it.
 
-Signed commits are the bar every change to the box's config meets: the
-box applies a commit only if a key on its own list signed it, and
-those keys stay on the signers' laptops, so a stolen GitHub login or a
-compromised workflow cannot change the config with anything a signer
-did not sign. Only the box's repository needs signed commits. An app's
-own repository does not: a push to its `main` deploys it, on the OIDC
-token its workflow mints, so whoever can push there can ship a new
-version of that app, but cannot change its trust, its sandbox or any
-other app. The same check means GitHub's merge button cannot make a
-commit the box applies: a pull request someone reviewed is landed from
-a signer's laptop ([the rules](../examples/box/README.md#the-rules)).
+Two repositories feed the box, and the box trusts them differently:
+
+| Repository | What a push there changes | The box applies it when |
+|---|---|---|
+| The box's | The config: which apps run, who may deploy each, their permission flags and secrets | a key on the box's own list signed the commit; those keys stay on the signers' laptops |
+| Each app's | That app's code | the app's workflow proves, with a token GitHub mints, that the push came from that repository's `main` |
+
+So a stolen GitHub login or a compromised workflow can ship a new
+version of an app, but cannot change the config. GitHub's merge button
+cannot land a change to the config either: a reviewed pull request is
+landed from a signer's laptop ([the rules](../examples/box/README.md#the-rules)).
 
 You work as root on the box only to install software and, once, to
 tell the box which repository its config comes from (step 3);
