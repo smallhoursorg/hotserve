@@ -142,12 +142,24 @@ var ownerLocks sync.Map // app name → *sync.Mutex; one per name ever seen
 // word is that nothing else is running. Best-effort: what cannot be
 // removed is logged, and the next launch's fresh nonce never collides
 // with it anyway.
+//
+// Each dir is pruned only as the directory it names, by recordsDir's
+// rule: canonical against canonical, with an alias on the liveswap
+// root itself the one difference allowed. A link at the app dir or at
+// the dir — `<root>/blog -> shop` — would otherwise have blog's prune
+// remove a sibling's live socket and pin, so it is logged and skipped.
 func pruneSockets(d appDirs, keep []string, logger *zap.Logger) {
 	kept := map[string]bool{}
 	for _, n := range keep {
 		kept[n] = true
 	}
+	rootC := canonicalDeepest(d.root)
 	for _, dir := range []string{d.run, d.proxy} {
+		want := filepath.Join(rootC, filepath.Base(d.app), filepath.Base(dir))
+		if got := canonicalDeepest(dir); got != want {
+			logger.Warn("not pruning instance sockets through a link", zap.String("dir", dir), zap.String("resolves_to", got))
+			continue
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if !os.IsNotExist(err) {
