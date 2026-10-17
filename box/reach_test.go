@@ -160,9 +160,9 @@ func TestReach(t *testing.T) {
 // catalogue's fixed text, which names no address.
 func TestReachDoor(t *testing.T) {
 	for name, c := range map[string]struct {
-		door           []string
-		global, inside string
-		moved          bool
+		door                  []string
+		global, inside, after string
+		moved                 bool
 	}{
 		"the same address":                {door: []string{":443"}},
 		"no door":                         {global: "\thttps_port 8443\n"},
@@ -177,9 +177,18 @@ func TestReachDoor(t *testing.T) {
 		"default_bind":                    {door: []string{":443"}, global: "\tdefault_bind 10.0.0.5\n", moved: true},
 		"the box site alone moved":        {door: []string{":443"}, inside: "\tbind 10.0.0.5\n", moved: true},
 		"another site moved":              {door: []string{":443"}, global: "\thttp_port 8080\n"},
+		// A site bound to two addresses adapts into a server per set of
+		// addresses it shares with other sites, each carrying its
+		// routes: the push's own server is the one asked.
+		"two servers carry the webhook, the push through the shared address": {door: []string{"127.0.0.1:443"},
+			inside: "\tbind 127.0.0.1 127.0.0.2\n", after: "other.example.com {\n\tbind 127.0.0.1\n\trespond x\n}\n"},
+		"two servers carry the webhook, the push through the other address": {door: []string{"127.0.0.2:443"},
+			inside: "\tbind 127.0.0.1 127.0.0.2\n", after: "other.example.com {\n\tbind 127.0.0.1\n\trespond x\n}\n"},
+		"two servers carry the webhook, neither at the door": {door: []string{":443"},
+			inside: "\tbind 127.0.0.1 127.0.0.2\n", after: "other.example.com {\n\tbind 127.0.0.1\n\trespond x\n}\n", moved: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			in := strings.Replace(reachFile(nil, "", c.inside, ""), "{\n", "{\n"+c.global, 1)
+			in := strings.Replace(reachFile(nil, "", c.inside, c.after), "{\n", "{\n"+c.global, 1)
 			cfg, _, err := adapt(t, in)
 			if err != nil {
 				t.Fatalf("adapt: %v\n%s", err, in)

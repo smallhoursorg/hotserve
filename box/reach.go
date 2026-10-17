@@ -141,51 +141,65 @@ func reach(adapted []byte, host string, door []string) error {
 		return errAdaptation
 	}
 	servers, _ := dig(cfg, "apps", "http", "servers").(map[string]any)
+	// The server the question is asked of is the one carrying
+	// box_webhook whose listener the push arrived through: with a
+	// door, the one whose listen addresses are the door's, since a site
+	// bound to several addresses adapts into a server per set of
+	// addresses it shares with other sites, each carrying its routes;
+	// with none, the first carrying it. Another server's routes for the
+	// same host answer on another port. No carrying server at the door
+	// is a moved door — the push arrived through the loaded server's
+	// addresses, which are thereby proven to work, and a file that
+	// moves them is the console's to apply ("The door").
+	var routes []adaptedRoute
+	var server any
+	carried := false
 	for _, name := range slices.Sorted(maps.Keys(servers)) {
-		// The server that carries box_webhook is the one whose
-		// listener the workflow reaches; another server's routes for
-		// the same host answer on another port.
-		routes, err := routeList(dig(servers[name], "routes"))
+		rs, err := routeList(dig(servers[name], "routes"))
 		if err != nil {
 			return err
 		}
-		if !carriesWebhook(routes) {
+		if !carriesWebhook(rs) {
 			continue
 		}
-		// The door first: the push arrived through the loaded server's
-		// addresses, which are thereby proven to work; a file that
-		// moves them is the console's to apply ("The door").
+		carried = true
 		if door != nil {
 			listen, err := listenOf(servers[name])
 			if err != nil {
 				return err
 			}
 			if !slices.Equal(canonical(door), canonical(listen)) {
-				return &refusal{msg: msgListenMoved}
+				continue
 			}
 		}
-		// The connection next: what refuses it stands before every
-		// route.
-		s, err := settingsOf(servers[name])
-		if err != nil {
-			return err
-		}
-		if what := s.connection(host); what != "" {
-			return &refusal{msg: msgUnreachable(what)}
-		}
-		for _, method := range []string{http.MethodGet, http.MethodPost} {
-			w := &reachWalk{req: reachRequest(method, host), groups: map[string]groupState{}}
-			switch end, b := w.routes(routes, matchVerdict{status: matches}, true); end {
-			case reachedWebhook:
-			case blocked:
-				return &refusal{msg: msgUnreachable(b.text(host))}
-			default:
-				return fmt.Errorf("the adaptation routes %s / on %s past box_webhook", method, proof.Bound(host))
-			}
-		}
-		return nil
+		routes, server = rs, servers[name]
+		break
 	}
-	return errors.New("the adaptation has no box_webhook")
+	switch {
+	case !carried:
+		return errors.New("the adaptation has no box_webhook")
+	case server == nil:
+		return &refusal{msg: msgListenMoved}
+	}
+	// The connection next: what refuses it stands before every route.
+	s, err := settingsOf(server)
+	if err != nil {
+		return err
+	}
+	if what := s.connection(host); what != "" {
+		return &refusal{msg: msgUnreachable(what)}
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		w := &reachWalk{req: reachRequest(method, host), groups: map[string]groupState{}}
+		switch end, b := w.routes(routes, matchVerdict{status: matches}, true); end {
+		case reachedWebhook:
+		case blocked:
+			return &refusal{msg: msgUnreachable(b.text(host))}
+		default:
+			return fmt.Errorf("the adaptation routes %s / on %s past box_webhook", method, proof.Bound(host))
+		}
+	}
+	return nil
 }
 
 // dig follows keys through decoded objects; nil when the path is not

@@ -585,14 +585,17 @@ file alone cannot say where the box's server should listen: a port
 forward makes `https_port 8443` right (the e2e box listens there), a
 NAT makes a `bind` to a private address right. What is known is that
 the configuration loaded in the serving process works, since this push
-arrived through it. So the handler reads the `listen` list of the
-server that carries `box_webhook` in the new adaptation — found by
+arrived through it. So the handler compares the `listen` lists of the
+servers that carry `box_webhook` in the new adaptation — found by
 that route, never by name, since Caddy renames `srvN` between
-adaptations — and compares it with the listen addresses of the Caddy
-server that received the push, which Caddy puts in every request's
-context (`caddyhttp.ServerCtxKey`): the loaded server itself, no admin
-API call, no second copy of the configuration, and by construction the
-door. The door is that server's whole list, not the one address this
+adaptations; a site bound to several addresses adapts into a server
+per set of addresses it shares with other sites, each carrying its
+routes — with the listen addresses of the Caddy server that received
+the push, which Caddy puts in every request's context
+(`caddyhttp.ServerCtxKey`): the loaded server itself, no admin API
+call, no second copy of the configuration, and by construction the
+door. The carrying server at the door is the one the connection and
+route checks below are asked of; none at the door is a move. The door is that server's whole list, not the one address this
 connection came in on: adding an address, or dropping one the push did
 not use, is a move too, and made the same way. Both lists are compared
 as Caddy spells the addresses (`ParseNetworkAddress`, then its
