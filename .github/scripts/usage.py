@@ -44,6 +44,21 @@ has at all is kept either way; delete its rows by hand to drop it.
 `make usage` runs all three steps; `make usage-check` (CI) runs
 usage_test.py, then re-renders from the committed CSVs and fails on a
 difference. Stdlib only.
+
+Accepted residuals (scored with .claude/skills/triage: severity,
+occurrence, detection; fix size, risk):
+
+- A month absent from the source stays under --recompute, so a parser
+  change that moves every record out of a month leaves its old rows
+  (S3 O5 D1 = 15; size 2, risk 2). Dropping it would wipe every month
+  past the 90-day run window on each --recompute, a worse failure; the
+  warning says to delete the rows by hand.
+- A hand-edited file malformed beyond the up-front checks (a credits
+  value the checks pass, a factors key below the top level) fails at
+  render, after the CSVs were written (S2 O5 D1 = 10; size 3, risk 2).
+  The error names the file; `make usage-check` re-renders the page once
+  it is fixed. A full schema or a render-before-write is more code than
+  a loud, recoverable failure buys.
 """
 
 import argparse
