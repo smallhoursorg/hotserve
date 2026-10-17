@@ -41,8 +41,9 @@
 #                      box webhook` names the address as the box reads the file
 #
 # In GitHub Actions the output is also dressed for the job page: each
-# box in a collapsible group, a failure as an error annotation, one
-# line per box in the job summary. Any box failing fails the run; the
+# box in a collapsible group, a failure as an error annotation, and in
+# the job summary a line per box (with an applied push's secrets, reload
+# and next-launch lines under it). Any box failing fails the run; the
 # others are still sent.
 set -eu
 cd "$(dirname "$0")/.."
@@ -162,11 +163,17 @@ list() {
 		sed -n 's/.*"'"$k"'":\[\([^]]*\)\].*/\1/p' "$tmpd/resp" | tr ',' '\n' | tr -d '"'
 	done
 }
-# apps: the result's app names, comma separated.
-apps() { list apps | paste -s -d , - | sed 's/,/, /g'; }
-# secrets_said: a line for each app whose secrets the push added,
+# apps [md]: the result's app names, comma separated; with md, each in
+# backticks, for the job summary.
+apps() {
+	if [ "${1:-}" = md ]; then list apps | sed 's/.*/`&`/'; else list apps; fi | paste -s -d , - | sed 's/,/, /g'
+}
+# secrets_said [md]: a line for each app whose secrets the push added,
 # changed or removed, naming the variables, never a value:
 #   apply: deploy.example.com secrets: example: added STRIPE_KEY; changed DATABASE_URL
+# With md, the same as a job summary list item, each name in backticks
+# (an _ in one would turn Markdown italic):
+#   - secrets: `example`: added `STRIPE_KEY`; changed `DATABASE_URL`
 secrets_said() {
 	{
 		list secrets_added | sed 's/^/1 /'
@@ -174,14 +181,19 @@ secrets_said() {
 		list secrets_removed | sed 's/^/3 /'
 	} | awk 'NF == 2 { i = index($2, "/"); print substr($2, 1, i - 1), $1, substr($2, i + 1) }' |
 		LC_ALL=C sort -k1,1 -k2,2n -k3,3 |
-		awk -v box="$box" '
-		function flush() { if (app != "") printf "apply: %s secrets: %s: %s\n", box, app, out }
+		awk -v box="$box" -v md="${1:-}" '
+		function name(s) { return md != "" ? "`" s "`" : s }
+		function flush() {
+			if (app == "") return
+			if (md != "") printf "- secrets: %s: %s\n", name(app), out
+			else printf "apply: %s secrets: %s: %s\n", box, app, out
+		}
 		{
 			if ($1 != app) { flush(); app = $1; out = ""; kind = "" }
 			if ($2 != kind) {
 				kind = $2
-				out = out (out == "" ? "" : "; ") (kind == 1 ? "added " : kind == 2 ? "changed " : "removed ") $3
-			} else out = out ", " $3
+				out = out (out == "" ? "" : "; ") (kind == 1 ? "added " : kind == 2 ? "changed " : "removed ") name($3)
+			} else out = out ", " name($3)
 		}
 		END { flush() }'
 }
@@ -250,14 +262,31 @@ done_ok() {
 		# The diff is the Caddyfile's: none means the box wrote env files
 		# alone, and an env file is read at an app's launch, not a reload.
 		if [ -n "$d" ]; then
-			printf 'apply: %s at %s: loaded; running apps are not restarted%s\n' "$box" "$short" "${a:+; apps $a}"
+			what='loaded; running apps are not restarted'
 		else
-			printf 'apply: %s at %s: secrets updated; the Caddyfile is unchanged, nothing reloaded%s\n' "$box" "$short" "${a:+; apps $a}"
+			what='secrets updated; the Caddyfile is unchanged, nothing reloaded'
 		fi
+		printf 'apply: %s at %s: %s%s\n' "$box" "$short" "$what" "${a:+; apps $a}"
+		# The job summary says what happened too, as a list under the
+		# box's line; the Caddyfile's diff stays in the log. Every box
+		# writes to the one step's summary, which GitHub caps at 1 MiB:
+		# past it (thousands of long secrets' names) GitHub drops the
+		# whole summary, every box's lines, with an error annotation,
+		# and the log keeps every line (box/DESIGN-box.md, Accepted
+		# residuals).
+		md="**$box:** $short applied"
+		s=$(secrets_said md)
+		[ -z "$s" ] || md="$md
+$s"
+		a=$(apps md)
+		md="$md
+- $what${a:+; apps $a}"
 		for app in $(list secrets_added secrets_changed secrets_removed | sed 's,/.*,,' | LC_ALL=C sort -u); do
 			printf 'apply: %s reads its secrets at its next launch; a deploy of a new version launches it now\n' "$app"
+			md="$md
+- \`$app\` reads its secrets at its next launch; a deploy of a new version launches it now"
 		done
-		summary "**$box:** $short applied" ;;
+		summary "$md" ;;
 	*)
 		# A 2xx that is not the box's: something in front of it.
 		red "HTTP 200 without a result the box gives (phase '$1')" ;;
