@@ -722,7 +722,12 @@ func TestDeployPreStartOutlivesTheRequest(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() { errc <- rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"}) }()
 
-	preCtx := <-runner.entered
+	var preCtx context.Context
+	select {
+	case preCtx = <-runner.entered:
+	case err := <-errc:
+		t.Fatalf("the deploy ended before pre_start ran: %v", err)
+	}
 	cancel() // the CI job is cancelled mid-migration
 	if err := preCtx.Err(); err != nil {
 		t.Fatalf("pre_start's context ended with the request's: %v", err)
