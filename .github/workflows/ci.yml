@@ -211,9 +211,10 @@ jobs:
   # that gap and broke main.) Listing individual matrix cells as
   # required checks is still not needed and would rot when cells
   # change.
-  # The usage ledger's page must match its CSVs: the same drift gate
-  # tidy-check is for go.mod, and the one lane that runs the python
-  # image pin. No transcripts, no token: render reads committed files.
+  # The usage ledger's merge rule has its tests, and its page must match
+  # its CSVs: the same drift gate tidy-check is for go.mod. Also the one
+  # lane that runs the python image pin. No transcripts, no token:
+  # render reads committed files.
   usage-check:
     runs-on: ubuntu-latest
     steps:

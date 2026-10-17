@@ -215,7 +215,7 @@ make tidy-check        # fails if go mod tidy would change a module's go.mod/go.
 make vulncheck         # govulncheck, all modules (tool dep in go.mod — Dependabot-bumped)
 make secretscan        # gitleaks secret scan: full history, or the working tree in a git worktree (same image as the CI gate)
 make usage             # what building this costs (Claude Code, Actions minutes, Copilot) → usage/*.csv + docs/footprint.md; needs gh auth login
-make usage-check       # fails if docs/footprint.md no longer matches usage/*.csv; CI runs it on every PR
+make usage-check       # usage.py's tests, then fails if docs/footprint.md no longer matches usage/*.csv; CI runs it on every PR
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make fuzz-list         # what fuzz will run (discovered per module, not listed by hand); CI runs it on every PR
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions; CI runs it per merge to main and weekly

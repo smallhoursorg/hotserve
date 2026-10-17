@@ -36,12 +36,14 @@ hour: a second run inside the hour exhausts the budget and writes
 nothing. A month already in a CSV is replaced by the fresh count unless
 a count in one of its rows shrank or a row vanished — a deleted
 transcript, Actions runs past GitHub's retention — then the committed
-month stays and a warning says why. --recompute replaces regardless
-(for a parser fix). A month the source no longer has at all is kept
-either way; delete its rows by hand to drop it.
+month stays and a warning says why; runs.csv and jobs.csv decide each
+month together, so a run is never kept without its jobs. --recompute
+replaces regardless (for a parser fix). A month the source no longer
+has at all is kept either way; delete its rows by hand to drop it.
 
-`make usage` runs all three steps; `make usage-check` (CI) re-renders
-from the committed CSVs and fails on a difference. Stdlib only.
+`make usage` runs all three steps; `make usage-check` (CI) runs
+usage_test.py, then re-renders from the committed CSVs and fails on a
+difference. Stdlib only.
 """
 
 import argparse
@@ -109,35 +111,42 @@ def write_csv(path, header, rows):
         raise
 
 
-def merge(path, keys, cols, fresh, recompute):
-    """Month-level merge of a fresh count into the committed CSV."""
-    old = read_csv(path)
+def merge(group, recompute):
+    """Month-level merge of fresh counts into the committed CSVs.
 
-    def rows_of(rows, m):
+    group: [(path, keys, cols, fresh rows)]. Its files decide each month
+    together: runs.csv and jobs.csv come from the same runs, so a month
+    kept in one and replaced in the other would count runs without
+    their jobs, or jobs without their runs.
+    """
+    def rows_of(rows, keys, m):
         return {tuple(r[k] for k in keys): r for r in rows if r["month"] == m}
 
-    def shrank(o, n):
+    olds = [read_csv(path) for path, _, _, _ in group]
+    names = " + ".join(path for path, _, _, _ in group)
+    months = sorted({r["month"] for rows in olds for r in rows} | {r["month"] for _, _, _, fresh in group for r in fresh})
+    outs = [[] for _ in group]
+    for m in months:
+        split = [(rows_of(old, keys, m), rows_of(fresh, keys, m), cols)
+                 for (_, keys, cols, fresh), old in zip(group, olds)]
+        absent = all(not n for _, n, _ in split)
         # Each count on its own: growth in one must not hide a loss in another.
-        return any(int(n[c]) < int(o[c]) for c in cols)
-
-    out = []
-    for m in sorted({r["month"] for r in old} | {r["month"] for r in fresh}):
-        o, n = rows_of(old, m), rows_of(fresh, m)
-        lost = [] if recompute or not n else [k for k in o if k not in n or shrank(o[k], n[k])]
-        if not n:
+        lost = [] if recompute or absent else [
+            " ".join(k[1:]) for o, n, cols in split for k in o
+            if k not in n or any(int(n[k][c]) < int(o[k][c]) for c in cols)]
+        if absent:
             # Kept whatever the flags: the source's window is finite (90 days
             # of runs), so --recompute must not wipe the history before it.
-            warn(f"{path}: {m} is no longer in the source; the committed rows stay "
+            warn(f"{names}: {m} is no longer in the source; the committed rows stay "
                  "(delete them by hand to drop the month)")
-            keep = o
         elif lost:
-            warn(f"{path}: {m}: {', '.join(' '.join(k[1:]) for k in lost)} shrank or vanished, so the source "
-                 "lost data; the committed month stays (--recompute overrides)")
-            keep = o
-        else:
-            keep = n
-        out += [keep[k] for k in sorted(keep)]
-    write_csv(path, keys + cols, out)
+            warn(f"{names}: {m}: {', '.join(lost)} shrank or vanished, so the source lost data; "
+                 "the committed month stays (--recompute overrides)")
+        for out, (o, n, _) in zip(outs, split):
+            keep = o if absent or lost else n
+            out += [keep[k] for k in sorted(keep)]
+    for (path, keys, cols, _), out in zip(group, outs):
+        write_csv(path, keys + cols, out)
 
 
 # ---- Claude Code transcripts --------------------------------------------
@@ -598,16 +607,16 @@ def main():
     # Collect everything before writing anything, then render whatever
     # was written: a failure leaves the ledger as it was, a success never
     # leaves the page behind its CSVs.
-    fresh = {}
+    groups = []
     if "collect-claude" in args.steps:
-        fresh[CLAUDE_CSV] = (["month", "model"], CLAUDE_COLS, collect_claude(args.projects, args.match))
+        groups.append([(CLAUDE_CSV, ["month", "model"], CLAUDE_COLS, collect_claude(args.projects, args.match))])
     if "collect-actions" in args.steps:
         nruns, njobs = collect_actions(args.repo, token)
-        fresh[RUNS_CSV] = (["month", "workflow"], ["runs"], nruns)
-        fresh[JOBS_CSV] = (["month", "workflow", "runner"], JOBS_COLS, njobs)
-    for path, (keys, cols, rows) in fresh.items():
-        merge(path, keys, cols, rows, args.recompute)
-    if fresh or "render" in args.steps:
+        groups.append([(RUNS_CSV, ["month", "workflow"], ["runs"], nruns),
+                       (JOBS_CSV, ["month", "workflow", "runner"], JOBS_COLS, njobs)])
+    for group in groups:
+        merge(group, args.recompute)
+    if groups or "render" in args.steps:
         render()
 
 

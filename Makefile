@@ -181,11 +181,13 @@ usage:
 	GH_TOKEN=$$(gh auth token) $(COMPOSE) run --rm --user "$$(id -u):$$(id -g)" usage \
 		python3 -I .github/scripts/usage.py collect-claude collect-actions render --repo $(USAGE_REPO)
 
-# The PR-CI half of usage, like tidy-check: re-renders docs/footprint.md
-# from the committed CSVs (no transcripts, no token) and fails when the
-# page no longer matches them. It is also the only lane that runs the
-# python image, so Dependabot's bumps of that pin are exercised.
+# The PR-CI half of usage, like tidy-check: runs the merge rule's tests,
+# then re-renders docs/footprint.md from the committed CSVs (no
+# transcripts, no token) and fails when the page no longer matches them.
+# It is also the only lane that runs the python image, so Dependabot's
+# bumps of that pin are exercised.
 usage-check:
+	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I .github/scripts/usage_test.py
 	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I .github/scripts/usage.py render
 	git diff --exit-code -- docs/footprint.md
 
