@@ -39,7 +39,7 @@ func FuzzReach(f *testing.F) {
 	f.Add(connJSON(`"strict_sni_host":true,`), "203.0.113.5", "")
 	// The request limits, in both of a duration's shapes, and
 	// request_body's two settings.
-	f.Add(connJSON(`"read_header_timeout":"1s","max_header_bytes":8191,`), "deploy.example.com", "")
+	f.Add(connJSON(`"read_header_timeout":"1s","max_header_bytes":7999,`), "deploy.example.com", "")
 	f.Add(connJSON(`"read_timeout":1000000000,"read_min_rate":65537,`), "deploy.example.com", "")
 	f.Add(reachJSON(`{"handle":[{"handler":"request_body","set":"x","max_size":1}]},`, ""), "deploy.example.com", "")
 	f.Add(reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"request_body","max_size":1048576}]},`, ""), "deploy.example.com", "")
@@ -88,7 +88,7 @@ var catalogueReach = regexp.MustCompile(`^(` + regexp.QuoteMeta(msgListenMoved) 
 	`a listener's protocols include neither h1 nor h2|` +
 	`the .+ listener wrapper may refuse the connection|` +
 	`the server's strict_sni_host refuses a request to an IP address, which carries no SNI|` +
-	`the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token|` +
+	`the server's max_header_bytes is under 8 KB, the floor for a push's headers and token|` +
 	`the server's read_header_timeout is under 5s, the floor for a push's handshake and headers|` +
 	`the server's read_timeout is under 30s, the floor for a push's upload|` +
 	`the server's read_idle_timeout is under 10s, the floor for a push's upload|` +

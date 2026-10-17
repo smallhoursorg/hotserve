@@ -392,7 +392,7 @@ var serverKeys = func() []string {
 // applies: Caddy's Server.ServeHTTP installs the reader that holds the
 // rate only for a positive ReadIdleTimeout, which zero becomes.
 const (
-	floorMaxHeaderBytes    = 8 << 10
+	floorMaxHeaderBytes    = 8000 // 8 KB: Caddy reads `max_header_size 8KB` with SI prefixes, and that spelling passes
 	floorReadHeaderTimeout = 5 * time.Second
 	floorReadTimeout       = 30 * time.Second
 	floorReadIdleTimeout   = 10 * time.Second
@@ -516,7 +516,7 @@ func (s serverSettings) limits() string {
 	under := func(d caddy.Duration, floor time.Duration) bool { return d > 0 && time.Duration(d) < floor }
 	switch {
 	case s.MaxHeaderBytes > 0 && s.MaxHeaderBytes < floorMaxHeaderBytes:
-		return fmt.Sprintf("the server's max_header_bytes is under %d KiB, the floor for a push's headers and token", floorMaxHeaderBytes>>10)
+		return fmt.Sprintf("the server's max_header_bytes is under %d KB, the floor for a push's headers and token", floorMaxHeaderBytes/1000)
 	case under(s.ReadHeaderTimeout, floorReadHeaderTimeout):
 		return fmt.Sprintf("the server's read_header_timeout is under %s, the floor for a push's handshake and headers", floorReadHeaderTimeout)
 	case under(s.ReadTimeout, floorReadTimeout):

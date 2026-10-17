@@ -284,7 +284,7 @@ func TestReachConnection(t *testing.T) {
 		readBody   = "the server's read_timeout is under 30s, the floor for a push's upload"
 		readIdle   = "the server's read_idle_timeout is under 10s, the floor for a push's upload"
 		minRate    = "the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload"
-		maxHeader  = "the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token"
+		maxHeader  = "the server's max_header_bytes is under 8 KB, the floor for a push's headers and token"
 		write      = "the server's write_timeout is under 5s, the floor for a push's handshake"
 	)
 	for name, c := range map[string]struct {
@@ -304,26 +304,28 @@ func TestReachConnection(t *testing.T) {
 		"write at the floor":                                      {global: fmt.Sprintf(timeouts, "\t\t\twrite 5s\n")},
 		"write under the floor":                                   {global: fmt.Sprintf(timeouts, "\t\t\twrite 1s\n"), want: write},
 		"write_idle, its rate, idle and the keepalives, no floor": {global: fmt.Sprintf(servers, "\t\ttimeouts {\n\t\t\twrite_idle 1s 1000000\n\t\t\tidle 1s\n\t\t}\n\t\tkeepalive_interval 1s\n\t\tkeepalive_idle 1s\n\t\tkeepalive_count 1\n")},
-		"max_header_size at the floor":                            {global: fmt.Sprintf(servers, "\t\tmax_header_size 8KiB\n")},
+		"max_header_size 8KiB":                                    {global: fmt.Sprintf(servers, "\t\tmax_header_size 8KiB\n")},
 		"max_header_size under the floor":                         {global: fmt.Sprintf(servers, "\t\tmax_header_size 4KB\n"), want: maxHeader},
-		// humanize reads KB as 1000 bytes: 8KB is 8000, under 8 KiB.
-		"max_header_size 8KB, which is 8000 bytes":          {global: fmt.Sprintf(servers, "\t\tmax_header_size 8KB\n"), want: maxHeader},
+		// Caddy reads KB as 1000 bytes: the floor is 8000, so the usual
+		// spelling is at it, and 7KB under.
+		"max_header_size 8KB, at the floor":                 {global: fmt.Sprintf(servers, "\t\tmax_header_size 8KB\n")},
+		"max_header_size 7KB":                               {global: fmt.Sprintf(servers, "\t\tmax_header_size 7KB\n"), want: maxHeader},
 		"limits on another port's server":                   {global: "\tservers :8443 {\n\t\tmax_header_size 1KB\n\t\ttimeouts {\n\t\t\tread_header 1s\n\t\t}\n\t}\n"},
 		"a short read_header ahead of a responder in front": {global: fmt.Sprintf(timeouts, "\t\t\tread_header 1s\n") + "\torder respond first\n", inside: "\trespond ok\n", want: readHeader},
-		"protocols h1":                            {global: fmt.Sprintf(servers, "\t\tprotocols h1\n")},
-		"protocols h2 and h3":                     {global: fmt.Sprintf(servers, "\t\tprotocols h2 h3\n")},
-		"protocols h3":                            {global: fmt.Sprintf(servers, "\t\tprotocols h3\n"), want: noH1H2},
-		"protocols h3 for another port's server":  {global: "\tservers :8443 {\n\t\tprotocols h3\n\t}\n"},
-		"a bind serving h3 alone":                 {inside: "\tbind 0.0.0.0 {\n\t\tprotocols h3\n\t}\n", want: noH1H2},
-		"a bind serving h1":                       {inside: "\tbind 0.0.0.0 {\n\t\tprotocols h1\n\t}\n"},
-		"http_redirect ahead of tls":              {global: fmt.Sprintf(servers, "\t\tlistener_wrappers {\n\t\t\thttp_redirect\n\t\t\ttls\n\t\t}\n")},
-		"http_redirect with no tls listed":        {global: fmt.Sprintf(servers, "\t\tlistener_wrappers {\n\t\t\thttp_redirect\n\t\t}\n"), want: "the http_redirect listener wrapper may refuse the connection"},
-		"a client certificate required":           {inside: clientAuth, want: requires},
-		"a trust pool and no mode":                {inside: "\ttls {\n\t\tclient_auth {\n\t\t\ttrust_pool file /etc/ca.pem\n\t\t}\n\t}\n", want: requires},
-		"a client certificate if given":           {inside: "\ttls {\n\t\tclient_auth {\n\t\t\tmode verify_if_given\n\t\t\ttrust_pool file /etc/ca.pem\n\t\t}\n\t}\n"},
-		"a client certificate requested":          {inside: "\ttls {\n\t\tclient_auth {\n\t\t\tmode request\n\t\t}\n\t}\n"},
-		"a client certificate on another site":    {after: "other.example.com {\n" + clientAuth + "\trespond x\n}\n"},
-		"a client certificate on a wildcard site": {after: "*.example.com {\n" + clientAuth + "\trespond x\n}\n"},
+		"protocols h1":                                      {global: fmt.Sprintf(servers, "\t\tprotocols h1\n")},
+		"protocols h2 and h3":                               {global: fmt.Sprintf(servers, "\t\tprotocols h2 h3\n")},
+		"protocols h3":                                      {global: fmt.Sprintf(servers, "\t\tprotocols h3\n"), want: noH1H2},
+		"protocols h3 for another port's server":            {global: "\tservers :8443 {\n\t\tprotocols h3\n\t}\n"},
+		"a bind serving h3 alone":                           {inside: "\tbind 0.0.0.0 {\n\t\tprotocols h3\n\t}\n", want: noH1H2},
+		"a bind serving h1":                                 {inside: "\tbind 0.0.0.0 {\n\t\tprotocols h1\n\t}\n"},
+		"http_redirect ahead of tls":                        {global: fmt.Sprintf(servers, "\t\tlistener_wrappers {\n\t\t\thttp_redirect\n\t\t\ttls\n\t\t}\n")},
+		"http_redirect with no tls listed":                  {global: fmt.Sprintf(servers, "\t\tlistener_wrappers {\n\t\t\thttp_redirect\n\t\t}\n"), want: "the http_redirect listener wrapper may refuse the connection"},
+		"a client certificate required":                     {inside: clientAuth, want: requires},
+		"a trust pool and no mode":                          {inside: "\ttls {\n\t\tclient_auth {\n\t\t\ttrust_pool file /etc/ca.pem\n\t\t}\n\t}\n", want: requires},
+		"a client certificate if given":                     {inside: "\ttls {\n\t\tclient_auth {\n\t\t\tmode verify_if_given\n\t\t\ttrust_pool file /etc/ca.pem\n\t\t}\n\t}\n"},
+		"a client certificate requested":                    {inside: "\ttls {\n\t\tclient_auth {\n\t\t\tmode request\n\t\t}\n\t}\n"},
+		"a client certificate on another site":              {after: "other.example.com {\n" + clientAuth + "\trespond x\n}\n"},
+		"a client certificate on a wildcard site":           {after: "*.example.com {\n" + clientAuth + "\trespond x\n}\n"},
 		"a client certificate on a wildcard site, the host's own policy too": {inside: "\ttls {\n\t\tprotocols tls1.3\n\t}\n",
 			after: "*.example.com {\n" + clientAuth + "\trespond x\n}\n"},
 		"alpn h2":       {inside: "\ttls {\n\t\talpn h2\n\t}\n"},
@@ -431,8 +433,8 @@ func TestReachConnectionJSON(t *testing.T) {
 		"read_timeout under":                         {settings: `"read_timeout":"29s",`, want: "the server's read_timeout is under 30s, the floor for a push's upload"},
 		"read_idle_timeout under":                    {settings: `"read_idle_timeout":"9s",`, want: "the server's read_idle_timeout is under 10s, the floor for a push's upload"},
 		"write_timeout under":                        {settings: `"write_timeout":"4s",`, want: "the server's write_timeout is under 5s, the floor for a push's handshake"},
-		"max_header_bytes under":                     {settings: `"max_header_bytes":8191,`, want: "the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token"},
-		"max_header_bytes at the floor":              {settings: `"max_header_bytes":8192,`},
+		"max_header_bytes under":                     {settings: `"max_header_bytes":7999,`, want: "the server's max_header_bytes is under 8 KB, the floor for a push's headers and token"},
+		"max_header_bytes at the floor":              {settings: `"max_header_bytes":8000,`},
 		"max_header_bytes negative, Caddy's default": {settings: `"max_header_bytes":-5,`},
 		"read_min_rate at the ceiling":               {settings: `"read_min_rate":65536,`},
 		"read_min_rate over":                         {settings: `"read_min_rate":65537,`, want: "the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload"},
@@ -440,7 +442,7 @@ func TestReachConnectionJSON(t *testing.T) {
 		"read_min_rate over, under a negative read idle, which Caddy never applies": {settings: `"read_idle_timeout":-1,"read_min_rate":65537,`},
 		"read_min_rate over, read idle zero, the default":                           {settings: `"read_idle_timeout":0,"read_min_rate":65537,`, want: "the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload"},
 		"write_idle_timeout, write_min_rate and idle_timeout, no floor":             {settings: `"write_idle_timeout":1,"write_min_rate":1000000,"idle_timeout":1,`},
-		"two limits under: the table's first is named":                              {settings: `"read_header_timeout":"1s","max_header_bytes":1,`, want: "the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token"},
+		"two limits under: the table's first is named":                              {settings: `"read_header_timeout":"1s","max_header_bytes":1,`, want: "the server's max_header_bytes is under 8 KB, the floor for a push's headers and token"},
 		"a limit under, behind a strict SNI refusal":                                {host: ip, settings: `"strict_sni_host":true,"max_header_bytes":1,`, want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
 		// Integers are kept as written: one at int64's edge reads as
 		// Caddy reads it, where a float64 would round it out of range.
