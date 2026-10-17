@@ -83,5 +83,48 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(usage.read_csv(jobs), new_jobs)
 
 
+class HandEditedFileTests(unittest.TestCase):
+    """copilot.csv and factors.json are typed by hand; a bad edit must stop a run, not publish."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        cwd = os.getcwd()
+        os.chdir(self.dir.name)
+        self.addCleanup(os.chdir, cwd)
+        os.makedirs("usage")
+
+    def copilot(self, body):
+        with open(usage.COPILOT_CSV, "w") as f:
+            f.write("month,ai_credits_usd,note\n" + body)
+        return usage.read_copilot()
+
+    def test_numeric_and_blank_credits(self):
+        self.assertEqual(self.copilot("2026-09,12.5,first bill\n2026-10,,\n"), {"2026-09": 12.5, "2026-10": None})
+
+    def test_duplicate_month_is_refused(self):
+        for body in ("2026-09,10,\n2026-09,20,\n", "2026-09,10,\n2026-09,,\n"):
+            with self.assertRaises(SystemExit):
+                self.copilot(body)
+
+    def test_bad_credit_values_are_refused(self):
+        for v in ("abc", "-1", "nan", "inf", "$12"):
+            with self.assertRaises(SystemExit):
+                self.copilot(f"2026-09,{v},\n")
+
+    def factors(self, text):
+        with open(usage.FACTORS, "w") as f:
+            f.write(text)
+        return usage.load_factors()
+
+    def test_factors_shape_is_checked(self):
+        with self.assertRaises(SystemExit):
+            self.factors("{not json")
+        with self.assertRaises(SystemExit):
+            self.factors('{"_sources": {}, "prices_usd_per_mtok": {}, "claude_gco2e_per_mtok": {}}')
+        ok = '{"_sources": {}, "prices_usd_per_mtok": {}, "claude_gco2e_per_mtok": {}, "actions": {}}'
+        self.assertEqual(self.factors(ok)["actions"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -385,6 +385,8 @@ def read_copilot():
         m, v = r.get("month") or "", (r.get("ai_credits_usd") or "").strip()
         if not is_month(m):
             sys.exit(f"{COPILOT_CSV}: month {m!r} is not YYYY-MM")
+        if m in out:
+            sys.exit(f"{COPILOT_CSV}: {m} appears twice; one row per month")
         if not v:
             out[m] = None
             continue
@@ -395,6 +397,19 @@ def read_copilot():
         if not v.isascii() or not math.isfinite(out[m]) or out[m] < 0:
             sys.exit(f"{COPILOT_CSV}: {m}: ai_credits_usd {v!r} must be a plain non-negative number")
     return out
+
+
+def load_factors():
+    """The hand-edited factors file, checked for shape so a bad edit stops a run before it writes."""
+    try:
+        with open(FACTORS) as f:
+            factors = json.load(f)
+    except ValueError as e:
+        sys.exit(f"{FACTORS}: not valid JSON: {e}")
+    for key in ("_sources", "prices_usd_per_mtok", "claude_gco2e_per_mtok", "actions"):
+        if not isinstance(factors.get(key), dict):
+            sys.exit(f"{FACTORS}: missing the {key} object")
+    return factors
 
 
 def fmt(x, d=0):
@@ -408,9 +423,7 @@ def table(header, rows):
     return "\n".join(lines)
 
 
-def render():
-    with open(FACTORS) as f:
-        factors = json.load(f)
+def render(factors):
     claude, runs, jobs, copilot = read_csv(CLAUDE_CSV), read_csv(RUNS_CSV), read_csv(JOBS_CSV), read_copilot()
     a, g = factors["actions"], factors["claude_gco2e_per_mtok"]
     grid_c = g["grid_gco2e_per_kwh"]
@@ -597,7 +610,9 @@ def main():
                     help="the mounted ~/.claude/projects")
     ap.add_argument("--recompute", action="store_true", help="replace committed months even when a row shrank")
     args = ap.parse_args()
-    read_copilot()  # the hand-typed file is checked before anything is written, not at render
+    # Both hand-edited files are checked before anything is written, not at render.
+    read_copilot()
+    factors = load_factors()
     token = os.environ.get("GH_TOKEN")
     if "collect-actions" in args.steps:
         if not token:
@@ -617,7 +632,7 @@ def main():
     for group in groups:
         merge(group, args.recompute)
     if groups or "render" in args.steps:
-        render()
+        render(factors)
 
 
 if __name__ == "__main__":
