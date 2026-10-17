@@ -197,6 +197,14 @@ covers both:
 server.listen(process.env.SOCKET ?? 3000);
 ```
 
+A Node app that already passes `process.env.PORT` to `listen()` as it
+is (`server.listen(process.env.PORT)`, or Express's
+`app.listen(process.env.PORT || 3000)`) needs no change:
+`env PORT {socket}` in its block sets `PORT` to the socket's path
+([Placeholders](#placeholders)), and `listen()` binds a path it is
+given; one that makes `PORT` a number first, as
+`parseInt(process.env.PORT)` does, fails to listen.
+
 ```ts
 // Deno: the `deno serve` CLI is port-only; call Deno.serve yourself.
 const sock = Deno.env.get("SOCKET");
