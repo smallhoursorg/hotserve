@@ -442,13 +442,19 @@ func TestReachConnectionJSON(t *testing.T) {
 		"write_idle_timeout, write_min_rate and idle_timeout, no floor":             {settings: `"write_idle_timeout":1,"write_min_rate":1000000,"idle_timeout":1,`},
 		"two limits under: the table's first is named":                              {settings: `"read_header_timeout":"1s","max_header_bytes":1,`, want: "the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token"},
 		"a limit under, behind a strict SNI refusal":                                {host: ip, settings: `"strict_sni_host":true,"max_header_bytes":1,`, want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
-		"a duration that does not read":                                             {settings: `"read_header_timeout":"soon",`, want: "error"},
-		"a duration with a fraction":                                                {settings: `"read_timeout":1.5,`, want: "error"},
-		"a byte count that does not read":                                           {settings: `"max_header_bytes":"8KB",`, want: "error"},
-		"a rate that does not read":                                                 {settings: `"read_min_rate":"fast",`, want: "error"},
-		"protocols that do not read":                                                {settings: `"protocols":"h1",`, want: "error"},
-		"listener wrappers that do not read":                                        {settings: `"listener_wrappers":{"wrapper":"tls"},`, want: "error"},
-		"policies that do not read":                                                 {settings: `"tls_connection_policies":[1],`, want: "error"},
+		// Integers are kept as written: one at int64's edge reads as
+		// Caddy reads it, where a float64 would round it out of range.
+		"read_min_rate at int64's edge, under a negative read idle": {settings: `"read_idle_timeout":-1,"read_min_rate":9223372036854775807,`},
+		"read_min_rate at int64's edge":                             {settings: `"read_min_rate":9223372036854775807,`, want: "the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload"},
+		"read_header_timeout at int64's edge":                       {settings: `"read_header_timeout":9223372036854775807,`},
+		"max_header_bytes past int64":                               {settings: `"max_header_bytes":9223372036854775808,`, want: "error"},
+		"a duration that does not read":                             {settings: `"read_header_timeout":"soon",`, want: "error"},
+		"a duration with a fraction":                                {settings: `"read_timeout":1.5,`, want: "error"},
+		"a byte count that does not read":                           {settings: `"max_header_bytes":"8KB",`, want: "error"},
+		"a rate that does not read":                                 {settings: `"read_min_rate":"fast",`, want: "error"},
+		"protocols that do not read":                                {settings: `"protocols":"h1",`, want: "error"},
+		"listener wrappers that do not read":                        {settings: `"listener_wrappers":{"wrapper":"tls"},`, want: "error"},
+		"policies that do not read":                                 {settings: `"tls_connection_policies":[1],`, want: "error"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			host := c.host
@@ -508,6 +514,11 @@ func TestReachJSON(t *testing.T) {
 		"request_body with a set behind box_webhook":                      {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"listen":[":443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"},{"handler":"request_body","set":"x"}]}]}],"terminal":true}]}}}}}`), want: ""},
 		"request_body whose set does not read":                            {adapted: reachJSON(`{"handle":[{"handler":"request_body","set":5}]},`, ""), want: "error"},
 		"request_body whose max_size does not read":                       {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":"1MB"}]},`, ""), want: "error"},
+		"request_body whose max_size has a fraction":                      {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":1.5}]},`, ""), want: "error"},
+		"request_body with a max_size at int64's edge":                    {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":9223372036854775807}]},`, ""), want: ""},
+		"request_body with a max_size past int64":                         {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":9223372036854775808}]},`, ""), want: "error"},
+		"a value after the adaptation":                                    {adapted: append(reachJSON("", ""), " 1"...), want: "error"},
+		"whitespace after the adaptation":                                 {adapted: append(reachJSON("", ""), " \n"...), want: ""},
 		"another handler's set and max_size keys":                         {adapted: reachJSON(`{"handle":[{"handler":"vars","set":5,"max_size":"1MB"}]},`, ""), want: ""},
 		"templates ahead":                                                 {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
 		"templates ahead with its default types":                          {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},

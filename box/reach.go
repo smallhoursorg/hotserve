@@ -15,11 +15,13 @@ package box
 // match, and one they do not know may fail.
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/http"
@@ -148,7 +150,9 @@ var bundleCap = fmt.Sprintf("%d MiB", maxBody>>20)
 // Caddy does (requestbody.RequestBody.ServeHTTP): a `set` that is not
 // the empty string replaces every body, whatever `max_size` says, and
 // a `max_size` is a cap only when positive. Each is read in Caddy's
-// shape for it; null is absent, as in the TLS policies.
+// shape for it (an int64 for the cap, so a fraction or a number past
+// int64 is the adaptation's fault, as validate refused it first); null
+// is absent, as in the TLS policies.
 func requestBodySetting(hm map[string]any) (string, error) {
 	if v, ok := hm["set"]; ok && v != nil {
 		s, ok := v.(string)
@@ -160,8 +164,12 @@ func requestBodySetting(hm map[string]any) (string, error) {
 		}
 	}
 	if v, ok := hm["max_size"]; ok && v != nil {
-		n, ok := v.(float64)
+		num, ok := v.(json.Number)
 		if !ok {
+			return "", errAdaptation
+		}
+		n, err := num.Int64()
+		if err != nil {
 			return "", errAdaptation
 		}
 		if n > 0 && n < maxBody {
@@ -181,8 +189,14 @@ func requestBodySetting(hm map[string]any) (string, error) {
 // box_webhook routed for the host, which the walk of the same bytes
 // rules out.
 func reach(adapted []byte, host string, door []string) error {
+	// One value, numbers kept as written (json.Number): a float64 would
+	// round an integer past 2^53 and break one past int64 when the
+	// server's settings are encoded again into their typed fields. As
+	// Unmarshal would, anything after the value is refused.
 	var cfg any
-	if json.Unmarshal(adapted, &cfg) != nil {
+	dec := json.NewDecoder(bytes.NewReader(adapted))
+	dec.UseNumber()
+	if dec.Decode(&cfg) != nil || !errors.Is(dec.Decode(new(any)), io.EOF) {
 		return errAdaptation
 	}
 	servers, _ := dig(cfg, "apps", "http", "servers").(map[string]any)
