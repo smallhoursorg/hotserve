@@ -15,7 +15,8 @@ Two repositories feed the box, and the box trusts them differently:
 | Each app's | That app's code | the app's workflow proves, with a token GitHub mints, that the push came from that repository's `main` |
 
 So a stolen GitHub login or a compromised workflow can ship a new
-version of an app, but cannot change the config. GitHub's merge button
+version of an app, but cannot change the config with anything a signer
+did not sign. GitHub's merge button
 cannot land a change to the config either: a reviewed pull request is
 landed from a signer's laptop ([the rules](../examples/box/README.md#the-rules)).
 
