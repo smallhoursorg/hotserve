@@ -84,13 +84,18 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so no answer tells a caller which app names
-exist (`Handler.ServeHTTP`, liveswap/handler.go). Timing still can, at
-one token per name: an OIDC source fetches its issuer's keys for a
-token under a kid it holds no key for, at most once a minute (`keySet`,
-liveswap/deploytrust/jwks.go), and each app's sources are its own
-while every unknown name shares the global ones, so such a token to an
-app with an OIDC source can wait on an issuer round trip that one to a
-missing name, sent just before, did not. Config load refuses an app
+exist (`Handler.ServeHTTP`, liveswap/handler.go). **Residual: timing
+can** (S3 × O5 × D5 = 75, as #296 scored it; owed). A forged token
+naming an issuer an app's sources trust is refused after a local
+signature check when the source holds the token's kid, and, when it
+does not, after a fetch of the issuer's keys that each source makes at
+most once a minute (`keySet`, liveswap/deploytrust/jwks.go). A name
+that does not exist is refused at once, unless the global sources
+trust that issuer too and pay the same on their own key set. The fetch
+window is per app, not shared across apps that trust the same issuer:
+each app's sources keep their own key set, so one unknown-kid token per
+app per minute can wait on an issuer round trip that one to a missing
+name, sent just before, did not. Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.

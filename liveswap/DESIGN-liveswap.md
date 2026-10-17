@@ -43,9 +43,18 @@ Concept map from the Nomad-era stack:
 - The webhook MUST authenticate every request by verifying an
   `Authorization: Bearer <JWT>` against the app's `deploy_trust`
   sources (OIDC against an issuer's public JWKS, or a local public
-  key), and MUST NOT reveal whether an app exists to unauthenticated
-  callers (unknown apps verify against the global trust sources, then
-  404). No shared secret is stored on the box.
+  key), and its answer MUST NOT reveal whether an app exists to
+  unauthenticated callers (unknown apps verify against the global trust
+  sources, then 404; a refused token gets the same 401 either way). Its
+  timing can, within a bound (DESIGN-threat-model.md, "Webhook
+  endpoint", the residual): a forged token naming an issuer an app's
+  sources trust is refused after a local signature check when the
+  source holds the token's kid, and, when it does not, after a fetch of
+  the issuer's keys that each source makes at most once a minute. A
+  name that does not exist is refused at once, unless the global
+  sources trust that issuer too and pay the same on their own key set.
+  The fetch window is per app, not shared across apps that trust the
+  same issuer. No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
   sources.
 - Config load and every launch MUST warn when an app's `env_file` is
