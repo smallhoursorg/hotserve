@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan usage build package clean-debs install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan usage usage-check build package clean-debs install-test e2e soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -153,13 +153,24 @@ secretscan:
 # sessions, Actions runner minutes and Copilot credits as month-level
 # facts in usage/*.csv, rendered to docs/footprint.md. Reads the
 # transcripts under ~/.claude/projects (the compose service mounts them
-# read-only) and the Actions API with your gh login. Run it monthly —
-# GitHub keeps run records for 90 days — fill in usage/copilot.csv from
-# GitHub billing, and commit what changed.
+# read-only) and the Actions API with your gh login — the token gh
+# hands over carries the login's full scope, though public run data
+# needs only its rate-limit identity. Run it monthly — GitHub keeps run
+# records for 90 days — fill in usage/copilot.csv from GitHub billing
+# (its note column is public too), and commit what changed. --user: the
+# files it writes stay yours on a Linux host (the container is root).
 USAGE_REPO ?= smallhoursorg/hotserve
 usage:
-	GH_TOKEN=$$(gh auth token) $(COMPOSE) run --rm usage \
+	GH_TOKEN=$$(gh auth token) $(COMPOSE) run --rm --user "$$(id -u):$$(id -g)" usage \
 		python3 -I .github/scripts/usage.py collect-claude collect-actions render --repo $(USAGE_REPO)
+
+# The PR-CI half of usage, like tidy-check: re-renders docs/footprint.md
+# from the committed CSVs (no transcripts, no token) and fails when the
+# page no longer matches them. It is also the only lane that runs the
+# python image, so Dependabot's bumps of that pin are exercised.
+usage-check:
+	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I .github/scripts/usage.py render
+	git diff --exit-code -- docs/footprint.md
 
 # Cross-compiles the product binary for the release targets. GOFLAGS is
 # cleared so -buildvcs is back on: caddycmd stamps the version from the

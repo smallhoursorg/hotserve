@@ -211,9 +211,18 @@ jobs:
   # that gap and broke main.) Listing individual matrix cells as
   # required checks is still not needed and would rot when cells
   # change.
+  # The usage ledger's page must match its CSVs: the same drift gate
+  # tidy-check is for go.mod, and the one lane that runs the python
+  # image pin. No transcripts, no token: render reads committed files.
+  usage-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make usage-check COMPOSE="$COMPOSE"
+
   ci-ok:
     if: always()
-    needs: [lint, test, govulncheck, e2e, package, install-test, gitleaks]
+    needs: [lint, test, govulncheck, e2e, package, install-test, gitleaks, usage-check]
     runs-on: ubuntu-latest
     steps:
       - name: assert every needed job succeeded

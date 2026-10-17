@@ -16,12 +16,12 @@ energy figures), network transfer, and the models' training.
 
 ## By month
 
-| Month | Claude calls | Output Mtok | Cache-read Gtok | Claude USD | Claude kWh | Claude kgCO2e | Runner min | Runner USD if private | Runner kWh | Runner kgCO2e | Copilot reviews | Copilot USD |
+| Month | Claude calls | Output Mtok | Cache-read Gtok | Claude USD (list) | Claude kWh | Claude kgCO2e | Runner min | Runner USD if private | Runner kWh | Runner kgCO2e | Copilot reviews | Copilot USD |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 2026-08 | — | — | — | — | — | — | 6,377 | 38 | 1.3 | 0.5 | 60 | — |
-| 2026-09 | 13,412 | 10.0 | 3.9 | 2,557 | 256 | 73.4 | 18,300 | 110 | 4.3 | 1.6 | 266 | — |
-| 2026-10 | 16,323 | 9.5 | 4.1 | 1,800 | 200 | 57.5 | 15,770 | 95 | 3.7 | 1.4 | 227 | — |
-| **Total** | 29,735 | 19.5 | 7.9 | 4,358 | 456 | 130.9 | 40,447 | 243 | 9.3 | 3.5 | 553 | — |
+| 2026-09 | 13,412 | 13.7 | 3.9 | 2,692 | 287 | 82.3 | 18,295 | 110 | 4.3 | 1.6 | 265 | — |
+| 2026-10 | 16,600 | 11.1 | 4.1 | 1,878 | 214 | 61.4 | 16,413 | 98 | 3.9 | 1.5 | 232 | — |
+| **Total** | 30,012 | 24.8 | 8.0 | 4,570 | 501 | 143.7 | 41,085 | 247 | 9.5 | 3.6 | 557 | — |
 
 A dash is a month the source has no rows for. Claude USD is what the
 tokens would cost at list price, not what was paid (Claude Code runs on
@@ -31,11 +31,11 @@ Every kWh and kgCO2e is an estimate, see below.
 
 ## By model
 
-| Model | Calls | Input Mtok | Output Mtok | Cache-write Mtok | Cache-read Gtok | Cost USD | kgCO2e |
+| Model | Calls | Input Mtok | Output Mtok | Cache-write Mtok | Cache-read Gtok | List USD | kgCO2e |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| claude-fable-5-1 | 9,531 | 0.19 | 9.3 | 62.2 | 2.80 | 2,198 | 75.5 |
-| claude-opus-5-5 | 15,554 | 0.03 | 7.9 | 68.0 | 3.97 | 1,393 | 43.1 |
-| claude-opus-5 | 4,612 | 0.01 | 2.2 | 14.8 | 1.16 | 759 | 12.1 |
+| claude-fable-5-1 | 9,746 | 0.20 | 11.4 | 63.8 | 2.83 | 2,333 | 83.0 |
+| claude-opus-5-5 | 15,616 | 0.03 | 9.2 | 68.0 | 3.99 | 1,424 | 45.4 |
+| claude-opus-5 | 4,612 | 0.01 | 4.0 | 14.8 | 1.16 | 804 | 15.1 |
 | claude-opus-4-8 | 28 | 0.00 | 0.1 | 0.1 | 0.01 | 8 | 0.2 |
 | claude-haiku-4-5-20251001 | 10 | 0.00 | 0.0 | 0.1 | 0.00 | 0 | 0.0 |
 
@@ -43,12 +43,12 @@ Every kWh and kgCO2e is an estimate, see below.
 
 | Workflow | Runs | Billed minutes | kWh |
 |---|---:|---:|---:|
-| ci | 1,944 | 30,261 | 6.6 |
-| codeql | 825 | 4,926 | 1.3 |
-| copilot-pull-request-reviewer | 553 | 2,425 | 0.7 |
-| soak | 105 | 1,443 | 0.4 |
+| ci | 983 | 30,738 | 6.7 |
+| codeql | 836 | 5,034 | 1.3 |
+| copilot-pull-request-reviewer | 557 | 2,437 | 0.7 |
+| soak | 109 | 1,484 | 0.4 |
 | fuzz | 9 | 612 | 0.2 |
-| release | 30 | 529 | 0.1 |
+| release | 15 | 529 | 0.1 |
 | dependabot-updates | 113 | 140 | 0.0 |
 | dependabot-automerge | 44 | 44 | 0.0 |
 | update-graph | 29 | 30 | 0.0 |
@@ -56,48 +56,58 @@ Every kWh and kgCO2e is an estimate, see below.
 | pin-watch | 13 | 13 | 0.0 |
 | copilot | 5 | 6 | 0.0 |
 
+Runs are runs with at least one timed job; a run with jobs on two
+runner types is one run.
+
 ## Where the numbers come from
 
 - **Claude Code sessions.** Claude Code keeps a transcript of every
   session under `~/.claude/projects`; each API call's token counts are
-  read from there, one count per message (checked against ccusage
-  20.0.34 on 2026-10-16: identical to the token). Only sessions in this
-  repository and its worktrees are counted. Claude Code purges
-  transcripts after 30 days by default, and did here until 2026-10-14:
+  read from there, one count per message, taking the final line of a
+  streamed reply (the first line's output count is a placeholder, which
+  is how ccusage, checked against this on 2026-10-16, comes out about a
+  fifth low on output while agreeing on every other column). Only
+  project directories named after this repository, its worktrees and
+  clones are counted. Claude Code purges transcripts after 30 days by
+  default (Sources: transcripts), and did here until 2026-10-14:
   sessions before 2026-09-13 are gone, so this part of the ledger starts
-  there although the repository started on 2026-08-16.
+  there although the GitHub repository started on 2026-08-16.
 - **Claude USD.** Anthropic's published prices per model (Sources:
   prices). Cache writes cost 1.25× (5-minute) or 2× (1-hour) the input
   price; cache reads the per-model rate.
-- **Claude kWh and kgCO2e.** Per-token factors fitted to measured
-  Claude 3.7 Sonnet queries and scaled per model family (Sources: CO2
-  per token). Cache writes count as input tokens, cache reads at
-  0.08× an input token; kWh is derived back from CO2 at the
-  287 gCO2e/kWh those factors assume. Anthropic publishes no energy
-  figures, and published methods disagree by more than an order of
-  magnitude (Sources: the other end of the range), so read these as an
-  order of magnitude, not a measurement.
+- **Claude kWh and kgCO2e.** Per-token factors fitted to estimated
+  Claude 3.7 Sonnet query energies and scaled per model family (Sources:
+  CO2 per token). Cache writes count as input tokens, cache reads at
+  0.08× an input token; kWh is derived back from CO2 at the 287
+  gCO2e/kWh those factors assume. Anthropic publishes no energy figures.
+  By these factors the average call here comes out at 16.7 Wh;
+  Google's published median for a Gemini Apps text prompt is
+  0.24 Wh (Sources: a published per-prompt figure), 70× lower,
+  though a chat prompt and a coding call with a large cached context
+  are different work. Read these as an order of magnitude, not a
+  measurement.
 - **Runner minutes.** From the GitHub Actions API: every job of every
-  run, rounded up to the minute per job as GitHub bills. GitHub deletes
-  a public repository's runs after at most 90 days (Sources: run
-  retention), which is why the ledger is committed monthly.
-- **Runner kWh, kgCO2e and USD.** Every runner is taken as
-  4 vCPU / 16 GB at 50% CPU, 18.2 W with the data-centre
-  overhead (Sources: runner energy), on a 380 gCO2e/kWh grid (Sources:
-  runner grid; GitHub does not publish a runner's region), and priced at
-  the smallest Linux runner's private-repository rate (Sources: runner
-  price).
+  run, each rounded up to the whole minute. GitHub deletes a public
+  repository's runs after at most 90 days (Sources: run retention),
+  which is why the ledger is committed monthly.
+- **Runner kWh, kgCO2e and USD.** Every runner is taken as the
+  4 vCPU / 16 GB machine a public repository gets, at 50% CPU: 18.2 W
+  with the data-centre overhead (Sources: runners), on a 380 gCO2e/kWh
+  grid (Sources: runner grid), priced at the 2-core x64 rate as a rough
+  floor (Sources: runner price).
 - **Copilot.** Reviews are the Copilot code-review workflow's runs.
   Credits are typed into `usage/copilot.csv` from GitHub billing each
-  month (Sources: Copilot credits).
+  month, note column included, so both are public (Sources: Copilot
+  credits).
 
 ## Sources
 
-- **Prices.** Anthropic's published API prices (https://platform.claude.com/docs/en/about-claude/pricing), as recorded in claude-carbon's data/prices.json (https://github.com/gwittebolle/claude-carbon, _updated 2026-10-09).
-- **CO2 per token.** Per-token gCO2e factors from claude-carbon's data/factors.json (https://github.com/gwittebolle/claude-carbon/blob/main/METHODOLOGY.md): a fit to the per-query energies measured for Claude 3.7 Sonnet by Jegham et al. 2025 (https://arxiv.org/abs/2505.09598), Opus at 2x Sonnet, Fable at 2x Opus by list-price ratio, Haiku at 0.25x; AWS PUE 1.14 and an AWS-region grid of 0.287 kgCO2e/kWh.
-- **The other end of the range.** Google's published median of 0.24 Wh per Gemini Apps text prompt (https://www.datacenterdynamics.com/en/news/google-median-gemini-prompt-uses-024-watt-hours-of-power-and-consumes-026ml-of-water/) applied per call gives roughly 60x less than these factors do.
+- **Prices.** Anthropic's published API prices (https://platform.claude.com/docs/en/about-claude/pricing), as recorded in claude-carbon's data/prices.json (https://github.com/gwittebolle/claude-carbon, _updated 2026-10-09), except Sonnet 5.5's cache reads, $0.20 on Anthropic's page where that file says 0.10. The family rows are claude-carbon's fallbacks for a model with no row of its own; the renderer warns when one is used.
+- **CO2 per token.** Per-token gCO2e factors from claude-carbon's data/factors.json (https://github.com/gwittebolle/claude-carbon/blob/main/METHODOLOGY.md): a fit to the per-query energies Jegham et al. 2025 estimated for Claude 3.7 Sonnet (https://arxiv.org/abs/2505.09598; model outputs on assumed GPU nodes, not telemetry), Opus at 2x Sonnet, Fable at 2x Opus by list-price ratio, Haiku at 0.25x; AWS PUE 1.14 and an AWS-region grid of 0.287 kgCO2e/kWh.
+- **A published per-prompt figure.** Google's published median of 0.24 Wh per Gemini Apps text prompt, August 2025 (https://www.datacenterdynamics.com/en/news/google-median-gemini-prompt-uses-024-watt-hours-of-power-and-consumes-026ml-of-water/).
+- **Transcripts.** Claude Code's settings reference (https://code.claude.com/docs/en/settings): cleanupPeriodDays, the days a transcript is kept, defaults to 30.
 - **Run retention.** GitHub changelog, 2026-07-17 (https://github.blog/changelog/2026-07-17-actions-retention-will-cover-checks-workflow-runs-and-statuses/): from 2026-10-01 workflow runs follow the Actions retention setting, at most 90 days for a public repository.
-- **Runner energy.** Cloud Carbon Footprint's Azure coefficients (https://www.cloudcarbonfootprint.org/docs/methodology): 0.78 W per vCPU idle, 3.76 W at 100%, 0.000392 kWh per GB-hour of memory, PUE 1.185; GitHub-hosted runners run on Azure.
-- **Runner grid.** a US national average, as cited in claude-carbon's METHODOLOGY.md
-- **Runner price.** GitHub's billing page (https://docs.github.com/en/billing/managing-billing-for-your-products/about-billing-for-github-actions): usage is free for public repositories on standard hosted runners; otherwise $0.006 per minute for a 2-core x64 Linux runner ($0.005 arm64), which is applied to every runner here as the lowest bound.
+- **Runners.** GitHub's runner reference (https://docs.github.com/en/actions/reference/runners/github-hosted-runners): Ubuntu runners are hosted in Azure, and a public repository's standard Linux x64 and arm64 runners are 4 CPU / 16 GB. Energy by Cloud Carbon Footprint's Azure coefficients (https://www.cloudcarbonfootprint.org/docs/methodology): 0.78 W per vCPU idle, 3.76 W at 100%, 0.000392 kWh per GB-hour of memory, PUE 1.185 (its PUE section; the appendix table says 1.125), 50% utilisation being its default.
+- **Runner grid.** A US national average, as cited in claude-carbon's METHODOLOGY.md; GitHub does not publish a runner's region.
+- **Runner price.** GitHub's billing page (https://docs.github.com/en/billing/managing-billing-for-your-products/about-billing-for-github-actions): usage is free for public repositories on standard hosted runners; otherwise $0.006 per minute for a 2-core x64 Linux runner, applied to every runner here as a rough floor (arm64 lists $0.005, and the 4-core machines a public repository gets would bill as larger runners).
 - **Copilot credits.** GitHub estimates $0.05–1 of AI credits per review at Lite effort and $0.25–5 at Balanced (https://docs.github.com/en/copilot/code-review); the typed-in figure is the actual bill.
