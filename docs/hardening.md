@@ -2,9 +2,9 @@
 
 [Your first deploy](first-deploy.md) leaves a working box with the
 doors a fresh server has. This page closes them: SSH by key only, the
-SSH port shut to everyone but you, and, if you want one, an
-administrator who is not root. It is recommended, and none of it is
-needed to deploy.
+SSH port shut to everyone but you, and, if you want them, an
+administrator who is not root and Debian's security updates installed
+on their own. It is recommended, and none of it is needed to deploy.
 
 Nothing here changes how the box deploys or takes its config: app
 deploys authenticate with the workflow's token, and config with a
@@ -92,3 +92,54 @@ let the administrator create and edit env files under
 ([Move a hand-made env file in](secrets.md#move-a-hand-made-env-file-in)),
 remove it and its group, as root: `rm /etc/sudoers.d/hotserve-admin &&
 groupdel hotserve-admin`.
+
+## 4. Security updates on their own, if you want them
+
+Debian's `unattended-upgrades` installs Debian's fixes for the box's
+release by itself, once a day. Like step 3 it is optional, and nothing
+in it touches a running app.
+
+What it does: between 06:00 and 07:00 in the box's time zone
+(`systemctl list-timers apt-daily-upgrade.timer` shows the next run)
+it installs what Debian has published for the release the box runs,
+from Debian's security archive and, at a point release, from the
+release itself — and nothing from anywhere else. A daemon whose
+package restarts it on upgrade runs the fix at once: `sshd` is one,
+and open SSH sessions stay up, since the restart takes only the
+listener. Everything started afterwards runs the fixed code: each app
+at its next launch (a deploy, a rollback, a relaunch after a crash),
+each SSH login, and the `ssh-keygen` a push to the box's repository
+runs.
+
+What it does not do: update hotserve, whose `.deb` comes from no
+repository ([Upgrading](upgrading.md) is how); or reach a running app's
+or daemon's already-loaded libraries, which wait for a relaunch, or
+the running kernel, which waits for a reboot, both at a time you
+choose — so an app launched long ago can be behind what the box has,
+and [Patching the host](upgrading.md#patching-the-host) says how to
+give it a launch. It never reboots the box: `Automatic-Reboot` is off
+unless you turn it on, and this page does not.
+
+As root on the box, first see whether it is already on, since a
+provider's image may ship it:
+
+```sh
+apt-config dump APT::Periodic::Unattended-Upgrade    # prints "1": already on, skip the install
+```
+
+If that prints nothing:
+
+```sh
+apt install unattended-upgrades      # turns itself on: writes /etc/apt/apt.conf.d/20auto-upgrades
+```
+
+Either way, check what it would do:
+
+```sh
+apt-config dump Unattended-Upgrade::Origins-Pattern    # three origin=Debian lines, nothing else
+apt-config dump Unattended-Upgrade::Automatic-Reboot   # prints nothing, or "false": no automatic reboot
+unattended-upgrade --dry-run -v    # what the next run would install; "No packages found" on a box that is up to date
+```
+
+Every run, this dry run included, writes what it did to
+`/var/log/unattended-upgrades/unattended-upgrades.log`.

@@ -178,7 +178,8 @@ what it runs.
 
 An app's secrets are commits too, encrypted so that only the box
 and its readers can read them: see [Secrets](#secrets). Hardening the box — SSH by key only, the
-SSH port shut, an optional administrator who is not root — is on
+SSH port shut, and, optionally, an administrator who is not root and
+Debian's security updates installed on their own — is on
 [Hardening the box](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md).
 
 **A repo from an earlier version of this template** — a top-level

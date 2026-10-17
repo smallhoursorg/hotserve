@@ -4,8 +4,9 @@
 is in git. This page has what comes next, running it: changing the
 config, secrets, the way back from an upgrade, day to day, and what to
 do at 3am. [Hardening the box](hardening.md) — SSH by key only, the
-SSH port shut to everyone but you, and, if you want one, an
-administrator who is not root — has a page of its own.
+SSH port shut to everyone but you, and, if you want them, an
+administrator who is not root and Debian's security updates installed
+on their own — has a page of its own.
 
 Names are the ones from the first page.
 
@@ -188,8 +189,10 @@ see during the restart, and how to pick a quiet moment for it.
   for that box's deploy host, and `hotserve init` from it once as root
   on the new box. Every push goes to every box
   ([More than one box](../examples/box/README.md#more-than-one-box)).
-- **Patching the box** (`apt upgrade`, as root) reaches an app only at
-  its next launch; after patching, push a commit to each app or reboot
+- **Patching the box** (`apt upgrade`, as root, or on its own:
+  [Hardening](hardening.md#4-security-updates-on-their-own-if-you-want-them),
+  step 4) reaches an app only at its next launch; after patching, push
+  a commit to each app or reboot
   ([Upgrading](upgrading.md#patching-the-host)).
 - **Everything else:** [liveswap/README.md](../liveswap/README.md) is the
   reference for every option, status code and edge.
