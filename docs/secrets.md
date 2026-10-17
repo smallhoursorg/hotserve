@@ -305,14 +305,26 @@ push.
 
 ## When a value reaches the app
 
-hotserve reads an app's env file each time the app launches: its next
-deploy of a new version, a rollback to another version, or a relaunch
-after a crash or a reboot. A push never restarts a running app, and a
-push of secrets alone reloads nothing. So a value that must change now
-— a leaked key, say — is `make secret`, a push, and then a deploy of a
-new version of the app, which launches it with the new value. Running
-the app's last deploy again does not: the box refuses a deploy, and a
-rollback, to the version that is already running.
+hotserve reads an app's env file each time the app launches: a
+deploy, a rollback, or a relaunch after a crash or a reboot. A push
+never restarts a running app, and a push of secrets alone reloads
+nothing. So a value that must change now — a leaked key, say — is
+`make secret`, a push, and then a launch of the app. The quickest is a
+rollback to the version that is running: in the app's repository,
+Actions → deploy → **Run workflow**, with the running version as the
+version to roll back to. The box relaunches that version from its
+disk through the same health gate and cutover as a deploy, with no
+build and no downtime, and the run's output ends with the app's status,
+whose `last_deploy.note` reads `relaunched <version> (same artifact);
+it reads its env file now`. A deploy of a new version launches it with
+the new value too. Re-running the deploy's own workflow run also
+relaunches it when the tarball it sends is byte for byte the one
+running (the box compares the digests and fetches nothing), but the
+template workflows rebuild the tarball on a re-run and the build
+stamps it with the time, so for them that re-run is refused as a
+different artifact under a version the box already has — use the
+rollback. Either launch is a deploy: the app's in-memory state goes
+with the old instance.
 
 An env file edited or deleted on the box by hand is put back by the
 next push, as a hand edit of the Caddyfile is: the repository is the

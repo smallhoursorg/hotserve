@@ -44,37 +44,7 @@ type downloadOpts struct {
 // Secrets never reach the logs from here: errors carry the URL's host
 // and path only, never its query string or the auth header.
 func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
-	// Every refusal below is a validationError: an unusable URL is the
-	// payload's problem, and 422-with-the-reason is what lets the CI
-	// author fix it without an operator reading server logs.
-	u, err := url.Parse(opts.url)
-	if err != nil {
-		return "", validationError{fmt.Sprintf("invalid artifact url: %v", err)}
-	}
-	switch u.Scheme {
-	case "https":
-	case "http":
-		if !opts.allowInsecure {
-			return "", validationError{fmt.Sprintf("artifact url %s is plain http; use https or set allow_insecure_http", redactURL(u))}
-		}
-	default:
-		return "", validationError{fmt.Sprintf("artifact url %s has unsupported scheme %q", redactURL(u), u.Scheme)}
-	}
-	entry, escapedPath, err := matchAllowlist(opts.allowlist, u)
-	if err != nil {
-		// A validationError so the webhook answers 422 with this exact
-		// message in the body: an allowlist refusal is the payload's
-		// problem, and the CI caller — who chose the URL — is the one
-		// who can fix it (or ask the operator to extend the entry).
-		return "", validationError{fmt.Sprintf("artifact url %s refused: %v", redactURL(u), err)}
-	}
-	// From here on the request's URL is never used directly. The URL
-	// the fetch uses is a single concatenation whose provenance reads
-	// left to right — scheme (constant), host and port (THE ALLOWLIST
-	// ENTRY'S OWN CONFIG BYTES; the request's port is compared, never
-	// emitted), the pinned prefix (config bytes again), and only then
-	// the request's path suffix and vetted query. See pinnedURLString.
-	pinned, err := entry.pinnedURLString(u, escapedPath)
+	pinned, err := pinArtifactURL(opts.url, opts.allowInsecure, opts.allowlist)
 	if err != nil {
 		return "", err
 	}
@@ -133,6 +103,46 @@ func downloadArtifact(ctx context.Context, opts downloadOpts) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// pinArtifactURL is every check a URL deploy's url gets before a byte
+// is fetched — scheme policy, then the allowlist — and the URL the
+// fetch then uses. A relaunch of the running version runs it too
+// (relaunchRefusal, app.go), so a URL the allowlist would refuse is
+// refused whether or not anything is downloaded from it.
+//
+// Every refusal is a validationError: an unusable URL is the payload's
+// problem, and 422-with-the-reason is what lets the CI author fix it
+// without an operator reading server logs.
+func pinArtifactURL(rawURL string, allowInsecure bool, allowlist []artifactAllowEntry) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", validationError{fmt.Sprintf("invalid artifact url: %v", err)}
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if !allowInsecure {
+			return "", validationError{fmt.Sprintf("artifact url %s is plain http; use https or set allow_insecure_http", redactURL(u))}
+		}
+	default:
+		return "", validationError{fmt.Sprintf("artifact url %s has unsupported scheme %q", redactURL(u), u.Scheme)}
+	}
+	entry, escapedPath, err := matchAllowlist(allowlist, u)
+	if err != nil {
+		// A validationError so the webhook answers 422 with this exact
+		// message in the body: an allowlist refusal is the payload's
+		// problem, and the CI caller — who chose the URL — is the one
+		// who can fix it (or ask the operator to extend the entry).
+		return "", validationError{fmt.Sprintf("artifact url %s refused: %v", redactURL(u), err)}
+	}
+	// From here on the request's URL is never used directly. The URL
+	// the fetch uses is a single concatenation whose provenance reads
+	// left to right — scheme (constant), host and port (THE ALLOWLIST
+	// ENTRY'S OWN CONFIG BYTES; the request's port is compared, never
+	// emitted), the pinned prefix (config bytes again), and only then
+	// the request's path suffix and vetted query. See pinnedURLString.
+	return entry.pinnedURLString(u, escapedPath)
 }
 
 // digestMismatch refuses a pinned pull whose body hashed to something

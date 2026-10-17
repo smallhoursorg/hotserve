@@ -348,7 +348,10 @@ func deployRecordPath(dir, version string) string {
 // record write fails (logged, not fatal), or a refusal's cleanup of
 // the release fails (a refusal writes no record) — the old record and
 // its pin stay, and a rollback carries that pin onto bytes it never
-// checked. Closing it means keeping the pin with the release instead.
+// checked; a deploy of the running version is matched against the
+// same pin (relaunchRefusal, app.go) and relaunches the bytes on
+// disk, introducing none. Closing it means keeping the pin with the
+// release instead.
 func recordedPin(d appDirs, version string) string {
 	b, err := readDeployRecord(d, version)
 	if err != nil {
