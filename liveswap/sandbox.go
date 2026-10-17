@@ -35,8 +35,8 @@ import (
 // The filesystem view is deny-by-default. An empty read-only tmpfs
 // replaces the whole root (TemporaryFileSystem=/) and the only things
 // that exist inside a unit are the ones this file names:
-// sandboxBaseView and the app's own release and shared dirs. Nothing
-// widens it. The guarantee is one sentence — anything not named is
+// sandboxBaseView and the app's own release, shared and run/<nonce>
+// dirs. Nothing widens it. The guarantee is one sentence — anything not named is
 // absent — and it holds by construction rather than by a list of
 // things to hide being complete. Nothing has to be derived from the
 // running configuration, and nothing ages: a secret that appears on
@@ -148,8 +148,9 @@ type sandboxSpec struct {
 	// reaching into another's data.
 	root string
 	// writable are this app's own directories bound back at their real
-	// paths, read-write (BindPaths=): the release being started and
-	// the shared dir. Its state.json, its tmp/ (the upload staging dir
+	// paths, read-write (BindPaths=): the release being started, the
+	// shared dir and the instance's own run/<nonce> dir (where it binds
+	// its socket). Its state.json, its tmp/ (the upload staging dir
 	// — a running instance must never be able to rewrite the next
 	// version's tarball) and its other releases are simply not named,
 	// so they do not exist inside the unit.
