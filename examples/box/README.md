@@ -182,18 +182,6 @@ SSH port shut, and, optionally, an administrator who is not root and
 Debian's updates installed on their own — is on
 [Hardening the box](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md).
 
-**A repo from an earlier version of this template** — a top-level
-`Caddyfile` pushed by `make push` — is simplest replaced. Upgrade the
-box to a release that has `hotserve init` first. Then make a new repo
-from this template and take the steps above, starting step 3 from the
-file the box runs; steps 3 and 6 need root on the box over SSH, which
-an earlier version of the hardening steps closed: reopen root's key
-login where you ran the upgrade ([Hardening the box](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md),
-step 1, says how). Then archive the old repo. Its `sudoers` file is
-not needed any more: an app's secrets are commits ([Secrets](#secrets)),
-and once they are, `rm /etc/sudoers.d/hotserve-admin` and `groupdel
-hotserve-admin` as root on the box remove it.
-
 ## Change the config
 
 Edit the Caddyfile, commit (signed), and push to `main`. A pull

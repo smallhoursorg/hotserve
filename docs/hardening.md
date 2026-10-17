@@ -86,14 +86,6 @@ What this grants: `adm` reads the whole system journal, not only
 hotserve's lines, so it is a trust grant in its own right. An app that
 writes a secret to its own output puts it there too.
 
-A box set up from an earlier version of the box template may have
-that template's `sudoers` file at `/etc/sudoers.d/hotserve-admin`, which
-let the administrator create and edit env files under
-`/etc/hotserve`. Once the apps' secrets are in the repository
-([Move a hand-made env file in](secrets.md#move-a-hand-made-env-file-in)),
-remove it and its group, as root: `rm /etc/sudoers.d/hotserve-admin &&
-groupdel hotserve-admin`.
-
 ## 4. Debian's updates on their own, if you want them
 
 Debian's `unattended-upgrades` installs Debian's updates for the box's

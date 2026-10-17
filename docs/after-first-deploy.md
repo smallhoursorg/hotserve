@@ -71,8 +71,6 @@ installed, and the SSH key you sign commits with. GitHub and the
 workflow only ever hold ciphertext, and nothing is typed onto the box.
 
 Once, on the laptop: `brew install age` (Debian: `apt install age`).
-A repository made from an earlier template needs
-[the new commands](secrets.md#from-an-earlier-template) first.
 The first secret also needs the box's key, which root prints:
 
 ```sh
@@ -128,22 +126,16 @@ apply: deploy.example.com at 3c1d0e8: secrets updated; the Caddyfile is unchange
 apply: example reads its secrets at its next launch; a deploy of a new version launches it now
 ```
 
-| To | Run |
-|---|---|
-| Change a value | `make secret APP=example VAR=DATABASE_URL` |
-| See the names, and who can read them | `make secrets` |
-| Read a value back | `make secret-show APP=example VAR=DATABASE_URL` |
-| Remove one | `git rm deploy.example.com/secrets/example/DATABASE_URL.age` |
-| Move an env file you made by hand into the repository | `ssh root@box.example.com cat /etc/hotserve/example.env \| make secrets-import APP=example` (with `BOX_KEY=…` too, if it is the box's first secret) |
-| Let a new signer read them, or move them to a rebuilt box | `make rekey`, or `make rekey BOX_KEY=…` |
-
 Who can read a value: the box, and every key in
 `deploy.example.com/secrets/recipients`, which `make signer` keeps in
 step with the signers. Removing a person stops them reading new
 values, not the ones they could already read, so change those. A Deno
 app also needs `--allow-env=` to name each variable it reads.
-[Secrets](secrets.md) has the rest: a signing key age cannot use, a
-rebuilt box, a lost laptop, who can read what, and what GitHub sees.
+[Secrets](secrets.md) has the rest: [the commands](secrets.md#tasks)
+to see the names, read a value back, remove one, bring in an env file
+made by hand, or let a new signer read them; a signing key age cannot
+use, a rebuilt box, a lost laptop, who can read what, and what GitHub
+sees.
 
 ## 3. Know the way back
 
