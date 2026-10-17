@@ -71,12 +71,15 @@ func TestValidateAdapt(t *testing.T) {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
-	// The lexer splits `{$BIND_ADDRS}` at whitespace and drops the
-	// whitespace around it, so the real adaptation lists each address
-	// alone, never the value whole.
+	// The adapter splices `{$BIND_ADDRS}` into the file before lexing
+	// it, so the real adaptation lists the value's tokens — split at
+	// whitespace, unquoted — never the value whole.
 	for name, value := range map[string]string{
-		"a value of two addresses":          "198.51.100.77 198.51.100.78",
-		"a value with whitespace around it": " 198.51.100.77\t",
+		"a value of two addresses":            "198.51.100.77 198.51.100.78",
+		"a value with whitespace around it":   " 198.51.100.77\t",
+		"a quoted value":                      `"198.51.100.77"`,
+		"a value of two quoted addresses":     `"198.51.100.77" "198.51.100.78"`,
+		"a value of two backticked addresses": "`198.51.100.77` `198.51.100.78`",
 	} {
 		t.Run("a moved door from "+name+", each address filtered", func(t *testing.T) {
 			t.Setenv("BIND_ADDRS", value)

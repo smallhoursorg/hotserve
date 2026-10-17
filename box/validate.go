@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+
 	"github.com/smallhoursorg/hotserve/box/proof"
 	"github.com/smallhoursorg/hotserve/liveswap"
 )
@@ -196,29 +198,34 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived
 
 // doorFilter is the filter a moved door's addresses pass through when
 // a refusal quotes them: validate's — the adapter expands `{$VAR}` into
-// an address from the same environment — primed also with each
-// whitespace-separated field of every value, since the Caddyfile lexer
-// splits a `{$VAR}` at whitespace and drops the whitespace around it:
-// a `bind {$ADDRS}` holding two addresses writes two, and one holding
-// an address with a space after it writes the address, neither of
-// which is the value whole. Built on the refusal path alone, which is
-// rare; validate's own filter is not widened, since its lines quote
-// what the lexer read as one token.
+// an address from the same environment — primed also with every token
+// the Caddyfile lexer reads from each value. The adapter splices a
+// `{$VAR}` into the file's bytes before lexing them, so a `bind
+// {$ADDRS}` writes the value's tokens: split at whitespace, their
+// quotes and backticks removed, their escapes resolved, none of which
+// need be the value whole. The lexer itself says what those are. Built
+// on the refusal path alone, which is rare; validate's own filter is
+// not widened, since its lines quote what the lexer read as one token.
 func (c *childValidator) doorFilter() func(string) string {
-	r := liveswap.NewRedactor(fieldCandidates(secretCandidates(c.env)), nil)
+	r := liveswap.NewRedactor(tokenCandidates(secretCandidates(c.env)), nil)
 	return func(s string) string { s, _ = r.Redact(s); return s }
 }
 
-// fieldCandidates is kvs with a `KEY=field` pair added for each
-// whitespace-separated field of each value (a value that is one field
-// with no whitespace around it adds itself again, which the filter's
-// set absorbs).
-func fieldCandidates(kvs []string) []string {
+// tokenCandidates is kvs with a `KEY=token` pair added for each token
+// the Caddyfile lexer reads from each value (a value that is one plain
+// token adds itself again, which the filter's set absorbs). A value the
+// lexer refuses adds nothing: nothing of it is said, and the adapter
+// refused the file that spliced it in.
+func tokenCandidates(kvs []string) []string {
 	out := slices.Clone(kvs)
 	for _, kv := range kvs {
 		key, value, _ := strings.Cut(kv, "=")
-		for _, f := range strings.Fields(value) {
-			out = append(out, key+"="+f)
+		tokens, err := caddyfile.Tokenize([]byte(value), "")
+		if err != nil {
+			continue
+		}
+		for _, tok := range tokens {
+			out = append(out, key+"="+tok.Text)
 		}
 	}
 	return out
