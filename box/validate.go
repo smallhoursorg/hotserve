@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -178,12 +179,9 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived
 	case out.over():
 		return msgAdaptationTooLarge, nil
 	}
-	// The door's addresses, when quoted, go through the filter
-	// validate's error line goes through: the adapter expands `{$VAR}`
-	// into them from the same environment.
 	var d *door
 	if arrived != nil {
-		d = &door{listen: arrived, redact: func(s string) string { s, _ = c.redactor.Redact(s); return s }}
+		d = &door{listen: arrived, redact: c.doorFilter()}
 	}
 	err = reach(out.b, host, d)
 	var r *refusal
@@ -194,6 +192,34 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived
 		return "", fmt.Errorf("hotserve adapt: %w", err)
 	}
 	return "", nil
+}
+
+// doorFilter is the filter a moved door's addresses pass through when
+// a refusal quotes them: validate's — the adapter expands `{$VAR}` into
+// an address from the same environment — primed also with each
+// whitespace-separated field of every value, since the Caddyfile lexer
+// splits a `{$VAR}` at whitespace, and a `bind {$ADDRS}` holding two
+// addresses writes two, neither of which is the value whole. Built on
+// the refusal path alone, which is rare; validate's own filter is not
+// widened, since its lines quote what the lexer read as one token.
+func (c *childValidator) doorFilter() func(string) string {
+	r := liveswap.NewRedactor(fieldCandidates(secretCandidates(c.env)), nil)
+	return func(s string) string { s, _ = r.Redact(s); return s }
+}
+
+// fieldCandidates is kvs with, for each value of more than one field,
+// a `KEY=field` pair per field added after it.
+func fieldCandidates(kvs []string) []string {
+	out := slices.Clone(kvs)
+	for _, kv := range kvs {
+		key, value, _ := strings.Cut(kv, "=")
+		if fields := strings.Fields(value); len(fields) > 1 {
+			for _, f := range fields {
+				out = append(out, key+"="+f)
+			}
+		}
+	}
+	return out
 }
 
 // exec runs one child in its own process group, bounded by the
