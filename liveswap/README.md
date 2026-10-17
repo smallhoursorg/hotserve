@@ -1218,7 +1218,7 @@ steps:
       "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -er .value)
     echo "::add-mask::$JWT"
     SHA256=$(sha256sum blog.tar.gz | cut -d' ' -f1)
-    curl --fail-with-body --max-time 600 -X POST \
+    curl --fail-with-body --max-time 900 -X POST \
       -H "Authorization: Bearer $JWT" \
       -d '{
         "url": "'"$ASSET_URL"'",
@@ -1291,7 +1291,7 @@ deploy:
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz"
     - |
       SHA256=$(sha256sum blog.tar.gz | cut -d' ' -f1)
-      curl --fail-with-body --max-time 600 -X POST \
+      curl --fail-with-body --max-time 900 -X POST \
         -H "Authorization: Bearer $HOTSERVE_JWT" \
         -d "{
           \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz\",
@@ -1319,6 +1319,15 @@ and on failure the previous version, if there was one, never stopped serving. Th
 status, the last health probe's answer, the last lines the app and
 its `pre_start` wrote (see [Webhook API](#webhook-api)); the whole
 journal stays on the box, `journalctl -t hotserve-blog`.
+
+`--max-time 900` is the budget [Webhook API](#webhook-api) gives, with
+the defaults and a `pre_start`, plus the artifact's transfer: the
+`pre_start`'s `deadline` (5m) + the health gate's `deadline` (5m) +
+one `health_interval` and two `health_timeout`s (9s) + `drain` (5s) +
+`grace` (10s) = 10m24s, which leaves 4m36s for the download. Raise it
+with any of those settings. A curl that gives up before the cutover
+fails the deploy, and the old version keeps serving; one that gives up
+after it turns red a deploy the box completed.
 
 ## Server layout
 
