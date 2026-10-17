@@ -47,12 +47,14 @@ Concept map from the Nomad-era stack:
   unauthenticated callers (unknown apps verify against the global trust
   sources, then 404; a refused token gets the same 401 either way). Its
   timing can, within a bound (DESIGN-threat-model.md, "Webhook
-  endpoint", the residual; owed, #306): a forged token naming an issuer an app's
-  sources trust is refused after a local signature check when the
-  source holds the token's kid, and, when it does not, after a fetch of
-  the issuer's keys that each source makes at most once a minute. A
-  name that does not exist is refused at once, unless the global
-  sources trust that issuer too and pay the same on their own key set.
+  endpoint", the residual; owed, #306): a token is checked against
+  each source a name resolves to in turn, the signature before the
+  issuer, so an OIDC source refuses a forged token after a local
+  signature check when it holds the token's kid, and, when it does
+  not, after a fetch of its issuer's keys that it makes at most once a
+  minute, whatever issuer the token names. A name that does not exist
+  goes to the global sources: it is refused at once when they hold no
+  OIDC source, and otherwise pays the same on their own key sets.
   The fetch window is per app, not shared across apps that trust the
   same issuer. No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`

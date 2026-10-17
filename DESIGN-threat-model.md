@@ -85,13 +85,15 @@ against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so no answer tells a caller which app names
 exist (`Handler.ServeHTTP`, liveswap/handler.go). **Residual: timing
-can** (S3 × O5 × D5 = 75, as #296 scored it; owed, #306). A forged token
-naming an issuer an app's sources trust is refused after a local
-signature check when the source holds the token's kid, and, when it
-does not, after a fetch of the issuer's keys that each source makes at
-most once a minute (`keySet`, liveswap/deploytrust/jwks.go). A name
-that does not exist is refused at once, unless the global sources
-trust that issuer too and pay the same on their own key set. The fetch
+can** (S3 × O5 × D5 = 75, as #296 scored it; owed, #306). A token is
+checked against each source a name resolves to in turn, the signature
+before the issuer, so an OIDC source refuses a forged token after a
+local signature check when it holds the token's kid, and, when it does
+not, after a fetch of its issuer's keys that it makes at most once a
+minute (`keySet`, liveswap/deploytrust/jwks.go), whatever issuer the
+token names. A name that does not exist goes to the global sources: it
+is refused at once when they hold no OIDC source, and otherwise pays
+the same on their own key sets. The fetch
 window is per app, not shared across apps that trust the same issuer:
 each app's sources keep their own key set, so one unknown-kid token per
 app per minute can wait on an issuer round trip that one to a missing
@@ -1025,7 +1027,11 @@ only public material:
   the same key is accepted.
 
 Implementation: `liveswap/deploytrust/` (signatures checked by the
-vetted `go-jose` and claims by `go-oidc`, never hand-rolled; the
+vetted `go-jose`, never hand-rolled; an OIDC token's standard claims by
+`go-oidc`, a local one's by go-jose's `ValidateWithLeeway`; then
+deploytrust's own checks, `localVerifier.verify` requiring a local
+token's `exp` and `iat` and holding it to `max_token_ttl`, and
+`matchClaims` holding either kind to the block's claim allowlist; the
 issuer's key set is fetched and cached by deploytrust's own `keySet`,
 liveswap/deploytrust/jwks.go, which bounds the refetch). Effects on
 the model:
