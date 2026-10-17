@@ -67,15 +67,6 @@ grep -q 'systemctl enable --now hotserve' /tmp/install.out \
 	|| die "a fresh install did not print the 'systemctl enable --now hotserve' hint"
 
 id hotserve >/dev/null || die "postinstall did not create the hotserve user"
-# The package ships no user-manager wrapper and no AppArmor profile:
-# the support matrix is Debian 13, whose kernel does not restrict
-# unprivileged user namespaces, so user@<uid>.service runs stock. A
-# leftover from an older package would mean postinstall's cleanup did
-# not run.
-[ ! -e /usr/libexec/hotserve/user-manager ] \
-	|| die "the retired user-manager wrapper is installed; the package should ship no such path"
-[ ! -e /etc/apparmor.d/hotserve-user-manager ] \
-	|| die "the retired AppArmor profile is installed; postinstall should have removed it"
 # Every packaged file's mode is pinned in nfpm.yaml rather than
 # inherited from the build host's umask; check the one that matters.
 bmode=$(stat -c '%U:%G %a' /usr/bin/hotserve)

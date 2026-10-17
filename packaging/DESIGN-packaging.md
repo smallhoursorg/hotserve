@@ -30,8 +30,6 @@ the scales:
 | Residual | Where stated | S | O | D | Why accepted |
 |---|---|---|---|---|---|
 | `hotserve init` running while `apt install` configures a package whose starter changed, on a box still on the stock starter: postinstall hashes the stock file, init renames the box's file in, and postinstall's rename puts the starter over it | packaging/postinstall.sh (no lock) | 4 | 2 | 3 | 24, kept by rule 4: closing it means postinstall taking the box's lock (size 3, risk 3) for two root acts at the same moment, and a lock it waits on would let a long apply hold dpkg |
-| A box installed from a release without the conffile, taken back to a release with it (v0.3.1-rc1 or earlier), gets dpkg's question about the Caddyfile; Y replaces the box's file with the starter | — | 4 | 2 | 1 | 8; off the documented way back (the `.deb` you upgraded from), then Y against the default; the prompt names the file and the choice |
-| A box still on a starter from a release with the conffile keeps it: no record names it, so upgrades leave it alone | packaging/postinstall.sh | 2 | 1 | 5 | 10; the safe direction. `cp /usr/share/hotserve/Caddyfile /etc/hotserve/` then `dpkg-reconfigure hotserve` makes it stock: postinstall records the starter only when it runs on the release whose starter is on disk, so the `cp` alone leaves the next release's upgrade nothing to match |
 | A push that installs bytes identical to the starter postinstall last wrote is replaced by the next starter | packaging/postinstall.sh | 2 | 1 | 3 | 6; a starter has no `box` block, so no push reaches such a box anyway |
 | `apt purge` finds something mounted at or under `/var/lib/hotserve-box`, by either its literal or its physical path (or cannot read `/proc/self/mountinfo`, resolve the path, or finish the scan, or the physical path holds a space, tab, newline or backslash, which the table escapes): the exchange tree is kept whole, so a purge and a reinstall come up on the old `applied.json` and record | packaging/postremove.sh (`mounted`) | 2 | 1 | 1 | 2; root's own mount in a directory the package owns; named on stderr with the remedy (unmount, then remove); the alternative, an rm through the mount, would remove what is not the package's |
 | `apt purge` finds a symlink, or anything but a regular file, at `/etc/hotserve/Caddyfile`: kept, so a reinstall comes up on what it points to | packaging/postremove.sh | 2 | 5 | 1 | 10; an operator's own path (not a fault, so occurrence 5 and detection carries it): named on stderr, and postinstall leaves a symlink alone too, so the box comes up on the file the operator chose |
@@ -65,3 +63,7 @@ Dated one-liners; the full text of each is in git.
   back. Three residuals of that script accepted; the key kept on
   purpose. The
   `backup` branch folds its timers' handling into the same file.
+- 2026-10-17 — No box from before v0.3.1 exists but the owner's, which
+  runs v0.3.1: postinstall stops removing the AppArmor profile packages
+  before the Debian-13-only matrix left, and the two residuals of
+  taking a box to or from a release with the starter as a conffile go.

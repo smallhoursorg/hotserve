@@ -104,25 +104,13 @@ else
 	echo "hotserve: could not read $starter; $config is left as it is" >&2
 fi
 # The box's key for secrets (box/DESIGN-box.md, "The box's key"), made
-# once and never replaced, so that a box upgraded from a release without
-# secrets has one with no step. Only on a running system: an image built
-# without systemd as PID 1 would otherwise bake one key into every box
-# made from it. A failure never fails the install; init, or the
-# console, makes it later.
+# once and never replaced, so that a box has one with no step. Only on
+# a running system: an image built without systemd as PID 1 would
+# otherwise bake one key into every box made from it. A failure never
+# fails the install; init, or the console, makes it later.
 if [ -d /run/systemd/system ]; then
 	/usr/bin/hotserve box key >/dev/null 2>&1 \
 		|| echo "hotserve: could not make the box's key for secrets; run hotserve box key as root" >&2
-fi
-# Packages before the Debian-13-only matrix copied an AppArmor profile
-# into /etc/apparmor.d (which the package itself does not own, so dpkg
-# will not remove it on upgrade). Unload and delete it: apparmor.service
-# parses that whole directory at every boot, and the wrapper it attached
-# to is gone.
-if [ -f /etc/apparmor.d/hotserve-user-manager ]; then
-	if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
-		apparmor_parser -R /etc/apparmor.d/hotserve-user-manager 2>/dev/null || true
-	fi
-	rm -f /etc/apparmor.d/hotserve-user-manager
 fi
 if command -v systemctl >/dev/null 2>&1; then
 	# liveswap runs deployed apps as transient units under the hotserve
