@@ -97,7 +97,7 @@ groupdel hotserve-admin`.
 
 Debian's `unattended-upgrades` installs Debian's fixes for the box's
 release by itself, once a day. Like step 3 it is optional, and nothing
-in it touches a running app.
+in it stops or restarts an app.
 
 What it does: between 06:00 and 07:00 in the box's time zone
 (`systemctl list-timers apt-daily-upgrade.timer` shows the next run)
@@ -112,10 +112,11 @@ each SSH login, and the `ssh-keygen` a push to the box's repository
 runs.
 
 What it does not do: update hotserve, whose `.deb` comes from no
-repository ([Upgrading](upgrading.md) is how); or reach a running app's
-or daemon's already-loaded libraries, which wait for a relaunch, or
-the running kernel, which waits for a reboot, both at a time you
-choose — so an app launched long ago can be behind what the box has,
+repository ([Upgrading](upgrading.md) is how); or reach what a running
+app or daemon has already loaded — apps run on the box's own `/usr`,
+so only a file one first reads afterwards is the new one — which waits
+for a relaunch, or the running kernel, which waits for a reboot, both
+at a time you choose — so an app launched long ago can be behind what the box has,
 and [Patching the host](upgrading.md#patching-the-host) says how to
 give it a launch. It never reboots the box: `Automatic-Reboot` is off
 unless you turn it on, and this page does not.
