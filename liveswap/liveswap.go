@@ -339,9 +339,12 @@ func (a *App) Provision(ctx caddy.Context) error {
 		a.pooled = append(a.pooled, poolKey(name))
 	}
 	// Warm OIDC discovery in the background so the first verification of a
-	// known app is not slower (by JWKS-fetch latency) than an unknown one.
-	// The objects warmed here are the ones Start installs (appVerifiers):
-	// resolving again at Start would hand the handler a cold set.
+	// known app does not pay the discovery round trip an unknown one
+	// would not. Warm leaves each key set empty, so the first token after
+	// a reload still waits on a key fetch (DESIGN-threat-model.md's
+	// timing residual). The objects warmed here are the ones Start
+	// installs (appVerifiers): resolving again at Start would hand the
+	// handler a cold set.
 	a.appVerifiers = make(map[string][]deploytrust.Verifier, len(specs))
 	sets := [][]deploytrust.Verifier{a.globalVerifiers}
 	for name, spec := range specs {

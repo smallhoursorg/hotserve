@@ -41,6 +41,25 @@ func TestDeployTokenWarnsOverAnHour(t *testing.T) {
 	}
 }
 
+// The lifetime a token encodes, exp - iat in whole seconds, is --ttl
+// rounded down, never up, however fractional the mint time: so a
+// token minted with --ttl equal to a box's fractional max_token_ttl
+// verifies there, and a whole-second --ttl keeps its whole lifetime.
+func TestDeployTokenLifetimeRoundsDown(t *testing.T) {
+	at := time.Unix(1_700_000_000, 750_000_000) // a mint at .750 s
+	for ttl, want := range map[time.Duration]int64{
+		1500 * time.Millisecond: 1,
+		1400 * time.Millisecond: 1,
+		time.Second:             1,
+		5 * time.Minute:         300,
+	} {
+		iat, exp := tokenTimes(at, ttl)
+		if got := int64(*exp) - int64(*iat); got != want {
+			t.Errorf("--ttl %v minted at .750 s encodes %d s, want %d", ttl, got, want)
+		}
+	}
+}
+
 func TestWriteNewFileRefusesOverwrite(t *testing.T) {
 	path := t.TempDir() + "/deploy.key"
 	if err := writeNewFile(path, []byte("first"), 0o600); err != nil {

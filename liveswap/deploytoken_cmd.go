@@ -141,7 +141,8 @@ func cmdDeployToken(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
-	now, ttl := time.Now(), fl.Duration("ttl")
+	ttl := fl.Duration("ttl")
+	iat, exp := tokenTimes(time.Now(), ttl)
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
 		return caddy1, err
@@ -151,8 +152,8 @@ func cmdDeployToken(fl caddycmd.Flags) (int, error) {
 	// combined here.
 	payload := map[string]any{
 		"aud": audience,
-		"iat": jwt.NewNumericDate(now),
-		"exp": jwt.NewNumericDate(now.Add(ttl)),
+		"iat": iat,
+		"exp": exp,
 		"jti": hex.EncodeToString(jti),
 	}
 	if sub := fl.String("subject"); sub != "" {
@@ -170,6 +171,16 @@ func cmdDeployToken(fl caddycmd.Flags) (int, error) {
 	}
 	fmt.Println(token)
 	return 0, nil
+}
+
+// tokenTimes is the iat and exp of a token minted at now to live ttl.
+// A NumericDate keeps whole seconds, truncating each, so now is
+// truncated first: exp - iat is then ttl rounded down, never up, and a
+// --ttl equal to a box's max_token_ttl verifies however fractional
+// either is.
+func tokenTimes(now time.Time, ttl time.Duration) (iat, exp *jwt.NumericDate) {
+	now = now.Truncate(time.Second)
+	return jwt.NewNumericDate(now), jwt.NewNumericDate(now.Add(ttl))
 }
 
 // warnTTL is the --ttl above which deploy-token warns. A box's bound
