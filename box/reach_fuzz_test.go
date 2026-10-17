@@ -58,8 +58,8 @@ func FuzzReach(f *testing.F) {
 		if door != "" {
 			d = strings.Split(door, " ")
 		}
-		first := reach(adapted, host, doorOf(d))
-		again := reach(adapted, host, doorOf(d))
+		first := reach(adapted, host, d)
+		again := reach(adapted, host, d)
 		if (first == nil) != (again == nil) || (first != nil && first.Error() != again.Error()) {
 			t.Fatalf("two answers: %v then %v", first, again)
 		}
@@ -75,7 +75,7 @@ func FuzzReach(f *testing.F) {
 // connection policy and what it does), or what stands in the way of the
 // request (a module name, an earlier site, a terminal route) and one of
 // the four verbs.
-var catalogueReach = regexp.MustCompile(`^(this push changes where the box's server listens \(.+ → .+\): a push cannot move the address it arrives on; make that change at the console|` +
+var catalogueReach = regexp.MustCompile(`^(` + regexp.QuoteMeta(msgListenMoved) + `|` +
 	`the new Caddyfile does not reach box_webhook on /: (` +
 	`a listener's protocols include neither h1 nor h2|` +
 	`the .+ listener wrapper may refuse the connection|` +

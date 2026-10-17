@@ -407,7 +407,7 @@ sed 's/^\thttps_port 8443$/\thttps_port 9443/' "$work/f2" >"$work/fmoved"
 grep -q 'https_port 9443' "$work/fmoved" || fail "the moved file was not made"
 MV=$(commit alice "$work/fmoved")
 push "$MV"
-refused "a file that moves the box's server" "this push changes where the box's server listens (:8443 → :9443): a push cannot move the address it arrives on; make that change at the console"
+refused "a file that moves the box's server" "this push changes where the box's server listens (its listen addresses differ from the loaded config's): a push cannot move the address it arrives on; make that change at the console"
 
 echo "=== box apply 4: a config that validates but does not load is rolled back ==="
 # Validation binds no listener; loading does, and 192.0.2.1 (TEST-NET-1)

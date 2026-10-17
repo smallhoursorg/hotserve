@@ -14,7 +14,6 @@ package box
 // match, and one they do not know may fail.
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -127,24 +126,16 @@ func routeList(v any) ([]adaptedRoute, error) {
 	return routes, nil
 }
 
-// door is where the loaded server the push arrived through listens,
-// with the text of the Caddyfile this box runs, which is what a refusal
-// may quote of those addresses, and the pushed file's text, the same
-// for the new list's (said). nil text quotes no host.
-type door struct {
-	listen          []string
-	running, pushed []byte
-}
-
 // reach asks the question of adapted for host, the box_webhook host
-// the walk found, and d, the door — nil when no Caddy server received
-// the push (a test), and the door is not compared. nil: the door is
-// kept and both requests meet box_webhook first. A *refusal: the
+// the walk found, and door, the listen addresses of the loaded server
+// the push arrived through — nil when no Caddy server received it (a
+// test), and the door is not compared. nil: the door is kept and both
+// requests meet box_webhook first. A *refusal: the
 // catalogue text naming what stands in the way. Any other error is
 // the box's own: an adaptation this code cannot read, or one with no
 // box_webhook routed for the host, which the walk of the same bytes
 // rules out.
-func reach(adapted []byte, host string, d *door) error {
+func reach(adapted []byte, host string, door []string) error {
 	var cfg any
 	if json.Unmarshal(adapted, &cfg) != nil {
 		return errAdaptation
@@ -164,13 +155,13 @@ func reach(adapted []byte, host string, d *door) error {
 		// The door first: the push arrived through the loaded server's
 		// addresses, which are thereby proven to work; a file that
 		// moves them is the console's to apply ("The door").
-		if d != nil {
+		if door != nil {
 			listen, err := listenOf(servers[name])
 			if err != nil {
 				return err
 			}
-			if from, to := canonical(d.listen), canonical(listen); !slices.Equal(from, to) {
-				return &refusal{msg: msgListenMoved(from, to, d.running, d.pushed)}
+			if !slices.Equal(canonical(door), canonical(listen)) {
+				return &refusal{msg: msgListenMoved}
 			}
 		}
 		// The connection next: what refuses it stands before every
@@ -211,51 +202,11 @@ func dig(v any, keys ...string) any {
 }
 
 // msgListenMoved is the catalogue text for a push that moves the box
-// server's listen addresses: from the loaded server's, quoted from
-// running, to the new file's, quoted from pushed; each list canonical.
-func msgListenMoved(from, to []string, running, pushed []byte) string {
-	return "this push changes where the box's server listens (" + quoted(from, running) + " → " + quoted(to, pushed) +
-		"): a push cannot move the address it arrives on; make that change at the console"
-}
-
-// msgUnwritten stands in the refusal for an address text does not
-// have: one the adapter expanded from `{$VAR}`, or App.Provision from
-// `{env.*}`, which is the environment's to keep.
-const msgUnwritten = "an address not written in the file"
-
-// quoted is a canonical list as the refusal prints it: each address
-// said in text as it is, any other as msgUnwritten, the whole bounded;
-// "no address" for none (a server with no listener, which receives
-// nothing and which the adapter never writes; the text still has to
-// read).
-func quoted(list []string, text []byte) string {
-	if len(list) == 0 {
-		return "no address"
-	}
-	out := make([]string, 0, len(list))
-	for _, addr := range list {
-		if !said(addr, text) {
-			addr = msgUnwritten
-		}
-		out = append(out, addr)
-	}
-	return proof.Bound(strings.Join(out, ", "))
-}
-
-// said reports whether addr may be quoted from text: what of it could
-// carry a value — its host, as Caddy's address grammar reads it, or
-// the whole when the grammar does not read it — is written there. A
-// network and a port are the grammar's own words. What the file says
-// its signer knows; what the environment put there is quoted nowhere,
-// as validate's output has it (the redactor), and here there is
-// nothing to filter.
-func said(addr string, text []byte) bool {
-	na, err := caddy.ParseNetworkAddress(addr)
-	if err != nil {
-		return bytes.Contains(text, []byte(addr))
-	}
-	return na.Host == "" || bytes.Contains(text, []byte(na.Host))
-}
+// server's listen addresses. It names no address: an address may hold
+// a value the adapter expanded from the service's environment, and
+// the signer has the file's diff.
+const msgListenMoved = "this push changes where the box's server listens (its listen addresses differ from the loaded config's): " +
+	"a push cannot move the address it arrives on; make that change at the console"
 
 // listenOf is a server's `listen` list as Caddy keeps it once loaded:
 // each address with its placeholders replaced by the global replacer
