@@ -436,8 +436,8 @@ backwards edges reappearing *despite* this table.
   bind once per instance. The unit removes its own
   socket when it stops (`ExecStopPost=`); a confirmed sweep prunes any
   left behind, but never through a link: if the app dir, `run/` or
-  `proxy/` is one (`<root>/blog -> shop`), the sweep logs it and
-  prunes nothing. The health probe is `GET <health_path>` with
+  `proxy/` is one (`<root>/blog -> shop`), or cannot be checked for
+  one, the sweep logs it and prunes nothing. The health probe is `GET <health_path>` with
   `Host: localhost`.
 - `Authorization` is dropped by Go's HTTP client on cross-host
   redirects — exactly right for GitHub's asset→S3 redirect.

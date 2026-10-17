@@ -1,6 +1,8 @@
 package liveswap
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -75,19 +77,26 @@ func (d appDirs) release(version string) string {
 }
 
 // linkAt returns the first of the app dir and dirs (its fixed subdirs)
-// that is a link, dangling or not, or "" when none is. An app name is
-// one path element, so these are the only two levels below the root:
-// with a link at neither, the path reaches the directory it names
-// through whatever alias the root itself is — recordsDir's rule, read
-// off Lstat rather than by resolving, so a dangling link cannot pass
-// as the name it stands in for.
-func (d appDirs) linkAt(dirs ...string) string {
+// that is a link, dangling or not, or that could not be checked for
+// one, with the error then; "" when each is a directory or absent. An
+// app name is one path element, so these are the only two levels
+// below the root: with a link at neither, the path reaches the
+// directory it names through whatever alias the root itself is —
+// recordsDir's rule, read off Lstat rather than by resolving, so a
+// dangling link cannot pass as the name it stands in for.
+func (d appDirs) linkAt(dirs ...string) (string, error) {
 	for _, p := range append([]string{d.app}, dirs...) {
-		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return p
+		fi, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// absent: nothing to follow
+		case err != nil:
+			return p, err
+		case fi.Mode()&os.ModeSymlink != 0:
+			return p, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func (d appDirs) ensure() error {

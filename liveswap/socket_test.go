@@ -92,10 +92,27 @@ func TestPruneSocketsDoesNotFollowALink(t *testing.T) {
 				}
 			}
 			got := logs.All()
-			if len(got) != 1 || got[0].ContextMap()["link"] != want || got[0].ContextMap()["app_dir"] != filepath.Join(root, "blog") {
+			if len(got) != 1 || got[0].ContextMap()["path"] != want || got[0].ContextMap()["app_dir"] != filepath.Join(root, "blog") {
 				t.Errorf("want one warning naming the link %s and the app dir, got %v", want, got)
 			}
 		})
+	}
+}
+
+// A dir that cannot be checked for a link fails closed: the reads
+// after a failed Lstat could succeed through the link it missed, so
+// the prune is skipped with a warning naming the path and the error.
+// A transient EIO cannot be made on demand; ENOTDIR (a file where the
+// app dir should be, so Lstat of its run/ fails) takes the same branch.
+func TestPruneSocketsSkipsWhatItCannotCheck(t *testing.T) {
+	root := t.TempDir()
+	blog := newAppDirs(root, "blog")
+	must(t, os.WriteFile(blog.app, nil, 0o600))
+	core, logs := observer.New(zap.WarnLevel)
+	pruneSockets(blog, nil, zap.New(core))
+	got := logs.All()
+	if len(got) != 1 || got[0].ContextMap()["path"] != blog.run || got[0].ContextMap()["error"] == nil {
+		t.Errorf("want one warning naming %s and the error, got %v", blog.run, got)
 	}
 }
 

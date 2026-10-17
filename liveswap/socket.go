@@ -147,7 +147,9 @@ var ownerLocks sync.Map // app name → *sync.Mutex; one per name ever seen
 // one — `<root>/blog -> shop`, `blog/proxy -> ../shop/proxy` — what
 // is under it is not this app's to judge stale: blog's prune would
 // remove shop's live socket and pin. One warning names the link, and
-// the prune is skipped. Launch refuses a linked app dir or run/ for
+// the prune is skipped; so it is when one of them cannot be checked
+// for a link (EIO), since the reads after it may succeed through the
+// link the check missed. Launch refuses a linked app dir or run/ for
 // its own reason (resolveBindSources); proxy/ is no bind source, so a
 // linked proxy/ launches, and this check is what keeps its prune off
 // the sibling's pins. The pathname is checked and then used: a link
@@ -155,8 +157,12 @@ var ownerLocks sync.Map // app name → *sync.Mutex; one per name ever seen
 // can write only the hotserve uid could do, and it could remove the
 // socket itself.
 func pruneSockets(d appDirs, keep []string, logger *zap.Logger) {
-	if link := d.linkAt(d.run, d.proxy); link != "" {
-		logger.Warn("not pruning instance sockets: a link under the liveswap root is not followed", zap.String("app_dir", d.app), zap.String("link", link))
+	if p, err := d.linkAt(d.run, d.proxy); p != "" {
+		msg := "not pruning instance sockets: a link under the liveswap root is not followed"
+		if err != nil {
+			msg = "not pruning instance sockets: cannot check for a link under the liveswap root"
+		}
+		logger.Warn(msg, zap.String("app_dir", d.app), zap.String("path", p), zap.Error(err))
 		return
 	}
 	kept := map[string]bool{}
