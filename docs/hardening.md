@@ -99,8 +99,9 @@ Debian's `unattended-upgrades` installs Debian's fixes for the box's
 release by itself, once a day. Like step 3 it is optional, and nothing
 in it stops or restarts an app.
 
-What it does: between 06:00 and 07:00 in the box's time zone
-(`systemctl list-timers apt-daily-upgrade.timer` shows the next run)
+What it does: normally between 06:00 and 07:00 in the box's time zone
+(`systemctl list-timers apt-daily-upgrade.timer` shows the next run;
+a run the box was off for happens after it boots)
 it installs what Debian has published for the release the box runs,
 from Debian's security archive and, at a point release, from the
 release itself — and nothing from anywhere else. A daemon whose
