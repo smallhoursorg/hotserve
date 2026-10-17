@@ -175,8 +175,10 @@ type AppConfig struct {
 	HealthTimeout caddy.Duration `json:"health_timeout,omitempty"`
 
 	// Soak is how long the new instance must be continuously healthy
-	// before traffic cuts over. Default 15s.
-	Soak caddy.Duration `json:"soak,omitempty"`
+	// before traffic cuts over. 0 is no soak: traffic cuts over on the
+	// first healthy probe. A pointer, as DeployLogLines, so that 0 stays
+	// apart from unset. Default 15s.
+	Soak *caddy.Duration `json:"soak,omitempty"`
 
 	// Deadline bounds the whole health gate (and pre_start); a version
 	// that cannot get healthy within it is stopped and the deploy
@@ -402,8 +404,9 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	if cfg.HealthTimeout == 0 {
 		cfg.HealthTimeout = caddy.Duration(2 * time.Second)
 	}
-	if cfg.Soak == 0 {
-		cfg.Soak = caddy.Duration(15 * time.Second)
+	if cfg.Soak == nil {
+		d := caddy.Duration(15 * time.Second)
+		cfg.Soak = &d
 	}
 	if cfg.Deadline == 0 {
 		cfg.Deadline = caddy.Duration(5 * time.Minute)
@@ -470,7 +473,7 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		healthPath:         healthPath,
 		healthInterval:     time.Duration(cfg.HealthInterval),
 		healthTimeout:      time.Duration(cfg.HealthTimeout),
-		soak:               time.Duration(cfg.Soak),
+		soak:               time.Duration(*cfg.Soak),
 		deadline:           time.Duration(cfg.Deadline),
 		drain:              time.Duration(cfg.Drain),
 		grace:              time.Duration(cfg.Grace),
@@ -543,7 +546,13 @@ func (a *App) Validate() error {
 				return fmt.Errorf("app %s: %s must be positive, got %v", name, field, time.Duration(d))
 			}
 		}
-		if cfg.Soak < 0 || cfg.Drain < 0 {
+		// Provision has set Soak by now; a config validated without
+		// its defaults has none, which bounds nothing.
+		var soak caddy.Duration
+		if cfg.Soak != nil {
+			soak = *cfg.Soak
+		}
+		if soak < 0 || cfg.Drain < 0 {
 			return fmt.Errorf("app %s: soak and drain must not be negative", name)
 		}
 		// The deadline bounds the whole gate, soak included: a soak
@@ -551,8 +560,8 @@ func (a *App) Validate() error {
 		// Equal is allowed — the gate judges the soak on the tick at
 		// the deadline — so a config that loaded before this check
 		// and could deploy still does.
-		if cfg.Soak > cfg.Deadline {
-			return fmt.Errorf("app %s: soak (%v) must not exceed deadline (%v), which bounds the whole health gate including the soak", name, time.Duration(cfg.Soak), time.Duration(cfg.Deadline))
+		if soak > cfg.Deadline {
+			return fmt.Errorf("app %s: soak (%v) must not exceed deadline (%v), which bounds the whole health gate including the soak", name, time.Duration(soak), time.Duration(cfg.Deadline))
 		}
 		if cfg.Watchdog != "on" && cfg.Watchdog != "off" {
 			return fmt.Errorf("app %s: watchdog must be \"on\" or \"off\", got %q", name, cfg.Watchdog)

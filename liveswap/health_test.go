@@ -66,6 +66,34 @@ func TestProberPassesAfterSoak(t *testing.T) {
 	}
 }
 
+// soak 0 removes the soak, not the check: the gate passes on the
+// first healthy probe, with no time on the clock, and an unhealthy
+// probe before it is still waited out.
+func TestProberSoakZeroPassesOnTheFirstHealthyProbe(t *testing.T) {
+	var probes atomic.Int32
+	sock := unixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if probes.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	clk := newFakeClock()
+	p := &httpProber{clock: clk}
+	hc := testHealthConfig()
+	hc.soak = 0
+	start := clk.Now()
+	if err := p.waitHealthy(context.Background(), testSocketRef(t, sock), alwaysAlive, hc); err != nil {
+		t.Fatalf("waitHealthy: %v", err)
+	}
+	if n := probes.Load(); n != 2 {
+		t.Fatalf("probes = %d, want 2: the failing one, then the first healthy one", n)
+	}
+	if elapsed := clk.Now().Sub(start); elapsed != hc.interval {
+		t.Fatalf("elapsed %v, want one interval (%v): nothing after the healthy probe", elapsed, hc.interval)
+	}
+}
+
 func TestProberFlappingResetsSoak(t *testing.T) {
 	// Healthy, healthy, unhealthy, then healthy forever: the flap must
 	// restart the soak window.

@@ -42,7 +42,10 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 
 // UnmarshalCaddyfile parses the global options block. No defaults are
 // applied here — Provision owns every default — so an empty block is
-// valid and zero values pass through.
+// valid. Provision reads a zero field as unset, so an explicit value
+// below an option's minimum, 0 included, is refused here, naming both
+// (parseDurationArg, parseCountArg); soak and deploy_log_lines, whose 0
+// is a setting, are pointers.
 //
 //	liveswap {
 //	    root                   <path>
@@ -205,27 +208,29 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			}
 			cfg.HealthPath = d.Val()
 		case "health_interval":
-			if err := parseDurationArg(d, &cfg.HealthInterval); err != nil {
+			if err := parseDurationArg(d, &cfg.HealthInterval, false); err != nil {
 				return err
 			}
 		case "health_timeout":
-			if err := parseDurationArg(d, &cfg.HealthTimeout); err != nil {
+			if err := parseDurationArg(d, &cfg.HealthTimeout, false); err != nil {
 				return err
 			}
 		case "soak":
-			if err := parseDurationArg(d, &cfg.Soak); err != nil {
+			var soak caddy.Duration
+			if err := parseDurationArg(d, &soak, true); err != nil {
 				return err
 			}
+			cfg.Soak = &soak
 		case "deadline":
-			if err := parseDurationArg(d, &cfg.Deadline); err != nil {
+			if err := parseDurationArg(d, &cfg.Deadline, false); err != nil {
 				return err
 			}
 		case "drain":
-			if err := parseDurationArg(d, &cfg.Drain); err != nil {
+			if err := parseDurationArg(d, &cfg.Drain, false); err != nil {
 				return err
 			}
 		case "grace":
-			if err := parseDurationArg(d, &cfg.Grace); err != nil {
+			if err := parseDurationArg(d, &cfg.Grace, false); err != nil {
 				return err
 			}
 		case "watchdog":
@@ -234,36 +239,31 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			}
 			cfg.Watchdog = d.Val()
 		case "watchdog_failures":
-			if err := parseCountArg(d, &cfg.WatchdogFailures); err != nil {
+			if err := parseCountArg(d, &cfg.WatchdogFailures, 1); err != nil {
 				return err
 			}
 		case "watchdog_grace":
-			if err := parseDurationArg(d, &cfg.WatchdogGrace); err != nil {
+			if err := parseDurationArg(d, &cfg.WatchdogGrace, false); err != nil {
 				return err
 			}
 		case "watchdog_restarts":
-			if err := parseCountArg(d, &cfg.WatchdogRestarts); err != nil {
+			if err := parseCountArg(d, &cfg.WatchdogRestarts, 1); err != nil {
 				return err
 			}
 		case "watchdog_window":
-			if err := parseDurationArg(d, &cfg.WatchdogWindow); err != nil {
+			if err := parseDurationArg(d, &cfg.WatchdogWindow, false); err != nil {
 				return err
 			}
 		case "deploy_log_lines":
 			var n int
-			if err := parseCountArg(d, &n); err != nil {
+			if err := parseCountArg(d, &n, 0); err != nil {
 				return err
 			}
 			cfg.DeployLogLines = &n
 		case "keep":
-			if !d.NextArg() {
-				return d.ArgErr()
+			if err := parseCountArg(d, &cfg.Keep, 1); err != nil {
+				return err
 			}
-			n, err := strconv.Atoi(d.Val())
-			if err != nil {
-				return d.Errf("invalid keep %q: %v", d.Val(), err)
-			}
-			cfg.Keep = n
 		case "max_artifact_size":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -275,9 +275,12 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if size > math.MaxInt64 {
 				return d.Errf("max_artifact_size %q overflows", d.Val())
 			}
+			if size == 0 {
+				return d.Errf("max_artifact_size must be at least 1 byte, got %s; leave it out for the default", d.Val())
+			}
 			cfg.MaxArtifactSize = int64(size)
 		case "max_artifact_entries":
-			if err := parseCountArg(d, &cfg.MaxArtifactEntries); err != nil {
+			if err := parseCountArg(d, &cfg.MaxArtifactEntries, 1); err != nil {
 				return err
 			}
 		default:
@@ -290,7 +293,11 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-func parseCountArg(d *caddyfile.Dispenser, out *int) error {
+// parseCountArg reads one integer and refuses one below least, naming
+// the option and its minimum. least is 1 wherever Provision reads 0 as
+// unset, since an explicit 0 there would become the default without a
+// word; it is 0 for deploy_log_lines, whose 0 is a setting.
+func parseCountArg(d *caddyfile.Dispenser, out *int, least int) error {
 	name := d.Val()
 	if !d.NextArg() {
 		return d.ArgErr()
@@ -299,11 +306,19 @@ func parseCountArg(d *caddyfile.Dispenser, out *int) error {
 	if err != nil {
 		return d.Errf("invalid %s %q: %v", name, d.Val(), err)
 	}
+	if n < least {
+		return d.Errf("%s must be at least %d, got %d; leave it out for the default", name, least, n)
+	}
 	*out = n
 	return nil
 }
 
-func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration) error {
+// parseDurationArg reads one duration and refuses one below the
+// option's minimum, naming both: more than 0, since Provision reads a
+// zero duration as unset and an explicit 0 would become the default
+// without a word, or 0 itself where 0 is a setting (zeroIsSetting:
+// soak's "no soak").
+func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration, zeroIsSetting bool) error {
 	name := d.Val()
 	if !d.NextArg() {
 		return d.ArgErr()
@@ -311,6 +326,12 @@ func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration) error {
 	dur, err := caddy.ParseDuration(d.Val())
 	if err != nil {
 		return d.Errf("invalid %s %q: %v", name, d.Val(), err)
+	}
+	switch {
+	case zeroIsSetting && dur < 0:
+		return d.Errf("%s must be 0 or more, got %s", name, d.Val())
+	case !zeroIsSetting && dur <= 0:
+		return d.Errf("%s must be more than 0, got %s; leave it out for the default", name, d.Val())
 	}
 	*out = caddy.Duration(dur)
 	return nil

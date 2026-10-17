@@ -274,7 +274,7 @@ resolved at config load.
 | `env`, `env_file` | — | Extra environment |
 | `health_path` | `/health` | 2xx = healthy; `off` = process-liveness only |
 | `health_interval` / `health_timeout` | `5s` / `2s` | Probe cadence |
-| `soak` | `15s` | Continuous health required before cutover |
+| `soak` | `15s` | Continuous health required before cutover. `0` is no soak: traffic moves on the first healthy probe (with `health_path off`, as soon as the process is up) |
 | `deadline` | `5m` | Bound on pre_start and, separately, on the health gate (soak included, so `soak` cannot exceed it). The gate is judged once per `health_interval`, so it can run over by one interval plus two `health_timeout`s (the probe before the last tick and the one on it); a soak that falls due on that first tick past the deadline still passes |
 | `drain` | `5s` | In-flight grace after cutover, before SIGTERM |
 | `grace` | `10s` | SIGTERM → SIGKILL window |
@@ -287,6 +287,11 @@ resolved at config load.
 | `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
+
+Every duration, count and size above must be more than `0`, except `soak`
+and `deploy_log_lines`, where `0` is a setting. A `0` elsewhere is
+refused when the config loads, naming the option and its minimum;
+leave an option out to get its default.
 
 Both caps are cliffs an app can grow into, so each successful deploy
 logs the artifact's entry count and decompressed size and, past **75%**

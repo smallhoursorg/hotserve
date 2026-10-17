@@ -138,8 +138,9 @@ Concept map from the Nomad-era stack:
 - `pre_start` (if configured) MUST run to completion in the release dir
   before the new instance starts; non-zero exit aborts the deploy.
 - The new instance MUST be continuously healthy for `soak` before any
-  traffic moves, and MUST be stopped and the deploy failed if not
-  healthy within `deadline`. A flapping health check resets the soak.
+  traffic moves (`soak 0`: the first healthy probe), and MUST be
+  stopped and the deploy failed if not healthy within `deadline`. A
+  flapping health check resets the soak.
 - Any failure before the promote step MUST leave the old version
   serving, untouched. The webhook response MUST be synchronous and MUST
   be a 5xx on failure (CI turns red; `curl --fail-with-body`).
@@ -394,7 +395,7 @@ backwards edges reappearing *despite* this table.
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
 | `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
 | `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed at the name, no FIFO held, size-bounded — shared by the deploy records and `state.json` |
-| `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them |
+| `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them, reading a zero field as unset, so a value below an option's minimum (0 included) is refused here, named; `soak` and `deploy_log_lines`, whose 0 is a setting, are pointers |
 | `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
 | `deploytrust/` | leaf package: deploy auth — the `deploy_trust` grammar (`Parse`), its sources and verifiers (OIDC + local-key JWT verification), the webhook preamble (`Limiter.Authenticate`) and what a failed attempt costs the journal (`Limiter`, on an injected clock). Imports nothing of liveswap's; the box webhook authenticates through it too. `trusttest/` beside it mints tokens and runs an issuer for tests |
 | `internal/dispenser/` | leaf package: the one Caddyfile rule the parsers here and `deploytrust.Parse` apply alike — a repeated subdirective is refused — in one place so the two cannot drift |
