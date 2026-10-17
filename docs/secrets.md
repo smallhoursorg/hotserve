@@ -35,27 +35,16 @@ env_file /etc/hotserve/secrets/example.env
 ```
 
 On the laptop you need `age` (`brew install age`, or `apt install
-age`) besides git and `make`. Every command below runs in a checkout of
-the box's repository. With more than one box in it, name the one you
-mean: `BOX=deploy.example.com`.
-
-## From an earlier template
-
-A box repository made from the template before secrets (v0.3.0's) has
-none of the commands below: its Makefile has only `check`, `signer`
-and `wip`. Copy these from the [template](../examples/box/) into
-yours: `Makefile`, `bin/secrets`, `bin/signer`, `bin/apply`,
-`bin/check` and `.gitattributes`; and delete `sudoers`, which the
-template no longer has. The Caddyfile stays yours: its commented
-`env_file` line names the old path, so add the line `make secret`
-prints instead.
+age`) besides git and `make`. The `make` and `git` commands below run
+at the top of a checkout of the box's repository, where its Makefile
+is, not in a box's directory. With more than one box in it, name the
+one you mean: `BOX=deploy.example.com`.
 
 ## The box's key
 
 The package makes the box's key when it is installed or upgraded on a
-running system, and `hotserve init` makes it if it is missing; so a
-box upgraded from a release before secrets has its key after the
-upgrade. Root on the box prints it:
+running system, and `hotserve init` makes it if it is missing. Root on
+the box prints it:
 
 ```sh
 ssh root@box.example.com hotserve box key
@@ -275,9 +264,8 @@ lost key still reads the old ones in the repository's history.
 
 ### Move a hand-made env file in
 
-An env file made on the box by hand before secrets were commits, say
-`/etc/hotserve/example.env`, comes into the repository without passing
-through the laptop's disk:
+An env file made on the box by hand, say `/etc/hotserve/example.env`,
+comes into the repository without passing through the laptop's disk:
 
 ```sh
 ssh root@box.example.com cat /etc/hotserve/example.env | make secrets-import APP=example
@@ -290,12 +278,6 @@ is the box's first secret). Then:
    commit and push. The run names the variables as added.
 2. Once that run is green, no launch reads the old file. Remove it, as
    root on the box: `rm /etc/hotserve/example.env`.
-3. Once every app's secrets are in the repository, the
-   administrator's sudoers file from an earlier version of the box
-   template, if the box has one, has nothing left to grant: `rm
-   /etc/sudoers.d/hotserve-admin && groupdel hotserve-admin`, as root.
-   The account keeps reading the logs through `adm` ([Hardening the
-   box](hardening.md#3-an-administrator-if-you-want-one)).
 
 An env file made by hand keeps working where it is, for as long as you
 like: `env_file` is a path, and the box writes only under
