@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
@@ -47,17 +48,18 @@ type fakeValidator struct {
 	err   error
 	calls int
 	got   []byte
-	host  string // the host reachability was asked for
+	host  string   // the host reachability was asked for
+	door  []string // the loaded server's listen addresses it was given
 	// block, when set, is waited on inside validate: the admission lock
 	// is held meanwhile.
 	block   chan struct{}
 	entered chan struct{}
 }
 
-func (f *fakeValidator) validate(ctx context.Context, _ string, caddyfile []byte, host string) (string, error) {
+func (f *fakeValidator) validate(ctx context.Context, _ string, caddyfile []byte, host string, door []string) (string, error) {
 	f.mu.Lock()
 	f.calls++
-	f.got, f.host = caddyfile, host
+	f.got, f.host, f.door = caddyfile, host, door
 	block, entered := f.block, f.entered
 	msg, err := f.msg, f.err
 	f.mu.Unlock()
@@ -632,6 +634,9 @@ func TestPushValidate(t *testing.T) {
 	if shape, err := Walk(p.val.got); err != nil || p.val.host != shape.Host || shape.Host == "" {
 		t.Fatalf("reachability asked for %q; the file's host is %q (%v)", p.val.host, shape.Host, err)
 	}
+	if p.val.door != nil {
+		t.Fatalf("a push no Caddy server received has no door; got %q", p.val.door)
+	}
 	p.untouched(t)
 
 	// An unreachable / is one of step 6's refusals: the same 422, the
@@ -650,6 +655,32 @@ func TestPushValidate(t *testing.T) {
 	p.untouched(t)
 	if len(p.logged(zap.ErrorLevel, "box push failed")) != 1 {
 		t.Fatal("no failure line")
+	}
+}
+
+// TestPushDoor: step 6 is given the door — the listen addresses of the
+// Caddy server that received the push, from the request's context, as
+// Caddy sets it on every request — and a moved door is one of its
+// refusals: a 422 with the catalogue text, nothing dropped.
+func TestPushDoor(t *testing.T) {
+	p := newPushRig(t)
+	c2, bundle := p.change()
+	srv := &caddyhttp.Server{Listen: []string{":8443", "tcp/127.0.0.1:8443"}}
+	ctx := context.WithValue(context.Background(), caddyhttp.ServerCtxKey, srv)
+	p.val.msg = msgListenMoved([]string{":8443"}, []string{":443"})
+	id := randomID(t)
+	m := wantResult(t, p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle), ctx: ctx}), http.StatusUnprocessableEntity, id, phaseRefused)
+	if m["error"] != p.val.msg || !slices.Equal(p.val.door, srv.Listen) {
+		t.Fatalf("got %v, the door %q; want the server's %q", m, p.val.door, srv.Listen)
+	}
+	p.untouched(t)
+
+	// Kept: admitted as any push, the bundle in in/ until root runs.
+	p.val.msg = ""
+	id = randomID(t)
+	w := p.post(t, p.h, push{id: id, token: p.token(t, c2), body: bytes.NewReader(bundle), ctx: ctx})
+	if w.Code != http.StatusGatewayTimeout || !exists(p.x("in/"+id+".tar")) || !slices.Equal(p.val.door, srv.Listen) {
+		t.Fatalf("got %d, the door %q", w.Code, p.val.door)
 	}
 }
 

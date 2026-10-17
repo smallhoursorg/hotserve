@@ -285,6 +285,13 @@ signed push overwrites a hand edit — the run warns that it did — which
 is the point: the repo is the truth and the edit is a bridge back to
 it, so a fix that must outlive the night is a commit.
 
+The same path moves where the deploy host's server listens
+(`https_port`, a `bind` on its site): a push cannot move the address
+it arrives on, so the run that would is refused by name and the box
+keeps serving. Commit the change, make it on the box as above (and
+move whatever forwards `https://<host>/` there), then let the next run
+push the commit, which now matches.
+
 ## Outside GitHub
 
 Only the workflow file is GitHub's. `bin/apply` is what talks to the

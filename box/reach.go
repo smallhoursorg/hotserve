@@ -2,11 +2,12 @@ package box
 
 // Step 6's reachability (DESIGN-box.md, "Reachability: what may stand
 // before box_webhook"): of the pushed file's adaptation — Caddy's JSON
-// as `hotserve adapt` prints it — whether the workflow's connection
-// reaches the routes of the server that carries box_webhook, and
-// whether a GET and a POST for / on the box_webhook host then meet
-// box_webhook before any handler that could answer them. Pure: the
-// JSON in, a verdict out, no module loaded but the five matcher types
+// as `hotserve adapt` prints it — whether the server that carries
+// box_webhook still listens where the push arrived (the door), whether
+// the workflow's connection reaches that server's routes, and whether a
+// GET and a POST for / on the box_webhook host then meet box_webhook
+// before any handler that could answer them. Pure: the JSON and the
+// door in, a verdict out, no module loaded but the five matcher types
 // it decides with and Caddy's SNI matcher. Fail-closed every way: a
 // handler, a listener wrapper or a TLS policy setting the tables have
 // not weighed answers or refuses, a matcher they cannot decide may
@@ -126,12 +127,14 @@ func routeList(v any) ([]adaptedRoute, error) {
 }
 
 // reach asks the question of adapted for host, the box_webhook host
-// the walk found. nil: both requests meet box_webhook first. A
-// *refusal: the catalogue text naming what stands in the way. Any other
-// error is the box's own: an adaptation this code cannot read, or one
-// with no box_webhook routed for the host, which the walk of the same
-// bytes rules out.
-func reach(adapted []byte, host string) error {
+// the walk found, and door, the listen addresses of the loaded server
+// the push arrived through — nil when no Caddy server received it (a
+// test), and the door is not compared. nil: the door is kept and both
+// requests meet box_webhook first. A *refusal: the catalogue text
+// naming what stands in the way. Any other error is the box's own: an
+// adaptation this code cannot read, or one with no box_webhook routed
+// for the host, which the walk of the same bytes rules out.
+func reach(adapted []byte, host string, door []string) error {
 	var cfg any
 	if json.Unmarshal(adapted, &cfg) != nil {
 		return errAdaptation
@@ -148,7 +151,19 @@ func reach(adapted []byte, host string) error {
 		if !carriesWebhook(routes) {
 			continue
 		}
-		// The connection first: what refuses it stands before every
+		// The door first: the push arrived through the loaded server's
+		// addresses, which are thereby proven to work; a file that
+		// moves them is the console's to apply ("The door").
+		if door != nil {
+			listen, err := listenOf(servers[name])
+			if err != nil {
+				return err
+			}
+			if from, to := canonical(door), canonical(listen); !slices.Equal(from, to) {
+				return &refusal{msg: msgListenMoved(from, to)}
+			}
+		}
+		// The connection next: what refuses it stands before every
 		// route.
 		s, err := settingsOf(servers[name])
 		if err != nil {
@@ -183,6 +198,72 @@ func dig(v any, keys ...string) any {
 		v = m[k]
 	}
 	return v
+}
+
+// msgListenMoved is the catalogue text for a push that moves the box
+// server's listen addresses: from the loaded server's to the new
+// file's, each list canonical and bounded. An empty list is Caddy's
+// error at load, never the adapter's output; the text still has to
+// read.
+func msgListenMoved(from, to []string) string {
+	where := func(l []string) string {
+		if len(l) == 0 {
+			return "no address"
+		}
+		return proof.Bound(strings.Join(l, ", "))
+	}
+	return "this push changes where the box's server listens (" + where(from) + " → " + where(to) +
+		"): a push cannot move the address it arrives on; make that change at the console"
+}
+
+// listenOf is a server's `listen` list as Caddy keeps it once loaded:
+// each address with its placeholders replaced by the global replacer
+// (`{env.*}`, `{system.*}`), as App.Provision replaces them before the
+// loaded server holds them, so the two sides are spelt alike. A list of
+// another shape is the adaptation's fault. A placeholder that does not
+// resolve leaves the address as written: Provision refuses it, and
+// validate ran Provision on the same bytes, so none reaches here.
+func listenOf(server any) ([]string, error) {
+	m, _ := server.(map[string]any)
+	v, ok := m["listen"]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	items, ok := v.([]any)
+	if !ok {
+		return nil, errAdaptation
+	}
+	repl := caddy.NewReplacer()
+	listen := make([]string, 0, len(items))
+	for _, item := range items {
+		addr, ok := item.(string)
+		if !ok {
+			return nil, errAdaptation
+		}
+		if out, err := repl.ReplaceOrErr(addr, true, true); err == nil {
+			addr = out
+		}
+		listen = append(listen, addr)
+	}
+	return listen, nil
+}
+
+// canonical is a listen list as a sorted set of addresses in Caddy's
+// own spelling — its network, host and port range as ParseNetworkAddress
+// reads them and String prints them, the default network dropped — so
+// that two lists that open the same sockets compare equal however they
+// are written or ordered, and however often an address repeats. An
+// address Caddy cannot parse stands as written; a port range stands as
+// a range (the adapter writes none), never expanded.
+func canonical(listen []string) []string {
+	set := map[string]bool{}
+	for _, addr := range listen {
+		if na, err := caddy.ParseNetworkAddress(addr); err == nil {
+			addr = na.String()
+		}
+		set[addr] = true
+	}
+	return slices.Sorted(maps.Keys(set))
 }
 
 // carriesWebhook reports whether a box_webhook handler stands anywhere

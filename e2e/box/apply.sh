@@ -400,6 +400,15 @@ X=$(commit alice "$work/fbad")
 push "$X"
 refused "a config hotserve validate rejects" "hotserve validate:"
 
+# The door: this box's server listens on 8443, and the push arrived
+# there; a file that moves it validates and would load, and is refused
+# by the compare with the loaded server's addresses.
+sed 's/^\thttps_port 8443$/\thttps_port 9443/' "$work/f2" >"$work/fmoved"
+grep -q 'https_port 9443' "$work/fmoved" || fail "the moved file was not made"
+MV=$(commit alice "$work/fmoved")
+push "$MV"
+refused "a file that moves the box's server" "this push changes where the box's server listens (:8443 → :9443): a push cannot move the address it arrives on; make that change at the console"
+
 echo "=== box apply 4: a config that validates but does not load is rolled back ==="
 # Validation binds no listener; loading does, and 192.0.2.1 (TEST-NET-1)
 # is on no interface here.

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
@@ -81,8 +82,9 @@ func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 		return true, p.refuse(b, err)
 	}
 	// 6. Validate, as the serving process would load it, and reach
-	// box_webhook on / for the host the walk found.
-	if msg, err := h.validator.validate(p.r.Context(), p.id, b.Caddyfile, vd.host); err != nil {
+	// box_webhook on / for the host the walk found, through the door
+	// this push came in by.
+	if msg, err := h.validator.validate(p.r.Context(), p.id, b.Caddyfile, vd.host, door(p.r)); err != nil {
 		return true, p.fail(err)
 	} else if msg != "" {
 		return true, p.refuse(b, &refusal{msg: msg})
@@ -101,6 +103,19 @@ func (p *pushing) admit(b *proof.Bundle, body []byte) (done bool, err error) {
 	h.logger.Info("box push accepted", zap.String("id", p.id), zap.String("commit", p.commit),
 		zap.String("via", p.via), zap.String("remote", p.r.RemoteAddr))
 	return false, nil
+}
+
+// door is where the server that received r listens: the loaded
+// server Caddy puts in every request's context, whose addresses this
+// push arrived through and so are proven to work (DESIGN-box.md, "The
+// door"). nil when no Caddy server received it — a test calling the
+// handler directly — and the door is not compared.
+func door(r *http.Request) []string {
+	srv, _ := r.Context().Value(caddyhttp.ServerCtxKey).(*caddyhttp.Server)
+	if srv == nil {
+		return nil
+	}
+	return srv.Listen
 }
 
 // lockAdmission takes stage/lock without blocking: held=true when

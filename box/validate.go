@@ -45,12 +45,15 @@ const (
 const xOK = 0x1
 
 // validator is step 6. host is the box_webhook host the walk found in
-// caddyfile, which reachability is asked for. msg is a refusal's whole
-// catalogue text; err is the box's own trouble (the staged file could
-// not be written, a child could not start, whether backups are
-// installed could not be told, an adaptation that does not read).
+// caddyfile, which reachability is asked for; door is where the loaded
+// server the push arrived through listens, which the new file's box
+// server must keep (nil: no Caddy server received the push, so no door
+// to keep). msg is a refusal's whole catalogue text; err is the box's
+// own trouble (the staged file could not be written, a child could not
+// start, whether backups are installed could not be told, an adaptation
+// that does not read).
 type validator interface {
-	validate(ctx context.Context, id string, caddyfile []byte, host string) (msg string, err error)
+	validate(ctx context.Context, id string, caddyfile []byte, host string, door []string) (msg string, err error)
 }
 
 // childValidator runs the real children.
@@ -105,7 +108,7 @@ func serviceVariable(key string) bool {
 	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "XDG_")
 }
 
-func (c *childValidator) validate(ctx context.Context, id string, caddyfile []byte, host string) (string, error) {
+func (c *childValidator) validate(ctx context.Context, id string, caddyfile []byte, host string, door []string) (string, error) {
 	staged := filepath.Join(c.stage, stagedConfig(id))
 	if err := writeExclusive(staged, caddyfile, 0o600); err != nil {
 		return "", fmt.Errorf("staging the Caddyfile for validate: %w", err)
@@ -114,7 +117,7 @@ func (c *childValidator) validate(ctx context.Context, id string, caddyfile []by
 	if msg, err := c.run(ctx, "hotserve validate", c.hotserve, "validate", "--adapter", "caddyfile", "--config", staged); msg != "" || err != nil {
 		return msg, err
 	}
-	if msg, err := c.adapt(ctx, staged, host); msg != "" || err != nil {
+	if msg, err := c.adapt(ctx, staged, host, door); msg != "" || err != nil {
 		return msg, err
 	}
 	// `test -x`'s answer: no file, or one this uid cannot run, is "not
@@ -155,12 +158,13 @@ func (c *childValidator) run(ctx context.Context, what, program string, args ...
 }
 
 // adapt runs the adapt child on the staged file and asks reachability
-// of its output (DESIGN-box.md, "Reachability"). The adapter is the one
-// validate just ran, so an exit here is the box's error, not the
-// push's; a deadline is the push's, as validate's. Stdout is kept to
-// the cap and stderr dropped: the JSON holds every expanded value, and
-// nothing of it but the walk's verdict leaves this function.
-func (c *childValidator) adapt(ctx context.Context, staged, host string) (string, error) {
+// of its output, the door included (DESIGN-box.md, "Reachability"). The
+// adapter is the one validate just ran, so an exit here is the box's
+// error, not the push's; a deadline is the push's, as validate's.
+// Stdout is kept to the cap and stderr dropped: the JSON holds every
+// expanded value, and nothing of it but the walk's verdict — the listen
+// addresses of a refused move among them — leaves this function.
+func (c *childValidator) adapt(ctx context.Context, staged, host string, door []string) (string, error) {
 	out := newCappedBuffer(maxAdaptation)
 	exit, timedOut, err := c.exec(ctx, c.hotserve, out, nil, "adapt", "--adapter", "caddyfile", "--config", staged)
 	switch {
@@ -173,11 +177,15 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string) (string
 	case out.over():
 		return msgAdaptationTooLarge, nil
 	}
-	err = reach(out.b, host)
+	err = reach(out.b, host, door)
 	var r *refusal
 	switch {
 	case errors.As(err, &r):
-		return r.msg, nil
+		// Through the filter validate's error line goes through: a
+		// moved door's text quotes listen addresses, and the adapter
+		// expands `{$VAR}` into them from the same environment.
+		msg, _ := c.redactor.Redact(r.msg)
+		return msg, nil
 	case err != nil:
 		return "", fmt.Errorf("hotserve adapt: %w", err)
 	}

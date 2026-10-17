@@ -267,14 +267,16 @@ cross-references throughout.
    --adapter caddyfile --config <staged file>`, a third child bounded
    per the Caps table, whose JSON leaves the handler as nothing but a
    verdict) for **reachability**: the server that carries
-   `box_webhook` must let the workflow's connection through to its
+   `box_webhook` must listen where the loaded server this push arrived
+   through listens (the door: a move is made at the console), must let
+   the workflow's connection through to its
    routes, and a `GET` and a `POST` for `/` on the
    `box_webhook` host must meet `box_webhook` before any handler that
    can answer them — not an `order` option, not a second site for that
    host (`host/*`, which Caddy sorts ahead), not anything else. What the
    connection may meet, what may stand in front, and how a matcher is
    decided, are the "Reachability" tables; a push that fails them is
-   refused by the setting's or the handler's name. Like
+   refused by the addresses', the setting's or the handler's name. Like
    the rest of this step it is a courtesy against a signer's mistake,
    not a boundary: root never adapts, so step 15 checks presence alone.
    Last, the secrets' consistency checks, on the token walk of the
@@ -538,8 +540,9 @@ group: once one member has matched, Caddy skips the later members, and
 so does this walk — a member under a route decided per request
 satisfies its group only as far as that route does, since Caddy's
 group map is one per request across nesting. Before the walk, the
-handler asks whether the workflow's connection reaches that server's
-routes at all ("The connection", below).
+handler asks whether that server still listens where this push
+arrived ("The door", below), then whether the workflow's connection
+reaches its routes at all ("The connection").
 
 | Handler (module) | Treated as | Why |
 |---|---|---|
@@ -577,10 +580,48 @@ to whatever follows. The cost of "may": a
 remedy is to move it behind `box_webhook`, where the default order
 already puts every responder, or to give it a path.
 
+**The door.** A push may not change the door it came in through. The
+file alone cannot say where the box's server should listen: a port
+forward makes `https_port 8443` right (the e2e box listens there), a
+NAT makes a `bind` to a private address right. What is known is that
+the configuration loaded in the serving process works, since this push
+arrived through it. So the handler reads the `listen` list of the
+server that carries `box_webhook` in the new adaptation — found by
+that route, never by name, since Caddy renames `srvN` between
+adaptations — and compares it with the listen addresses of the Caddy
+server that received the push, which Caddy puts in every request's
+context (`caddyhttp.ServerCtxKey`): the loaded server itself, no admin
+API call, no second copy of the configuration, and by construction the
+door. Both lists are compared as Caddy spells the addresses
+(`ParseNetworkAddress`, then its `String`: the default network
+dropped, a host and a port range kept as parsed), sorted, each once,
+so an address written with its network, in another order or twice
+changes nothing; a placeholder in the new list is replaced as Caddy's
+`App.Provision` replaces it before the loaded server keeps it, and an
+address Caddy cannot parse stands as written. A difference refuses the
+push, `this push changes where the box's server listens (<from> →
+<to>): a push cannot move the address it arrives on; make that change
+at the console`, the two canonical lists in the brackets. The same
+means admitted, and the checks below follow. `https_port`, `bind` on
+the box site, `default_bind` and anything else that changes that
+server's `listen` are all this one compare; a change to another
+server's addresses (`http_port`, a `bind` on an app site that gives it
+a server of its own) is not. What the compare does not read: the
+listener's protocols and wrappers, the TLS policies — those are the
+connection's tables, below, asked of the file alone; a compare with
+the loaded server's would admit what the push arrived through
+(Accepted residuals), but the loaded server holds them as provisioned
+modules, not as the JSON it was given, so that compare needs the
+configuration the admin API serves, and is not made here. A deliberate
+move is the console's: "At 3am" gives the steps. A push no Caddy
+server received (a test calling the handler) has no door, and the
+compare is skipped: the handler runs only inside a Caddy server, which
+sets the key on every request.
+
 **The connection.** Before any route runs, the workflow's connection
 meets the server that carries `box_webhook`: its listeners'
 protocols, its listener wrappers, its TLS connection policies and its
-strict SNI check. The handler asks those first (and no other server
+strict SNI check. The handler asks those next (and no other server
 setting: "Not caught here"), of the connection `bin/apply`'s curl
 makes on the workflow's Ubuntu runner: HTTP/1.1 or HTTP/2 over TLS,
 both offered by ALPN, the host as its SNI — none for an IP address,
@@ -665,12 +706,10 @@ push that sets the server's request limits below what the workflow
 sends (`timeouts { read_header }` shorter than a handshake from the
 runner, `max_header_size` below its headers and their OIDC token)
 passes, and the next push is refused before any route (owed,
-"Triage"). Nor is where the server listens: a push that moves the box
-host's server where the workflow's `https://<host>/` does not arrive
-(`https_port`, a `bind` to an address the host's name does not lead
-to) passes, since a port forward or a NAT'd address makes the same
-lines right, and strands the box until root undoes it ("At 3am";
-owed, "Triage"). Nor is a host without a certificate.
+"Triage"). Nor is a host without a certificate. Where the server
+listens is "The door": kept, or refused; whether the kept addresses
+are the ones the workflow's `https://<host>/` arrives at is proven by
+the push itself.
 
 ## The install transaction
 
@@ -896,14 +935,13 @@ can do both by other means.
 | A push installs an app's first env file, its `applied.json` write fails, and a console edit lands before recovery: `unknown`, and the baseline does not list the file; a later push that drops the app's secrets leaves it on disk, since root removes only listed files | `applied.json`'s `secrets`; Transitions, swapped → applied | 2 | 2 | 5 | 20, kept by rule 4 (the triage skill): a guard is a branch for a two-fault case. The file is where values may live (I9) and nothing names it (an `env_file` there with no secrets is refused); a push that gives the app secrets again lists it. The console removes it |
 | An app's `env_file` outside `/etc/hotserve/secrets/` that is not on the box: the push applies green, since config load is silent about an absent file (`warnEnvFileModeOf`, liveswap/app.go). A deploy fails at its launch, named, and the old version keeps serving; but a crash's relaunch fails the same way, so the app stays down until the console makes the file | "Which checks run where" | 4 | 4 | 1 | 16; every launch names the missing file. A warning at config load would fire on every CI check, where the file cannot exist; reporting root's own stat in the push's result is a new field (size 3, risk 2) |
 | `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the latest stable, or the one `HOTSERVE_VERSION` names), whose install step's line names it. `hotserve version` on a release that old prints only Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
-| A box host that a proxy reaches with a client certificate (Cloudflare's Authenticated Origin Pulls), or that a balancer reaches through a `proxy_protocol` falling back to `REQUIRE`, or whose TLS policy sets ciphers or curves: every push is refused, though the workflow's connection would arrive | Reachability, "The connection" | 2 | 5 | 1 | 10; red and named, and each remedy there keeps the box reachable. Admitting the setting needs the comparison the owed row below names (size 3) |
+| A box host that a proxy reaches with a client certificate (Cloudflare's Authenticated Origin Pulls), or that a balancer reaches through a `proxy_protocol` falling back to `REQUIRE`, or whose TLS policy sets ciphers or curves: every push is refused, though the workflow's connection would arrive | Reachability, "The connection" | 2 | 5 | 1 | 10; red and named, and each remedy there keeps the box reachable. Admitting the setting needs the door's compare applied to the wrappers and policies, against the configuration the admin API serves, since the loaded server holds them as provisioned modules ("The door"; size 3) |
 | A box server whose TLS policies are in an order no Caddyfile adapts to passes as walked: a list in which no policy is sure to apply to the host (Caddy then refuses the handshake), or, past 30 policies, one matching the host by wildcard or by matcher ahead of one naming it exactly (Caddy looks at that one first) | Reachability, "The connection" | 4 | 1 | 3 | 12; the input is always the adapter's, which ends every list with a catch-all and writes a policy naming a host ahead of any other matching it |
 
 **Owed** (over the bar, not yet fixed):
 
 | Finding | S | O | D | Where the fix lands |
 |---|---|---|---|---|
-| A push moves the box host's server where the workflow's `https://<host>/` does not arrive (`https_port`, a `bind` to an address the host's name does not lead to) with nothing forwarding to it: it applies green, and the next push finds no answer | 4 | 5 | 3 | 60; not decidable from the file alone, since a port forward or a NAT'd address makes the same lines right (the e2e box listens on 8443). Decided 2026-10-16, compare rule, console moves: a follow-up PR refuses, named, a push that changes the listen settings of the server carrying `box_webhook` (found by its route, not its name) from those of the running configuration, which the push arrived through; a deliberate move is made at the console. An allowance scoped to a target is a possible later addition, not decided |
 | A push sets the box server's request limits below what the workflow sends (`timeouts { read_header }` shorter than a handshake from the runner, `max_header_size` below its headers and their OIDC token): it applies green, and the next push is refused before any route | 4 | 5 | 3 | 60; found while fixing the connection check. Decided 2026-10-16, floors sized together: the box host shares its server with every app site on :443, so a compare rule would block ordinary app hardening. A follow-up refuses only values the workflow cannot work with, for `read_header_timeout`, `read_timeout`, `read_idle_timeout`, `read_min_rate` and `max_header_bytes`; the `write_*` limits get none, since the poll recovers a cut POST. The sizes are agreed with the owner before it is built |
 | A `request_body` ahead of `box_webhook` passes the walk whatever it sets: a `set` replaces every push's body, and a `max_size` below the smallest bundle refuses every push; the push that adds it applies green, and the box is reachable only from the console | 4 | 5 | 3 | 60; found answering a question on this change. `set` is one branch in the handler table ("changes the request first"); `max_size` is a floor, sized with the floors above (the box site's routes are its own, so app hardening is not in its way); the owner decides |
 
@@ -1513,6 +1551,7 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository: move it there` (the recorded path is already `<host>/Caddyfile`) / `…: hotserve init, run again from that directory, records it` (it is not) | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
 | 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
+| 422 | `refused` | `this push changes where the box's server listens (<from> → <to>): a push cannot move the address it arrives on; make that change at the console` — `<from>` the addresses of the loaded server the push arrived through, `<to>` the new file's, each list canonical, sorted, comma-separated ("The door", in "Reachability") | handler | fail; a deliberate move is made at the console ("At 3am"), after which the push of the same commit is admitted |
 | 422 | `refused` | `the new Caddyfile does not reach box_webhook on /: a listener's protocols include neither h1 nor h2` / `… : the <wrapper> listener wrapper may refuse the connection` / `… : the server's strict_sni_host refuses a request to an IP address, which carries no SNI` / `… : a TLS connection policy for <host> <what>` / `… : a TLS connection policy that may apply to <host> <what> (its <matcher> matcher is decided per connection)` — `<what>` is `requires a client certificate`, `drops the connection`, `offers neither h2 nor http/1.1 by ALPN` or `sets <setting>, which may refuse the handshake` ("The connection", in "Reachability") | handler | fail |
 | 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
@@ -2017,6 +2056,22 @@ rewritten *below* the commit the box runs is `hotserve box baseline`;
 one rewritten above it (an unsigned commit rebased away) needs nothing
 on the box.
 
+Moving where the box's server listens (`https_port`, a `bind` on the
+box site, `default_bind`) is the same path by design, not by accident:
+a push cannot move the address it arrives on ("The door"), so the push
+that would is refused by name and the box keeps serving. The move is
+made by the person who also moves whatever forwards `https://<host>/`
+to the box: commit the change, then as root on the box either copy the
+commit's `<host>/` directory over and `hotserve init <sha>` from it —
+the reload is the check, and the baseline is the commit, so the
+workflow's run of it ends `no_change` — or edit
+`/etc/hotserve/Caddyfile` and `systemctl reload hotserve`, after which
+the push of that commit arrives through the new door, matches it, and
+applies, reporting the edit as out of band. Neither needs `hotserve box
+baseline`, which is for a rewritten history. If the forward is wrong,
+nothing arrives, and the way back is the console again, as for any
+console edit.
+
 ## The merge button, and the README's rules
 
 GitHub's merge button cannot produce a commit the box applies: a
@@ -2375,3 +2430,9 @@ Dated one-liners; the full text of each is in git.
   the TLS connection policy for the host and its strict SNI check
   ("The connection"). They had been stated as not caught; where the
   server listens, and its request limits, stay uncaught and are owed.
+- 2026-10-16, later — The door: step 6 compares the box server's
+  `listen` addresses with those of the loaded server the push arrived
+  through, from the request's context, and refuses a move by name; a
+  deliberate move is made at the console ("At 3am"). The compare is
+  not applied to the connection's tables, whose loaded form is
+  provisioned modules, not JSON.

@@ -1,3 +1,4 @@
 go test fuzz v1
 []byte("{\"Apps\":{\"http\":{\"servers\":{\"\":{\"routes\":[{\"mAtCh\":[{\"\":[]}],\"hAndle\":[{\"hAndler\":\"subroute\",\"routes\":[{\"hAndle\":[{\"hAndler\":\"box_webhook\"}]}]}]}]}}}}}")
 string("0")
+string("")
