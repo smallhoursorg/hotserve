@@ -453,11 +453,25 @@ func (c *userManagerClient) StartTransientUnit(ctx context.Context, u unitSpec) 
 		c.dropIfDisconnected(conn, err)
 		return "", err
 	}
+	return jobResult(ctx, ch)
+}
+
+// jobResult waits for a job's result, or for ctx to end. A result
+// already in when ctx ends wins: a select picks among ready cases at
+// random, and a job that finished at that moment — a pre_start done as
+// its deadline passed — would otherwise read as cancelled, and a
+// migration that ran would have its release deleted.
+func jobResult(ctx context.Context, ch <-chan string) (string, error) {
 	select {
 	case res := <-ch:
 		return res, nil
 	case <-ctx.Done():
-		return "", ctx.Err()
+		select {
+		case res := <-ch:
+			return res, nil
+		default:
+			return "", ctx.Err()
+		}
 	}
 }
 
@@ -474,12 +488,7 @@ func (c *userManagerClient) StopUnit(ctx context.Context, name string) (string, 
 		c.dropIfDisconnected(conn, err)
 		return "", err
 	}
-	select {
-	case res := <-ch:
-		return res, nil
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
+	return jobResult(ctx, ch)
 }
 
 func (c *userManagerClient) ResetFailedUnit(ctx context.Context, name string) error {

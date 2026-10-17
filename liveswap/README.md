@@ -931,7 +931,12 @@ gate is judged once per interval, and the tick that completes the soak
 still probes), plus drain and grace — and a second `deadline` when
 `pre_start` is configured, since the pre_start step gets a full
 `deadline` of its own before the health gate starts. Expect a
-concurrent deploy to 409 until the first one finishes.
+concurrent deploy to 409 until the first one finishes. A client that
+hangs up (a cancelled job, a step timeout) does not stop a running
+`pre_start`: a migration stopped midway would leave the app's data
+half-changed, so it runs to its end, still bounded by `deadline`, and
+the deploy then fails before any traffic moves. Until then a retry
+gets the 409.
 
 **A failed deploy says why, from the app's side.** The 5xx body's
 `status.last_deploy` carries the phase it stopped in, `phases` — each

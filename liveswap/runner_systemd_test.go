@@ -359,6 +359,28 @@ func TestUnitPropertiesApplyHardening(t *testing.T) {
 	_ = godbus.MakeVariant // keep the import honest: properties are godbus variants
 }
 
+// Promise: a job whose result is in when the context ends reports
+// that result, not the context's error. A select picks among ready
+// cases at random, so a pre_start that finished at the moment of its
+// deadline was reported as cancelled half the time, and a migration
+// that ran had its release deleted. Many rounds, since the bug is a
+// coin toss per round.
+func TestJobResultPrefersAFinishedJobOverAnEndedContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 200 {
+		ch := make(chan string, 1)
+		ch <- "done"
+		if res, err := jobResult(ctx, ch); err != nil || res != "done" {
+			t.Fatalf("a finished job read as %q, %v", res, err)
+		}
+	}
+	// With no result in, the context's end is the answer.
+	if _, err := jobResult(ctx, make(chan string, 1)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled with no result, got %v", err)
+	}
+}
+
 func TestSystemdRunnerWatcherClosesDoneWhenUnitGone(t *testing.T) {
 	r, conn := newTestSystemdRunner(t)
 	h, err := r.Start(testApp(t))

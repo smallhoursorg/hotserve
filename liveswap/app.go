@@ -882,7 +882,13 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		if !ma.sweep(c, old, l.nonce) {
 			return fmt.Errorf("%w; not running pre_start", errSweepUnconfirmed)
 		}
-		preCtx, cancel := context.WithTimeout(ctx, spec.deadline)
+		// Under deadline, not under the request: a client that hangs
+		// up (a cancelled CI job) must not stop a migration midway,
+		// since a half-applied one harms the app's data while the old
+		// instance serves on. It runs to its end; the health gate
+		// below then reads the request and fails the deploy, as it
+		// does for any deploy whose client left.
+		preCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spec.deadline)
 		// Under the same sandbox as the app it precedes: a migration
 		// that writes where the app cannot read fails here, not at 3am.
 		launched = true

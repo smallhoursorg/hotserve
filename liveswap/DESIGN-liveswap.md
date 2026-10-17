@@ -136,7 +136,11 @@ Concept map from the Nomad-era stack:
   are and whether or not another source then accepted the token, so
   an issuer outage never leaves the journal quiet.
 - `pre_start` (if configured) MUST run to completion in the release dir
-  before the new instance starts; non-zero exit aborts the deploy.
+  before the new instance starts; non-zero exit aborts the deploy. It
+  runs under `deadline`, not under the request: a client that hangs up
+  MUST NOT stop it midway (a half-applied migration harms the app's
+  data); the health gate then fails the deploy on the cancelled
+  request, before any traffic moves.
 - The new instance MUST be continuously healthy for `soak` before any
   traffic moves (`soak 0`: the first healthy probe), and MUST be
   stopped and the deploy failed if not healthy within `deadline`. A
