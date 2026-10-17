@@ -268,7 +268,11 @@ done_ok() {
 		fi
 		printf 'apply: %s at %s: %s%s\n' "$box" "$short" "$what" "${a:+; apps $a}"
 		# The job summary says what happened too, as a list under the
-		# box's line; the Caddyfile's diff stays in the log.
+		# box's line; the Caddyfile's diff stays in the log. A push near
+		# the secrets caps (thousands of long names) can pass GitHub's
+		# 1 MiB a step: GitHub then drops the summary with an error
+		# annotation, the log keeps every line (box/DESIGN-box.md,
+		# Accepted residuals).
 		md="**$box:** $short applied"
 		s=$(secrets_said md)
 		[ -z "$s" ] || md="$md
