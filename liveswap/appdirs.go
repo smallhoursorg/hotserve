@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -77,13 +78,15 @@ func (d appDirs) release(version string) string {
 }
 
 // linkAt returns the first of the app dir and dirs (its fixed subdirs)
-// that is a link, dangling or not, or that could not be checked for
-// one, with the error then; "" when each is a directory or absent. An
-// app name is one path element, so these are the only two levels
-// below the root: with a link at neither, the path reaches the
-// directory it names through whatever alias the root itself is —
-// recordsDir's rule, read off Lstat rather than by resolving, so a
-// dangling link cannot pass as the name it stands in for.
+// that is not the directory it names, and why: a link, dangling or
+// not; anything else but a directory; or a path Lstat cannot answer
+// for (EIO), since the reads after it might yet succeed through a link
+// it missed. It returns "" when each is a directory or absent. An app
+// name is one path element, so these are the only two levels below
+// the root: with a link at neither, the path reaches the directory it
+// names through whatever alias the root itself is — recordsDir's rule,
+// read off Lstat rather than by resolving, so a dangling link cannot
+// pass as the name it stands in for.
 func (d appDirs) linkAt(dirs ...string) (string, error) {
 	for _, p := range append([]string{d.app}, dirs...) {
 		fi, err := os.Lstat(p)
@@ -91,9 +94,11 @@ func (d appDirs) linkAt(dirs ...string) (string, error) {
 		case errors.Is(err, fs.ErrNotExist):
 			// absent: nothing to follow
 		case err != nil:
-			return p, err
+			return p, fmt.Errorf("cannot be checked for a link: %w", err)
 		case fi.Mode()&os.ModeSymlink != 0:
-			return p, nil
+			return p, errors.New("is a link, which is not followed under the liveswap root")
+		case !fi.IsDir():
+			return p, errors.New("is not a directory")
 		}
 	}
 	return "", nil

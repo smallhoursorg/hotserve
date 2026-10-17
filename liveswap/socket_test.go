@@ -2,8 +2,10 @@ package liveswap
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -28,11 +30,25 @@ func staleInstance(t *testing.T, d appDirs, nonce string) (runDir, pin string) {
 
 const linkTestNonce = "0123456789abcdef"
 
+// warnedOnce fails t unless logs hold exactly one prune warning,
+// naming path and appDir, carrying why (a snippet of the error) and
+// the remedy.
+func warnedOnce(t *testing.T, logs *observer.ObservedLogs, path, appDir, why string) {
+	t.Helper()
+	got := logs.All()
+	if len(got) != 1 {
+		t.Fatalf("want one warning, got %v", got)
+	}
+	f := got[0].ContextMap()
+	if f["path"] != path || f["app_dir"] != appDir || !strings.Contains(fmt.Sprint(f["error"]), why) || !strings.Contains(fmt.Sprint(f["fix"]), "bind-mount") {
+		t.Errorf("want a warning naming %s (%s), the app dir %s and the remedy, got %v", path, why, appDir, f)
+	}
+}
+
 // An app dir, or its run/ or proxy/, that is a link to a sibling's —
 // `<root>/blog -> shop` — is not blog's to prune: a recovery, sweep or
 // removal of blog removes nothing through it, so shop's live socket
-// and pin survive, and one warning names the link. A dangling link is
-// refused as well: it is a link, whatever it resolves to later.
+// and pin survive, and one warning names the link and the remedy.
 func TestPruneSocketsDoesNotFollowALink(t *testing.T) {
 	// Each case makes blog's link under root and returns where it is.
 	linkBlog := func(t *testing.T, root string, subs map[string]string) string {
@@ -76,9 +92,6 @@ func TestPruneSocketsDoesNotFollowALink(t *testing.T) {
 		"proxy only": func(t *testing.T, root string) string {
 			return linkBlog(t, root, map[string]string{"proxy": "../shop/proxy"})
 		},
-		"dangling": func(t *testing.T, root string) string {
-			return linkBlog(t, root, map[string]string{"run": "../shop/gone"})
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
@@ -91,28 +104,69 @@ func TestPruneSocketsDoesNotFollowALink(t *testing.T) {
 					t.Errorf("shop's %s removed through blog's link: %v", p, err)
 				}
 			}
-			got := logs.All()
-			if len(got) != 1 || got[0].ContextMap()["path"] != want || got[0].ContextMap()["app_dir"] != filepath.Join(root, "blog") {
-				t.Errorf("want one warning naming the link %s and the app dir, got %v", want, got)
-			}
+			warnedOnce(t, logs, want, filepath.Join(root, "blog"), "is a link")
 		})
 	}
 }
 
-// A dir that cannot be checked for a link fails closed: the reads
-// after a failed Lstat could succeed through the link it missed, so
-// the prune is skipped with a warning naming the path and the error.
-// A transient EIO cannot be made on demand; ENOTDIR (a file where the
-// app dir should be, so Lstat of its run/ fails) takes the same branch.
-func TestPruneSocketsSkipsWhatItCannotCheck(t *testing.T) {
+// A dangling link is refused too, rather than passed as the name it
+// stands in for: once its target appears — shop's first launch making
+// the run/ blog's link names — blog's prune still does not follow it.
+func TestPruneSocketsRefusesADanglingLink(t *testing.T) {
 	root := t.TempDir()
 	blog := newAppDirs(root, "blog")
-	must(t, os.WriteFile(blog.app, nil, 0o600))
-	core, logs := observer.New(zap.WarnLevel)
-	pruneSockets(blog, nil, zap.New(core))
-	got := logs.All()
-	if len(got) != 1 || got[0].ContextMap()["path"] != blog.run || got[0].ContextMap()["error"] == nil {
-		t.Errorf("want one warning naming %s and the error, got %v", blog.run, got)
+	must(t, blog.ensure())
+	must(t, os.Remove(blog.run))
+	must(t, os.Symlink("../shop/run", blog.run)) // shop has no run/ yet
+	for _, step := range []string{"dangling", "landed"} {
+		var runDir string
+		if step == "landed" {
+			runDir, _ = staleInstance(t, newAppDirs(root, "shop"), linkTestNonce)
+		}
+		core, logs := observer.New(zap.WarnLevel)
+		pruneSockets(blog, nil, zap.New(core))
+		if runDir != "" {
+			if _, err := os.Lstat(runDir); err != nil {
+				t.Errorf("shop's %s removed through blog's link once it landed: %v", runDir, err)
+			}
+		}
+		warnedOnce(t, logs, blog.run, blog.app, "is a link")
+	}
+}
+
+// What is not the directory it names, or cannot be checked for a link,
+// is not pruned through either: a file stands where a dir should be,
+// or Lstat fails, after which reads could still succeed through a
+// link the check missed (EIO, which cannot be made on demand;
+// ENAMETOOLONG takes the same branch). The warning names the path at
+// fault, not one below it.
+func TestPruneSocketsSkipsWhatItCannotCheck(t *testing.T) {
+	for name, tc := range map[string]struct {
+		app  string
+		make func(t *testing.T, d appDirs) string // returns the path at fault
+		why  string
+	}{
+		"file at the app dir": {"blog", func(t *testing.T, d appDirs) string {
+			must(t, os.WriteFile(d.app, nil, 0o600))
+			return d.app
+		}, "not a directory"},
+		"file at run": {"blog", func(t *testing.T, d appDirs) string {
+			must(t, d.ensure())
+			must(t, os.Remove(d.run))
+			must(t, os.WriteFile(d.run, nil, 0o600))
+			return d.run
+		}, "not a directory"},
+		"lstat fails": {strings.Repeat("a", 256), func(_ *testing.T, d appDirs) string {
+			return d.app // a component past NAME_MAX: ENAMETOOLONG, not ENOENT
+		}, "cannot be checked"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newAppDirs(t.TempDir(), tc.app)
+			want := tc.make(t, d)
+			core, logs := observer.New(zap.WarnLevel)
+			pruneSockets(d, nil, zap.New(core))
+			warnedOnce(t, logs, want, d.app, tc.why)
+		})
 	}
 }
 
@@ -198,8 +252,14 @@ func TestRecoveryThroughALinkedAppDirLeavesTheSiblingServing(t *testing.T) {
 	rig.ma.store = &fileStateStore{path: rig.spec.dirs.state}
 	rig.ma.runner = bindCheckingRunner{rig.runner}
 	for attempt := 1; attempt <= 2; attempt++ {
-		if err := rig.ma.ensureRunning(); err == nil {
-			t.Fatalf("attempt %d: recovery through a linked app dir launched", attempt)
+		// The refusal recover() repeats, reached after the sweep: a
+		// failure before it would leave shop alone without the fix.
+		err := rig.ma.ensureRunning()
+		if !transientRecovery(err) || !strings.Contains(fmt.Sprint(err), "refusing to launch sandboxed") {
+			t.Fatalf("attempt %d: want the transient bind refusal, got %v", attempt, err)
+		}
+		if n := len(rig.runner.sweeps); n != attempt {
+			t.Fatalf("attempt %d: %d sweeps; the prune under test was not reached", attempt, n)
 		}
 		for _, p := range []string{runDir, pin} {
 			if _, err := os.Lstat(p); err != nil {
