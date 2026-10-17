@@ -140,9 +140,17 @@ Concept map from the Nomad-era stack:
 - The new instance MUST be continuously healthy for `soak` before any
   traffic moves, and MUST be stopped and the deploy failed if not
   healthy within `deadline`. A flapping health check resets the soak.
+  The gate is judged once per `health_interval`, so it ends within
+  `deadline` plus one `health_interval` and two `health_timeout`s; a
+  soak that falls due on the first tick past `deadline` still passes
+  if that tick's probe does.
 - Any failure before the promote step MUST leave the old version
   serving, untouched. The webhook response MUST be synchronous and MUST
-  be a 5xx on failure (CI turns red; `curl --fail-with-body`).
+  be a 5xx on failure (CI turns red; `curl --fail-with-body`). A client
+  that sends `Accept: application/x-ndjson` gets the deploy streamed: a
+  line per phase, then the single response's body with its code as
+  `http_status`. The status line is 200 once the first line has gone
+  out, so such a client reads the outcome from the last line.
 - The cutover MUST NOT trigger a config reload; it is an atomic value
   swap read per-request by the upstream source.
 - After cutover the pipeline MUST wait `drain`, then SIGTERM the old
@@ -437,8 +445,11 @@ backwards edges reappearing *despite* this table.
   socket when it stops (`ExecStopPost=`); a confirmed sweep prunes any
   left behind. The health probe is `GET <health_path>` with
   `Host: localhost`.
-- `Authorization` is dropped by Go's HTTP client on cross-host
-  redirects — exactly right for GitHub's asset→S3 redirect.
+- `Authorization` (`auth_header`) follows a redirect only while the
+  hop's host is the first hop's or a subdomain of it, and is dropped
+  for good at the first hop outside that domain (Go's
+  `shouldCopyHeaderOnRedirect`) — exactly right for GitHub's asset→S3
+  redirect, which leaves github.com's domain.
 - `artifact_allowlist` is required — there is no "deploy from
   anywhere" mode. Host+path entries pin the tenant on shared hosts
   (a bare `github.com` would admit anyone's artifacts), and the
@@ -588,8 +599,6 @@ severity × occurrence × detection, then the fix's size and risk.
 - Prometheus metrics (deploys_total, duration).
 - Deploy queueing; 409 + CI retry is the queue.
 - Windows.
-- Streaming (NDJSON) deploy progress; the response is buffered JSON so
-  `curl --fail-with-body` semantics stay honest.
 
 ## Open questions (with leans)
 
