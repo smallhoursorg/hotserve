@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1161,15 +1160,20 @@ func TestWebhookDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 // the journal: one line per source per window naming it, written
 // however spent the budgets are, so a CI loop retrying through an
 // issuer outage cannot leave the journal quiet about the cause. And
-// the first valid token after the outage is admitted from the
-// throttled address, so charging costs the deployer nothing.
+// the first valid token once the issuer is back — and the source's
+// refetch interval has passed since its last failed fetch — is
+// admitted from the throttled address, so charging costs the deployer
+// nothing.
 func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
 	h, rig := newTestHandler(t)
 	core, logs := observer.New(zap.WarnLevel)
 	h.logger = zap.New(core)
 	iss := trusttest.NewIssuer(t)
 	iss.JWKSDown.Store(true)
-	rig.ma.verifiers = deploytrust.Verifiers([]deploytrust.Source{oidcSource(t, iss.URL)}, iss.Client)
+	// The key set's own clock, apart from the limiter's: its interval
+	// is advanced alone at the end, so the address is still throttled.
+	keys := trusttest.NewClock()
+	rig.ma.verifiers = deploytrust.VerifiersOn(keys, []deploytrust.Source{oidcSource(t, iss.URL)}, iss.Client)
 	token := func() string {
 		return iss.Mint(t, iss.Priv, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
 	}
@@ -1238,15 +1242,17 @@ func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
 		t.Fatalf("throttled request logged %+v, want the outage line alone", got)
 	}
 
-	// The issuer is back: the throttled address's first valid token
-	// deploys and clears it.
+	// The issuer is back: within the source's refetch interval its
+	// failed fetch stands, and once that has passed the throttled
+	// address's first valid token deploys and clears it.
 	iss.JWKSDown.Store(false)
-	eventually(t, "issuer back", func() error {
-		if w := from(t, h, ci, token()); w.Code != http.StatusOK {
-			return fmt.Errorf("code = %d, want 200; body: %s", w.Code, w.Body.String())
-		}
-		return nil
-	})
+	if w := from(t, h, ci, token()); w.Code != http.StatusUnauthorized {
+		t.Fatalf("issuer back within the refetch interval: code = %d, want 401", w.Code)
+	}
+	keys.Advance(deploytrust.KeyRefetchInterval)
+	if w := from(t, h, ci, token()); w.Code != http.StatusOK {
+		t.Fatalf("issuer back past the refetch interval: code = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
 	if h.limiter.Size() != 1 { // the other address's one failure remains
 		t.Fatalf("after the deploy %d addresses are charged, want the other one alone", h.limiter.Size())
 	}

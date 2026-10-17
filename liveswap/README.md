@@ -811,9 +811,16 @@ A request with no bearer token says so instead, as does an app with
 no source at all. The box failing to consult the issuer — OIDC
 discovery on first use, or fetching its signing keys — lands here as
 well: still a 401 to the caller, with the network error in the
-journal. Each entry's reason is one line, cut at 300 bytes plus an
-ellipsis — an issuer's error quotes what the token carried, and a
-presented identity can be anything the issuer signed; the reason
+journal. An OIDC source fetches the issuer's keys only for a token
+signed under a key it does not hold yet, and at most once a minute:
+within a minute of its last fetch such a token is refused, with that
+fetch's error if it failed. So the first deploy after the issuer
+rotates its key, or comes back from an outage, can be refused for up
+to a minute; its retry goes through. A forged token under a key the
+box does hold costs it no request to the issuer. Each entry's reason
+is one line, cut at 300 bytes plus an ellipsis — an issuer's error
+quotes what the token carried, and a presented identity can be
+anything the issuer signed; the reason
 comes before the identity, so the cut never takes it — after the
 source's label, which is your config and is not cut. The line count
 is bounded by the throttle below: past an address's ten failures a
