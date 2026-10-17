@@ -262,7 +262,10 @@ func TestBoxSigner(t *testing.T) {
 		t.Fatalf("a malformed key: exit %d\n%s", code, out)
 	}
 	// The defaults: ~/.ssh/id_ed25519.pub, as the checkout's git email.
-	if out, code := r.run("signer"); code != 0 {
+	// The first signer of a box that lists none: no box runs this file
+	// yet, so nothing is said about one that does.
+	const running = "signer: on a box that already runs, the commit that adds you must be signed by a signer it lists:\n"
+	if out, code := r.run("signer"); code != 0 || strings.Contains(out, running) {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
 	line := "\t\tsigner alice@example.com ssh-ed25519 " + r.b64(alice) + "\n"
@@ -306,7 +309,7 @@ func TestBoxSigner(t *testing.T) {
 	if got := r.git("diff", "--cached", "--name-only"); got != boxFile {
 		t.Errorf("staged after make signer: %q", got)
 	}
-	if out, code := r.run("signer"); code != 0 || !strings.Contains(out, "already lists this key, as alice@example.com") || r.read(boxFile) != after {
+	if out, code := r.run("signer"); code != 0 || !strings.Contains(out, "already lists this key, as alice@example.com") || r.read(boxFile) != after || strings.Contains(out, running) {
 		t.Fatalf("a second run: exit %d\n%s", code, out)
 	}
 
@@ -318,8 +321,10 @@ func TestBoxSigner(t *testing.T) {
 		t.Fatalf("a box with no marker: exit %d\n%s", code, out)
 	}
 	// With it, every box gains the key; a key given as ~/... is expanded.
+	// The boxes list alice already, so they may run: bob's commit must be
+	// signed by her, and the run says so.
 	r.write("deploy2.example.com/Caddyfile", other)
-	if out, code := r.run("signer", "KEY=~/.ssh/bob.pub", "PRINCIPAL=bob"); code != 0 {
+	if out, code := r.run("signer", "KEY=~/.ssh/bob.pub", "PRINCIPAL=bob"); code != 0 || !strings.Contains(out, running) {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
 	for _, f := range []string{boxFile, "deploy2.example.com/Caddyfile"} {
