@@ -6,8 +6,9 @@
 # /usr/local/bin/hotserve too. Which releases:
 #
 #   - the default, hotserve: HOTSERVE_VERSION (the repository variable,
-#     e.g. 0.3.0 or 0.3.0-rc1) when it is set, else the latest stable
-#     one. A box with no HOTSERVE_VERSION file is checked with it;
+#     of the form 0.3.0 or 0.3.0-rc1: examples of the format, not
+#     releases to pin) when it is set, else the latest stable one. A
+#     box with no HOTSERVE_VERSION file is checked with it;
 #   - each box's own: <host>/HOTSERVE_VERSION beside its Caddyfile, one
 #     line of the same shape, pins that box to a release of its own (the
 #     one it runs: a candidate on one box, the stable release on the
