@@ -328,8 +328,8 @@ one is left it prints its line and sends nothing, so change it,
 commit, and run the four lines again.
 
 ```sh
-git cat-file -e HEAD:$host/Caddyfile &&
-  ! git show HEAD:$host/Caddyfile | grep -En '^([^#]*[^#A-Za-z0-9-])?(your-org|example\.com)([^A-Za-z0-9.-]|$)' &&
+git cat-file -e HEAD:${host%/}/Caddyfile &&
+  ! git show HEAD:${host%/}/Caddyfile | grep -En '^([^#]*[^#A-Za-z0-9-])?(your-org|example\.com)([^A-Za-z0-9.-]|$)' &&
   git archive HEAD $host | ssh root@box.example.com tar -xf - &&
   ssh root@box.example.com "cd $host && hotserve init $(git rev-parse HEAD)"
 ```
