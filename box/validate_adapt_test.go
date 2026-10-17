@@ -80,6 +80,9 @@ func TestValidateAdapt(t *testing.T) {
 		"a quoted value":                      `"198.51.100.77"`,
 		"a value of two quoted addresses":     `"198.51.100.77" "198.51.100.78"`,
 		"a value of two backticked addresses": "`198.51.100.77` `198.51.100.78`",
+		// The refusal prints the address as Caddy spells it: the
+		// network dropped, the port added. The host is what remains.
+		"a value with its network": "tcp/198.51.100.77",
 	} {
 		t.Run("a moved door from "+name+", each address filtered", func(t *testing.T) {
 			t.Setenv("BIND_ADDRS", value)
@@ -94,6 +97,19 @@ func TestValidateAdapt(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a moved door from a listen placeholder, the address filtered", func(t *testing.T) {
+		// A `{env.*}` placeholder in a listen address is replaced in the
+		// serving process (listenOf), the whole address from the value,
+		// and printed as Caddy spells it.
+		const value = "tcp/198.51.100.77:443"
+		t.Setenv("BOX_TEST_LISTEN", value)
+		withPlaceholder := strings.Replace(reachableAdaptation, `"srv0":{`, `"srv0":{"listen":["{env.BOX_TEST_LISTEN}"],`, 1)
+		c, _ := stubChildren(t, "exit 0", "printf '%s' '"+withPlaceholder+"'; exit 0", "exit 0", "BOX_TEST_LISTEN="+value)
+		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, []string{":443"})
+		if err != nil || strings.Contains(msg, "198.51") || !strings.HasPrefix(msg, "this push changes where the box's server listens (:443 → ") {
+			t.Fatalf("msg %q err %v", msg, err)
+		}
+	})
 	t.Run("a reachable site passes, then the backup child runs", func(t *testing.T) {
 		c, dir := stubChildren(t, "exit 0", "printf '%s' '"+reachableAdaptation+"'; exit 0", "exit 0")
 		if msg, err := c.validate(context.Background(), randomID(t), file, stubHost, nil); msg != "" || err != nil {

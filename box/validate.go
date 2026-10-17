@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 
 	"github.com/smallhoursorg/hotserve/box/proof"
@@ -199,24 +200,28 @@ func (c *childValidator) adapt(ctx context.Context, staged, host string, arrived
 // doorFilter is the filter a moved door's addresses pass through when
 // a refusal quotes them: validate's — the adapter expands `{$VAR}` into
 // an address from the same environment — primed also with every token
-// the Caddyfile lexer reads from each value. The adapter splices a
-// `{$VAR}` into the file's bytes before lexing them, so a `bind
-// {$ADDRS}` writes the value's tokens: split at whitespace, their
-// quotes and backticks removed, their escapes resolved, none of which
-// need be the value whole. The lexer itself says what those are. Built
+// the Caddyfile lexer reads from each value, and with each token's host
+// as Caddy's address grammar reads it. The adapter splices a `{$VAR}`
+// into the file's bytes before lexing them, so a `bind {$ADDRS}` writes
+// the value's tokens: split at whitespace, their quotes and backticks
+// removed, their escapes resolved, none of which need be the value
+// whole; and the refusal prints each address as Caddy spells it, the
+// network dropped and the port added, so what remains of the value in
+// it is the host. The lexer and the grammar say what those are. Built
 // on the refusal path alone, which is rare; validate's own filter is
 // not widened, since its lines quote what the lexer read as one token.
 func (c *childValidator) doorFilter() func(string) string {
-	r := liveswap.NewRedactor(tokenCandidates(secretCandidates(c.env)), nil)
+	r := liveswap.NewRedactor(addressCandidates(secretCandidates(c.env)), nil)
 	return func(s string) string { s, _ = r.Redact(s); return s }
 }
 
-// tokenCandidates is kvs with a `KEY=token` pair added for each token
-// the Caddyfile lexer reads from each value (a value that is one plain
-// token adds itself again, which the filter's set absorbs). A value the
-// lexer refuses adds nothing: nothing of it is said, and the adapter
-// refused the file that spliced it in.
-func tokenCandidates(kvs []string) []string {
+// addressCandidates is kvs with, for each token the Caddyfile lexer
+// reads from each value, a `KEY=token` pair and, when the token reads
+// as a network address with a host, a `KEY=host` pair (a value that is
+// one plain token adds itself again, which the filter's set absorbs).
+// A value the lexer refuses adds nothing: nothing of it is said, and
+// the adapter refused the file that spliced it in.
+func addressCandidates(kvs []string) []string {
 	out := slices.Clone(kvs)
 	for _, kv := range kvs {
 		key, value, _ := strings.Cut(kv, "=")
@@ -226,6 +231,9 @@ func tokenCandidates(kvs []string) []string {
 		}
 		for _, tok := range tokens {
 			out = append(out, key+"="+tok.Text)
+			if na, err := caddy.ParseNetworkAddress(tok.Text); err == nil && na.Host != "" {
+				out = append(out, key+"="+na.Host)
+			}
 		}
 	}
 	return out
