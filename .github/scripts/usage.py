@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """usage: the public ledger of what building hotserve costs.
 
-Three sources, one month-level CSV each under usage/, rendered to
+Three sources, month-level CSVs under usage/, rendered to
 docs/footprint.md:
 
   collect-claude   usage/claude.csv   Claude Code sessions, from the
@@ -11,11 +11,13 @@ docs/footprint.md:
                    contains --match (default: hotserve), which is this
                    repository, its worktrees and its clones. One row per
                    month and model: API calls and tokens by kind.
-  collect-actions  usage/actions.csv  GitHub Actions, from the API for
-                   --repo (GH_TOKEN required). One row per month,
-                   workflow and runner label: runs that used that
-                   runner, jobs, seconds, billed minutes (each job
-                   rounded up to the minute).
+  collect-actions  usage/runs.csv     GitHub Actions, from the API for
+                   usage/jobs.csv     --repo (GH_TOKEN required). runs.csv:
+                   one row per month and workflow, the runs with at
+                   least one timed job, each counted once however many
+                   runner types its jobs used. jobs.csv: one row per
+                   month, workflow and runner label: jobs, seconds,
+                   billed minutes (each job rounded up to the minute).
   render           docs/footprint.md  from the CSVs, usage/copilot.csv
                    (AI credits typed in by hand from GitHub billing; its
                    note column is public too) and usage/factors.json
@@ -31,11 +33,12 @@ The steps collect first and write last, so a failure (no token, the API
 down) leaves every file as it was. A run is one API call per workflow
 run plus the listing, about 3,500 today, against the token's 5,000 an
 hour: a second run inside the hour exhausts the budget and writes
-nothing. A month already in a CSV is replaced
-by the fresh count unless one of its rows shrank or vanished — a deleted
+nothing. A month already in a CSV is replaced by the fresh count unless
+a count in one of its rows shrank or a row vanished — a deleted
 transcript, Actions runs past GitHub's retention — then the committed
 month stays and a warning says why. --recompute replaces regardless
-(for a parser fix).
+(for a parser fix). A month the source no longer has at all is kept
+either way; delete its rows by hand to drop it.
 
 `make usage` runs all three steps; `make usage-check` (CI) re-renders
 from the committed CSVs and fails on a difference. Stdlib only.
@@ -57,13 +60,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 CLAUDE_CSV = "usage/claude.csv"
-ACTIONS_CSV = "usage/actions.csv"
+RUNS_CSV = "usage/runs.csv"
+JOBS_CSV = "usage/jobs.csv"
 COPILOT_CSV = "usage/copilot.csv"
 FACTORS = "usage/factors.json"
 FOOTPRINT = "docs/footprint.md"
 
 CLAUDE_COLS = ["calls", "input", "output", "cache_write_5m", "cache_write_1h", "cache_read"]
-ACTIONS_COLS = ["runs", "jobs", "seconds", "billed_minutes"]
+JOBS_COLS = ["jobs", "seconds", "billed_minutes"]
 COPILOT_REVIEW_WORKFLOW = "copilot-pull-request-reviewer"
 API_HOST = "api.github.com"
 # Copilot's agent runners carry a per-environment UUID (ubuntu-cca-<uuid>): one family, not a row each.
@@ -112,15 +116,19 @@ def merge(path, keys, cols, fresh, recompute):
     def rows_of(rows, m):
         return {tuple(r[k] for k in keys): r for r in rows if r["month"] == m}
 
-    def total(r):
-        return sum(int(r[c]) for c in cols)
+    def shrank(o, n):
+        # Each count on its own: growth in one must not hide a loss in another.
+        return any(int(n[c]) < int(o[c]) for c in cols)
 
     out = []
     for m in sorted({r["month"] for r in old} | {r["month"] for r in fresh}):
         o, n = rows_of(old, m), rows_of(fresh, m)
-        lost = [] if recompute or not n else [k for k in o if k not in n or total(n[k]) < total(o[k])]
+        lost = [] if recompute or not n else [k for k in o if k not in n or shrank(o[k], n[k])]
         if not n:
-            warn(f"{path}: {m} is no longer in the source; the committed rows stay")
+            # Kept whatever the flags: the source's window is finite (90 days
+            # of runs), so --recompute must not wipe the history before it.
+            warn(f"{path}: {m} is no longer in the source; the committed rows stay "
+                 "(delete them by hand to drop the month)")
             keep = o
         elif lost:
             warn(f"{path}: {m}: {', '.join(' '.join(k[1:]) for k in lost)} shrank or vanished, so the source "
@@ -281,14 +289,14 @@ def collect_actions(repo, token):
     def jobs(run):
         return run, paged(f"/repos/{repo}/actions/runs/{run['id']}/jobs?filter=all", "jobs", token)
 
-    counts, njobs = {}, 0
+    nruns, counts, njobs = {}, {}, 0
     with ThreadPoolExecutor(8) as ex:
         for run, js in ex.map(jobs, runs):
             month = run["created_at"][:7]
             # ".github/workflows/ci.yml" -> "ci"; GitHub's own are
             # "dynamic/agents/copilot-pull-request-reviewer" and the like.
             workflow = os.path.splitext(os.path.basename(run.get("path") or "?"))[0]
-            counted = set()
+            timed = False
             for j in js:
                 if not j.get("started_at") or not j.get("completed_at"):
                     continue
@@ -296,17 +304,21 @@ def collect_actions(repo, token):
                 if sec <= 0:
                     continue
                 runner = ",".join(sorted(UUID_SUFFIX.sub("", label) for label in j.get("labels") or ["?"]))
-                c = counts.setdefault((month, workflow, runner), dict.fromkeys(ACTIONS_COLS, 0))
+                c = counts.setdefault((month, workflow, runner), dict.fromkeys(JOBS_COLS, 0))
                 c["jobs"] += 1
                 c["seconds"] += int(sec)
                 c["billed_minutes"] += math.ceil(sec / 60)
                 njobs += 1
-                if runner not in counted:
-                    c["runs"] += 1
-                    counted.add(runner)
+                timed = True
+            if timed:
+                # One run however many runner types its jobs used. Kept at
+                # this grain because the per-runner rows cannot give it
+                # back: two single-runner runs look like one two-runner run.
+                nruns[(month, workflow)] = nruns.get((month, workflow), 0) + 1
     print(f"actions: {len(runs)} runs, {njobs} timed jobs from the API")
-    return [{"month": m, "workflow": w, "runner": r, **{k: str(v) for k, v in c.items()}}
-            for (m, w, r), c in counts.items()]
+    return ([{"month": m, "workflow": w, "runs": str(n)} for (m, w), n in nruns.items()],
+            [{"month": m, "workflow": w, "runner": r, **{k: str(v) for k, v in c.items()}}
+             for (m, w, r), c in counts.items()])
 
 
 # ---- render ---------------------------------------------------------------
@@ -390,17 +402,17 @@ def table(header, rows):
 def render():
     with open(FACTORS) as f:
         factors = json.load(f)
-    claude, actions, copilot = read_csv(CLAUDE_CSV), read_csv(ACTIONS_CSV), read_copilot()
+    claude, runs, jobs, copilot = read_csv(CLAUDE_CSV), read_csv(RUNS_CSV), read_csv(JOBS_CSV), read_copilot()
     a, g = factors["actions"], factors["claude_gco2e_per_mtok"]
     grid_c = g["grid_gco2e_per_kwh"]
-    months = sorted({r["month"] for r in claude} | {r["month"] for r in actions} | set(copilot))
+    months = sorted({r["month"] for r in claude + runs + jobs} | set(copilot))
     keys = ["calls", "out", "cr", "usd", "c_kwh", "c_kg", "min", "r_usd", "r_kwh", "r_kg", "reviews", "credits"]
 
     def month_stats(m):
         """A source with no rows for the month renders as "—", not 0."""
         s = dict.fromkeys(keys)
         s["credits"] = copilot.get(m)
-        cl, ac = [r for r in claude if r["month"] == m], [r for r in actions if r["month"] == m]
+        cl, ac = [r for r in claude if r["month"] == m], [r for r in jobs if r["month"] == m]
         if cl:
             s.update(calls=0, out=0.0, cr=0.0, usd=0.0, c_kwh=0.0, c_kg=0.0)
         for r in cl:
@@ -413,8 +425,8 @@ def render():
             s["c_kwh"] += gco2 / grid_c
         if ac:
             s.update(min=0, r_usd=0.0, r_kwh=0.0)
-            # A run with jobs on two runner types is one run: the largest runner row's count.
-            s["reviews"] = max((int(r["runs"]) for r in ac if r["workflow"] == COPILOT_REVIEW_WORKFLOW), default=0)
+            s["reviews"] = sum(int(r["runs"]) for r in runs
+                               if r["month"] == m and r["workflow"] == COPILOT_REVIEW_WORKFLOW)
         for r in ac:
             s["min"] += int(r["billed_minutes"])
             s["r_kwh"] += int(r["seconds"]) / 3600 * runner_watts(r["runner"], a) / 1000
@@ -458,15 +470,13 @@ def render():
         [[m, fmt(c["calls"]), fmt(c["in"], 2), fmt(c["out"], 1), fmt(c["w"], 1), fmt(c["cr"], 2), fmt(c["usd"]),
           fmt(c["kg"], 1)] for m, c in sorted(by_model.items(), key=lambda kv: -kv[1]["usd"])])
 
-    by_wf, wf_runs = {}, {}
-    for r in actions:
-        c = by_wf.setdefault(r["workflow"], dict.fromkeys(["min", "kwh"], 0.0))
+    by_wf = {}
+    for r in runs:
+        by_wf.setdefault(r["workflow"], dict.fromkeys(["runs", "min", "kwh"], 0.0))["runs"] += int(r["runs"])
+    for r in jobs:
+        c = by_wf.setdefault(r["workflow"], dict.fromkeys(["runs", "min", "kwh"], 0.0))
         c["min"] += int(r["billed_minutes"])
         c["kwh"] += int(r["seconds"]) / 3600 * runner_watts(r["runner"], a) / 1000
-        k = (r["workflow"], r["month"])
-        wf_runs[k] = max(wf_runs.get(k, 0), int(r["runs"]))  # one run, however many runner types it used
-    for (w, _), n in wf_runs.items():
-        by_wf[w]["runs"] = by_wf[w].get("runs", 0) + n
     workflows = table(["Workflow", "Runs", "Billed minutes", "kWh"],
                       [[w, fmt(c["runs"]), fmt(c["min"]), fmt(c["kwh"], 1)]
                        for w, c in sorted(by_wf.items(), key=lambda kv: -kv[1]["min"])])
@@ -513,8 +523,8 @@ Every kWh and kgCO2e is an estimate, see below.
 
 {workflows}
 
-Runs are runs with at least one timed job; a run with jobs on two
-runner types is one run.
+Runs are runs with at least one timed job, each counted once however
+many runner types its jobs used.
 
 ## Where the numbers come from
 
@@ -578,6 +588,7 @@ def main():
                     help="the mounted ~/.claude/projects")
     ap.add_argument("--recompute", action="store_true", help="replace committed months even when a row shrank")
     args = ap.parse_args()
+    read_copilot()  # the hand-typed file is checked before anything is written, not at render
     token = os.environ.get("GH_TOKEN")
     if "collect-actions" in args.steps:
         if not token:
@@ -591,7 +602,9 @@ def main():
     if "collect-claude" in args.steps:
         fresh[CLAUDE_CSV] = (["month", "model"], CLAUDE_COLS, collect_claude(args.projects, args.match))
     if "collect-actions" in args.steps:
-        fresh[ACTIONS_CSV] = (["month", "workflow", "runner"], ACTIONS_COLS, collect_actions(args.repo, token))
+        nruns, njobs = collect_actions(args.repo, token)
+        fresh[RUNS_CSV] = (["month", "workflow"], ["runs"], nruns)
+        fresh[JOBS_CSV] = (["month", "workflow", "runner"], JOBS_COLS, njobs)
     for path, (keys, cols, rows) in fresh.items():
         merge(path, keys, cols, rows, args.recompute)
     if fresh or "render" in args.steps:

@@ -20,8 +20,8 @@ energy figures), network transfer, and the models' training.
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 2026-08 | — | — | — | — | — | — | 6,377 | 38 | 1.3 | 0.5 | 60 | — |
 | 2026-09 | 13,412 | 13.7 | 3.9 | 2,692 | 287 | 82.3 | 18,295 | 110 | 4.3 | 1.6 | 265 | — |
-| 2026-10 | 16,600 | 11.1 | 4.1 | 1,878 | 214 | 61.4 | 16,413 | 98 | 3.9 | 1.5 | 232 | — |
-| **Total** | 30,012 | 24.8 | 8.0 | 4,570 | 501 | 143.7 | 41,085 | 247 | 9.5 | 3.6 | 557 | — |
+| 2026-10 | 16,862 | 11.2 | 4.2 | 1,936 | 219 | 62.9 | 16,854 | 101 | 4.0 | 1.5 | 244 | — |
+| **Total** | 30,274 | 24.9 | 8.1 | 4,628 | 506 | 145.3 | 41,526 | 249 | 9.6 | 3.6 | 569 | — |
 
 A dash is a month the source has no rows for. Claude USD is what the
 tokens would cost at list price, not what was paid (Claude Code runs on
@@ -33,8 +33,8 @@ Every kWh and kgCO2e is an estimate, see below.
 
 | Model | Calls | Input Mtok | Output Mtok | Cache-write Mtok | Cache-read Gtok | List USD | kgCO2e |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| claude-fable-5-1 | 9,746 | 0.20 | 11.4 | 63.8 | 2.83 | 2,333 | 83.0 |
-| claude-opus-5-5 | 15,616 | 0.03 | 9.2 | 68.0 | 3.99 | 1,424 | 45.4 |
+| claude-fable-5-1 | 9,953 | 0.20 | 11.5 | 66.1 | 2.88 | 2,383 | 84.4 |
+| claude-opus-5-5 | 15,671 | 0.03 | 9.3 | 68.6 | 4.00 | 1,433 | 45.6 |
 | claude-opus-5 | 4,612 | 0.01 | 4.0 | 14.8 | 1.16 | 804 | 15.1 |
 | claude-opus-4-8 | 28 | 0.00 | 0.1 | 0.1 | 0.01 | 8 | 0.2 |
 | claude-haiku-4-5-20251001 | 10 | 0.00 | 0.0 | 0.1 | 0.00 | 0 | 0.0 |
@@ -43,10 +43,10 @@ Every kWh and kgCO2e is an estimate, see below.
 
 | Workflow | Runs | Billed minutes | kWh |
 |---|---:|---:|---:|
-| ci | 983 | 30,738 | 6.7 |
-| codeql | 836 | 5,034 | 1.3 |
-| copilot-pull-request-reviewer | 557 | 2,437 | 0.7 |
-| soak | 109 | 1,484 | 0.4 |
+| ci | 988 | 30,939 | 6.7 |
+| codeql | 854 | 5,186 | 1.4 |
+| copilot-pull-request-reviewer | 569 | 2,492 | 0.7 |
+| soak | 112 | 1,517 | 0.4 |
 | fuzz | 9 | 612 | 0.2 |
 | release | 15 | 529 | 0.1 |
 | dependabot-updates | 113 | 140 | 0.0 |
@@ -56,8 +56,8 @@ Every kWh and kgCO2e is an estimate, see below.
 | pin-watch | 13 | 13 | 0.0 |
 | copilot | 5 | 6 | 0.0 |
 
-Runs are runs with at least one timed job; a run with jobs on two
-runner types is one run.
+Runs are runs with at least one timed job, each counted once however
+many runner types its jobs used.
 
 ## Where the numbers come from
 
