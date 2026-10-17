@@ -274,7 +274,7 @@ resolved at config load.
 | `env`, `env_file` | — | Extra environment |
 | `health_path` | `/health` | 2xx = healthy; `off` = process-liveness only |
 | `health_interval` / `health_timeout` | `5s` / `2s` | Probe cadence |
-| `soak` | `15s` | Continuous health required before cutover. `0` is no soak: traffic moves on the first healthy probe. With `health_path off` there is no probe, so traffic moves as soon as the process is up, whether or not it is listening yet: give a no-soak app a `health_path` |
+| `soak` | `15s` | Continuous health required before cutover. `0` is no soak: traffic moves on the first healthy probe. Refused with `health_path off`, where nothing is probed and the gate would look once, straight after the process starts (#305 tracks allowing it once the gate checks the socket) |
 | `deadline` | `5m` | Bound on pre_start and, separately, on the health gate (soak included, so `soak` cannot exceed it). The gate is judged once per `health_interval`, so it can run over by one interval plus two `health_timeout`s (the probe before the last tick and the one on it); a soak that falls due on that first tick past the deadline still passes |
 | `drain` | `5s` | In-flight grace after cutover, before SIGTERM |
 | `grace` | `10s` | SIGTERM → SIGKILL window |
@@ -935,8 +935,13 @@ concurrent deploy to 409 until the first one finishes. A client that
 hangs up (a cancelled job, a step timeout) does not stop a running
 `pre_start`: a migration stopped midway would leave the app's data
 half-changed, so it runs to its end, still bounded by `deadline`, and
-the deploy then fails before any traffic moves. Until then a retry
-gets the 409.
+the deploy then fails before any traffic moves. Until then a retry,
+a rollback included, gets the 409. To end a migration that hangs
+sooner than its `deadline`, stop its unit yourself; it is named
+`hotserve-<app>.<version>.<nonce>.prestart.service`. For example:
+`sudo -u hotserve XDG_RUNTIME_DIR=/run/user/$(id -u hotserve)
+systemctl --user stop 'hotserve-blog.*.prestart.service'`. The deploy
+then fails as a failed `pre_start`.
 
 **A failed deploy says why, from the app's side.** The 5xx body's
 `status.last_deploy` carries the phase it stopped in, `phases` — each

@@ -146,6 +146,10 @@ func TestValidate(t *testing.T) {
 		{"bad health path", func(a *App) { a.Apps["blog"].HealthPath = "health" }, "health_path must start with /"},
 		{"zero interval", func(a *App) { a.Apps["blog"].HealthInterval = 0 }, "health_interval must be positive"},
 		{"negative soak", func(a *App) { a.Apps["blog"].Soak = durationPtr(-time.Second) }, "soak and drain"},
+		// With no probe and no soak the gate would look once, straight
+		// after the start, and an app that crashed a moment later
+		// would take traffic.
+		{"soak 0 with health_path off", func(a *App) { a.Apps["blog"].Soak = durationPtr(0); a.Apps["blog"].HealthPath = "off" }, "soak 0 needs a health_path"},
 		{"zero keep", func(a *App) { a.Apps["blog"].Keep = 0 }, "keep must be at least 1"},
 		{"zero size", func(a *App) { a.Apps["blog"].MaxArtifactSize = 0 }, "max_artifact_size must be positive"},
 		{"zero entries", func(a *App) { a.Apps["blog"].MaxArtifactEntries = 0 }, "max_artifact_entries must be positive"},

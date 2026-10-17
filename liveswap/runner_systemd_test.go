@@ -497,6 +497,72 @@ func TestSystemdRunnerStartJobFailureResetsUnit(t *testing.T) {
 	}
 }
 
+// endedJobConn is the manager when a start job's result came in as the
+// job's context ended (jobResult reports the result then): any further
+// call on that context fails, as a D-Bus call on an ended one does.
+type endedJobConn struct {
+	*fakeSystemdConn
+	mu  sync.Mutex
+	job context.Context
+}
+
+func (c *endedJobConn) StartTransientUnit(ctx context.Context, u unitSpec) (string, error) {
+	c.mu.Lock()
+	c.job = ctx
+	c.mu.Unlock()
+	return c.fakeSystemdConn.StartTransientUnit(ctx, u)
+}
+
+func (c *endedJobConn) onEndedJob(ctx context.Context) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ctx == c.job
+}
+
+func (c *endedJobConn) UnitStatus(ctx context.Context, name string) (unitStatus, error) {
+	if c.onEndedJob(ctx) {
+		return unitStatus{}, context.DeadlineExceeded
+	}
+	return c.fakeSystemdConn.UnitStatus(ctx, name)
+}
+
+func (c *endedJobConn) ResetFailedUnit(ctx context.Context, name string) error {
+	if c.onEndedJob(ctx) {
+		return context.DeadlineExceeded
+	}
+	return c.fakeSystemdConn.ResetFailedUnit(ctx, name)
+}
+
+// Promise: the reads after a start job run on a context of their own,
+// as reconcileStart's do, so a job whose result came in as its context
+// ended still gets them: a started unit is adopted with its pid, and a
+// failed one is reported with its exit status and reset.
+func TestSystemdRunnerStartReadsAfterTheJobOnTheirOwnContext(t *testing.T) {
+	r, fake := newTestSystemdRunner(t)
+	r.conn = &endedJobConn{fakeSystemdConn: fake}
+	h, err := r.Start(testApp(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid := h.state().PID; pid != 4242 {
+		t.Fatalf("adopted with pid %d, want the unit's 4242", pid)
+	}
+
+	r, fake = newTestSystemdRunner(t)
+	r.conn = &endedJobConn{fakeSystemdConn: fake}
+	fs := failedStatus
+	fake.mu.Lock()
+	fake.startResult = "failed"
+	fake.failStatus = &fs
+	fake.mu.Unlock()
+	if _, err := r.Start(testApp(t)); err == nil || !strings.HasSuffix(err.Error(), ": start job failed (exit status 3)") {
+		t.Fatalf("a failed start must carry its exit status, got %v", err)
+	}
+	if len(fake.resets()) != 1 {
+		t.Fatalf("the failed unit must be reset, got %v", fake.resets())
+	}
+}
+
 // Promise: a job whose result is in when the context ends reports
 // that result, not the context's error. A select picks among ready
 // cases at random, so a pre_start that finished at the moment of its

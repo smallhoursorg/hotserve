@@ -176,8 +176,9 @@ type AppConfig struct {
 
 	// Soak is how long the new instance must be continuously healthy
 	// before traffic cuts over. 0 is no soak: traffic cuts over on the
-	// first healthy probe. A pointer, as DeployLogLines, so that 0 stays
-	// apart from unset. Default 15s.
+	// first healthy probe, so it needs a HealthPath (Validate). A
+	// pointer, as DeployLogLines, so that 0 stays apart from unset.
+	// Default 15s.
 	Soak *caddy.Duration `json:"soak,omitempty"`
 
 	// Deadline bounds the whole health gate (and pre_start); a version
@@ -554,6 +555,12 @@ func (a *App) Validate() error {
 		}
 		if soak < 0 || cfg.Drain < 0 {
 			return fmt.Errorf("app %s: soak and drain must not be negative", name)
+		}
+		// With health_path off the gate's one check is that the process
+		// is alive, made once per health_interval through the soak; with
+		// no soak that is a single look straight after the start.
+		if cfg.Soak != nil && soak == 0 && cfg.HealthPath == "off" {
+			return fmt.Errorf("app %s: soak 0 needs a health_path: with health_path off nothing is probed, so the gate would look once, straight after the process starts, and an app that crashes a moment later would take traffic; set a health_path or a soak above 0", name)
 		}
 		// The deadline bounds the whole gate, soak included: a soak
 		// the deadline cannot contain is a deploy that can never pass.
