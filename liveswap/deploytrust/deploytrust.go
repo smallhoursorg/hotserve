@@ -56,17 +56,30 @@ const gitlabIssuerDefault = "https://gitlab.com"
 // issuer when validating exp/nbf/iat.
 const oidcLeeway = 60 * time.Second
 
+// DefaultMaxTokenTTL is a local source's max_token_ttl when its block
+// sets none: the longest exp - iat it accepts. A local token is a
+// bearer credential for as long as it lives, and nothing on the box
+// can revoke one short of removing the key, so the bound is what a
+// leaked token is worth. A day covers a job that mints once and runs
+// for hours; one that runs for longer mints per deploy, or its block
+// raises the bound.
+const DefaultMaxTokenTTL = 24 * time.Hour
+
 // TrustConfig is one `deploy_trust` block in Caddyfile/JSON form. Kind
 // is the preset named on the block (`github`, `gitlab`, `oidc`,
 // `local`); the remaining fields are resolved and validated into a
 // Source by Build.
 type TrustConfig struct {
-	Kind      string            `json:"kind,omitempty"`
-	Issuer    string            `json:"issuer,omitempty"`     // oidc/gitlab override
-	Audience  string            `json:"audience,omitempty"`   // required for OIDC presets
-	PublicKey string            `json:"public_key,omitempty"` // local: path to a PKIX PEM ed25519 key
-	Subject   string            `json:"subject,omitempty"`    // sugar for claim `sub`
-	Claims    map[string]string `json:"claims,omitempty"`     // exact-match claim constraints
+	Kind      string `json:"kind,omitempty"`
+	Issuer    string `json:"issuer,omitempty"`     // oidc/gitlab override
+	Audience  string `json:"audience,omitempty"`   // required for OIDC presets
+	PublicKey string `json:"public_key,omitempty"` // local: path to a PKIX PEM ed25519 key
+	// MaxTokenTTL is local's longest exp - iat accepted; nil is
+	// DefaultMaxTokenTTL. A pointer, so an explicit zero reaches Build
+	// to be refused.
+	MaxTokenTTL *caddy.Duration   `json:"max_token_ttl,omitempty"`
+	Subject     string            `json:"subject,omitempty"` // sugar for claim `sub`
+	Claims      map[string]string `json:"claims,omitempty"`  // exact-match claim constraints
 }
 
 // Source is a validated, resolved trust declaration: presets
@@ -78,6 +91,7 @@ type Source struct {
 	audience    string
 	pubKey      ed25519.PublicKey // local
 	keyPath     string            // local (for error messages)
+	maxTTL      time.Duration     // local: the longest exp - iat accepted
 	claims      map[string]string
 	attribution []string // the preset's attributionClaims, kept past the fold to "oidc"
 }
@@ -222,6 +236,9 @@ func resolveTrustConfig(tc TrustConfig) (Source, error) {
 		if tc.PublicKey != "" {
 			return Source{}, fmt.Errorf("%s does not take a public_key", tc.Kind)
 		}
+		if tc.MaxTokenTTL != nil {
+			return Source{}, fmt.Errorf("%s does not take a max_token_ttl (the issuer sets its tokens' lifetime)", tc.Kind)
+		}
 		if err := requireIdentityClaim(tc.Kind, claims); err != nil {
 			return Source{}, err
 		}
@@ -234,11 +251,17 @@ func resolveTrustConfig(tc TrustConfig) (Source, error) {
 		if tc.Issuer != "" {
 			return Source{}, fmt.Errorf("local does not take an issuer")
 		}
+		maxTTL := DefaultMaxTokenTTL
+		if tc.MaxTokenTTL != nil {
+			if maxTTL = time.Duration(*tc.MaxTokenTTL); maxTTL <= 0 {
+				return Source{}, fmt.Errorf("max_token_ttl must be positive, got %v", maxTTL)
+			}
+		}
 		key, err := loadEd25519PublicKey(tc.PublicKey)
 		if err != nil {
 			return Source{}, fmt.Errorf("local public_key: %w", err)
 		}
-		return Source{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, claims: claims, attribution: attributionClaims["local"]}, nil
+		return Source{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, maxTTL: maxTTL, claims: claims, attribution: attributionClaims["local"]}, nil
 
 	case "":
 		return Source{}, fmt.Errorf("missing preset (use `deploy_trust github|gitlab|oidc|local { ... }`)")
@@ -539,7 +562,7 @@ func VerifiersOn(clock Clock, sources []Source, jwksClient *http.Client) []Verif
 			})
 		case "local":
 			out = append(out, &localVerifier{
-				audience: ts.audience, pub: ts.pubKey,
+				audience: ts.audience, pub: ts.pubKey, maxTTL: ts.maxTTL,
 				keyPath: ts.keyPath, claims: ts.claims, attribution: ts.attribution,
 			})
 		}
@@ -825,14 +848,16 @@ func decodeClaims(raw []byte) (map[string]any, error) {
 
 // localVerifier validates a JWT signed by the operator's local private
 // key against the configured public key. Standard-claim checks (exp,
-// nbf, aud) are enforced here because there is no OIDC provider to do
-// them.
+// nbf, iat, aud) and the lifetime bound are enforced here because
+// there is no OIDC provider to do them.
 type localVerifier struct {
 	audience    string
 	pub         ed25519.PublicKey
+	maxTTL      time.Duration // the longest exp - iat accepted
 	keyPath     string
 	claims      map[string]string
 	attribution []string
+	clock       Clock // what exp, nbf and iat are judged against; nil is the system clock
 }
 
 func (v *localVerifier) Label() string { return "local:" + v.keyPath }
@@ -856,12 +881,23 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) (Identity, er
 		return Identity{}, err
 	}
 	// ValidateWithLeeway only checks exp when present, so a local token
-	// with no expiry would be accepted forever. Require it — the
-	// short-lived-token guarantee depends on it.
+	// with no expiry would be accepted forever. Require it, and the
+	// iat its lifetime is measured from: the bound below is what a
+	// leaked token is worth.
 	if std.Expiry == nil {
 		return Identity{}, fmt.Errorf("local token has no exp claim")
 	}
-	expected := jwt.Expected{Time: time.Now()}
+	if std.IssuedAt == nil {
+		return Identity{}, fmt.Errorf("local token has no iat claim, which max_token_ttl is measured from")
+	}
+	if life := std.Expiry.Time().Sub(std.IssuedAt.Time()); life > v.maxTTL {
+		return Identity{}, fmt.Errorf("local token lives %v (exp - iat), over this source's max_token_ttl %v", life, v.maxTTL)
+	}
+	now := time.Now()
+	if v.clock != nil {
+		now = v.clock.Now()
+	}
+	expected := jwt.Expected{Time: now}
 	if v.audience != "" {
 		expected.AnyAudience = jwt.Audience{v.audience}
 	}

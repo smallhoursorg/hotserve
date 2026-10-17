@@ -15,11 +15,18 @@ package deploytrust
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"math/big"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	jose "github.com/go-jose/go-jose/v4"
+
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
 )
 
 func FuzzMatchClaims(f *testing.F) {
@@ -125,6 +132,85 @@ func FuzzCaddyStripsKey(f *testing.F) {
 			t.Fatalf("claim %q=%q in %s: the strip changes it %t, caddyStripsKey says %t", key, value, raw, stripped, caddyStripsKey(key))
 		}
 	})
+}
+
+// FuzzLocalTokenLifetime holds max_token_ttl against whatever iat and
+// exp a local token's signer writes — integers, fractions, exponents,
+// values at go-jose's ±2^62-second bound: a token the local verifier
+// accepts carries both, and its exp - iat, read from the raw JSON
+// numbers, is under the bound plus the two seconds go-jose's
+// truncation of each to whole seconds can hide. The verifier's clock
+// is fixed, so a seed can be accepted; the bound is kept under ten
+// years, far inside time.Duration's range.
+func FuzzLocalTokenLifetime(f *testing.F) {
+	for _, s := range []struct {
+		iat, exp string
+		maxSec   int64
+	}{
+		// trusttest.NewClock's instant is 1700000000.
+		{"1700000000", "1700086400", 86400}, // exactly the bound: accepted
+		{"1700000000", "1700086401", 86400}, // a second over
+		{"1700000000", "2015360000", 86400}, // ten years
+		{"1.7e9", "1.7000864e9", 86400},
+		{"1699999999.9", "1700086400.9", 86400},
+		{"1700000000", "1700086400.99", 86400},
+		{"-0", "1700000000", 86400},
+		{"-4611686018427387903", "4611686018427387903", 86400},
+		{"", "1700000060", 86400}, // no iat
+		{"1700000000", "1700000060", 1},
+	} {
+		f.Add(s.iat, s.exp, s.maxSec)
+	}
+	priv, pub := trusttest.GenerateKey()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, nil)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Fuzz(func(t *testing.T, iat, exp string, maxSec int64) {
+		if !jsonNumber(exp) || (iat != "" && !jsonNumber(iat)) {
+			return
+		}
+		limit := time.Duration(max(1, uint64(maxSec)%(10*365*24*3600))) * time.Second
+		payload := `{"aud":"a","exp":` + exp
+		if iat != "" {
+			payload += `,"iat":` + iat
+		}
+		payload += "}"
+		jws, err := signer.Sign([]byte(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok, err := jws.CompactSerialize()
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := &localVerifier{audience: "a", pub: pub, maxTTL: limit, clock: trusttest.NewClock()}
+		if _, err := v.verify(context.Background(), tok); err != nil {
+			return // refusing is always within the bound
+		}
+		if iat == "" {
+			t.Fatalf("accepted %s, which has no iat", payload)
+		}
+		life := new(big.Float).Sub(rawNumber(t, exp), rawNumber(t, iat))
+		if bound := new(big.Float).SetInt64(int64(limit/time.Second) + 2); life.Cmp(bound) >= 0 {
+			t.Fatalf("accepted %s: exp - iat is %s s, over max_token_ttl %v", payload, life.Text('f', 3), limit)
+		}
+	})
+}
+
+// jsonNumber reports whether s is one JSON number literal.
+func jsonNumber(s string) bool {
+	return s != "" && (s[0] == '-' || (s[0] >= '0' && s[0] <= '9')) && json.Valid([]byte(s))
+}
+
+// rawNumber is a JSON number literal's exact value.
+func rawNumber(t *testing.T, s string) *big.Float {
+	t.Helper()
+	n, _, err := big.ParseFloat(strings.TrimSpace(s), 10, 256, big.ToNearestEven)
+	if err != nil {
+		t.Fatalf("number %q: %v", s, err)
+	}
+	return n
 }
 
 // rawClaimMatches decides, from the claim's own bytes and without

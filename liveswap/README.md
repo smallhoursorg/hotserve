@@ -703,7 +703,16 @@ unaudienced token; for `local`, the name of this box, see below),
 `ref`, `environment`, etc.; a claim named `@id` is refused, because
 Caddy deletes that key from the config before hotserve reads it),
 `subject` (sugar for `claim sub`),
-`issuer` (oidc/gitlab), `public_key` (local).
+`issuer` (oidc/gitlab), `public_key` and `max_token_ttl` (local).
+
+A `local` token is a bearer credential for as long as it lives, and
+nothing on the box revokes one short of removing its key. So a
+`local` block accepts a token only while its lifetime, `exp - iat`, is
+at most `max_token_ttl <duration>` (default `24h`): a token without
+`iat`, or minted to live longer, is refused, and the journal's
+`refused` names the directive. `hotserve deploy-token` mints for
+`--ttl` (default `5m`) and warns above an hour. Mint one per deploy;
+a job that cannot raises the bound on its block.
 
 The OIDC presets also **require an identity claim** — one of
 `repository`/`repository_id`/… (github), `project_path`/`project_id`/…
@@ -800,8 +809,9 @@ repository can mint a token for audience `hotserve`, so an answer that
 named the failed check would tell them which apps exist and what each
 block pins. The `webhook auth failed` line carries `refused`: one
 entry per source, in config order, each the source's label and what
-it refused — the signature, `exp`, the audience, or a `claim` that did
-not match, with the identity the token presented:
+it refused — the signature, `exp`, a local token's lifetime over
+`max_token_ttl`, the audience, or a `claim` that did not match, with
+the identity the token presented:
 
 ```
 "refused":"oidc:https://token.actions.githubusercontent.com: claim \"repository\" mismatch, presented repository=your-org/other ref=refs/heads/main actor=alice; local:/etc/hotserve/alice.pub: go-jose/go-jose: error in cryptographic primitive"

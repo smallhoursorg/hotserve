@@ -2,7 +2,9 @@ package liveswap
 
 import (
 	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseClaimsFlagRejectsReserved(t *testing.T) {
@@ -17,6 +19,25 @@ func TestParseClaimsFlagRejectsReserved(t *testing.T) {
 	}
 	if m["repository"] != "o/r" || m["ref"] != "refs/heads/main" {
 		t.Fatalf("claims parsed wrong: %v", m)
+	}
+}
+
+// A --ttl over an hour is minted with a warning on stderr saying what
+// a box does with it; an hour or less is minted silently.
+func TestDeployTokenWarnsOverAnHour(t *testing.T) {
+	for ttl, warns := range map[time.Duration]bool{
+		5 * time.Minute:         false,
+		time.Hour:               false,
+		time.Hour + time.Second: true,
+		87600 * time.Hour:       true,
+	} {
+		got := ttlWarning(ttl)
+		if (got != "") != warns {
+			t.Errorf("--ttl %v: warning %q, want one: %t", ttl, got, warns)
+		}
+		if warns && (!strings.Contains(got, ttl.String()) || !strings.Contains(got, "max_token_ttl")) {
+			t.Errorf("--ttl %v: warning %q, want it to name the ttl and max_token_ttl", ttl, got)
+		}
 	}
 }
 
