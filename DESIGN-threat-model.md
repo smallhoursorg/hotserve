@@ -85,12 +85,13 @@ against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so its refusal is the same 401 as a known
 app's (`Handler.ServeHTTP`, liveswap/handler.go). The time to that 401
-is not the same: a well-formed token that fails an OIDC source's
-signature check makes that source refetch the issuer's JWKS first
-(go-oidc's `RemoteKeySet`), so an app whose sources include an OIDC
-source the global ones lack answers after an outbound round trip, and
-an unknown name at once — an app name can be confirmed by timing
-(owed: #296). Config load refuses an app
+need not be: a well-formed token that fails an OIDC source's signature
+check makes that source refetch its issuer's JWKS first (go-oidc's
+`RemoteKeySet`), with no issuer check before it, so a known and an
+unknown name each pay the round trips of their own sources. Where those
+differ — plainest when the global sources hold no OIDC source, and an
+unknown name is refused at once — an app name can be confirmed by
+timing (owed: #296). Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.
