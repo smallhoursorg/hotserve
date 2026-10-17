@@ -3,8 +3,9 @@
 [Your first deploy](first-deploy.md) leaves a working box with the
 doors a fresh server has. This page closes them: SSH by key only, the
 SSH port shut to everyone but you, and, if you want them, an
-administrator who is not root and Debian's security updates installed
-on their own. It is recommended, and none of it is needed to deploy.
+administrator who is not root and Debian's updates for its release —
+security fixes and point releases — installed on their own. It is
+recommended, and none of it is needed to deploy.
 
 Nothing here changes how the box deploys or takes its config: app
 deploys authenticate with the workflow's token, and config with a
@@ -93,10 +94,10 @@ let the administrator create and edit env files under
 remove it and its group, as root: `rm /etc/sudoers.d/hotserve-admin &&
 groupdel hotserve-admin`.
 
-## 4. Security updates on their own, if you want them
+## 4. Debian's updates on their own, if you want them
 
-Debian's `unattended-upgrades` installs Debian's fixes for the box's
-release by itself, once a day. Like step 3 it is optional, and nothing
+Debian's `unattended-upgrades` installs Debian's updates for the box's
+release — security fixes and point releases — by itself, once a day. Like step 3 it is optional, and nothing
 in it stops or restarts an app.
 
 What it does: normally between 06:00 and 07:00 in the box's time zone
