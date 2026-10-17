@@ -409,6 +409,23 @@ MV=$(commit alice "$work/fmoved")
 push "$MV"
 refused "a file that moves the box's server" "this push changes where the box's server listens (its listen addresses differ from the loaded config's): a push cannot move the address it arrives on; make that change at the console"
 
+# The request limits: a read_header timeout under the floor on the box
+# server validates and would load, and is refused by name before any
+# route (the usual hardening values are the unit tests' to prove).
+sed 's/^\t\ttrusted_proxies static private_ranges$/&\n\t\ttimeouts {\n\t\t\tread_header 1s\n\t\t}/' "$work/f2" >"$work/fshort"
+grep -q 'read_header 1s' "$work/fshort" || fail "the short-timeout file was not made"
+SH=$(commit alice "$work/fshort")
+push "$SH"
+refused "a file with a read_header timeout under the floor" "the new Caddyfile does not reach box_webhook on /: the server's read_header_timeout is under 5s, the floor for a push's handshake and headers"
+
+# request_body ahead of box_webhook (Caddy's default order puts it
+# there): a max_size under the bundle's cap is refused by name.
+sed 's/^\tbox_webhook$/\trequest_body {\n\t\tmax_size 1MB\n\t}\n\tbox_webhook/' "$work/f2" >"$work/fcapped"
+grep -q 'max_size 1MB' "$work/fcapped" || fail "the capped file was not made"
+CP=$(commit alice "$work/fcapped")
+push "$CP"
+refused "a file that caps the body under the bundle's" "the new Caddyfile does not reach box_webhook on /: request_body's max_size caps the body under 16 MiB first"
+
 echo "=== box apply 4: a config that validates but does not load is rolled back ==="
 # Validation binds no listener; loading does, and 192.0.2.1 (TEST-NET-1)
 # is on no interface here.

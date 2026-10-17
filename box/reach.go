@@ -4,9 +4,10 @@ package box
 // before box_webhook"): of the pushed file's adaptation — Caddy's JSON
 // as `hotserve adapt` prints it — whether the server that carries
 // box_webhook still listens where the push arrived (the door), whether
-// the workflow's connection reaches that server's routes, and whether a
-// GET and a POST for / on the box_webhook host then meet box_webhook
-// before any handler that could answer them. Pure: the JSON and the
+// the workflow's connection reaches that server's routes (its request
+// limits among them), and whether a GET and a POST for / on the
+// box_webhook host then meet box_webhook before any handler that could
+// answer them, or cap or replace their body. Pure: the JSON and the
 // door in, a verdict out, no module loaded but the five matcher types
 // it decides with and Caddy's SNI matcher. Fail-closed every way: a
 // handler, a listener wrapper or a TLS policy setting the tables have
@@ -23,8 +24,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -48,10 +51,11 @@ var errAdaptation = errors.New("the adaptation does not parse")
 // The adaptation is decoded as one JSON value and converted once, in a
 // single pass linear in its size, into the shape the walk reads: a
 // route's group, matcher sets, handlers and terminal flag; a handler's
-// module name, whether a headers handler has a request section, and a
+// module name, whether a headers handler has a request section, which
+// of a request_body handler's settings the table refuses, and a
 // subroute's routes. Another module's keys are never read, whatever
-// they hold; a value of the wrong shape where a route list, a set or a
-// handler must be is the adaptation's fault.
+// they hold; a value of the wrong shape where a route list, a set, a
+// handler or one of those settings must be is the adaptation's fault.
 type adaptedRoute struct {
 	group    string
 	match    []map[string]any
@@ -59,9 +63,13 @@ type adaptedRoute struct {
 	terminal bool
 }
 
+// adaptedHandler's setting is "set" for a request_body that replaces
+// the body, else "max_size" for one whose cap is positive and under
+// the bundle's; "" otherwise.
 type adaptedHandler struct {
 	name    string
 	request bool
+	setting string
 	sub     []adaptedRoute
 }
 
@@ -117,6 +125,12 @@ func routeList(v any) ([]adaptedRoute, error) {
 					h.sub = sub
 				case "headers":
 					h.request = hm["request"] != nil
+				case "request_body":
+					setting, err := requestBodySetting(hm)
+					if err != nil {
+						return nil, err
+					}
+					h.setting = setting
 				}
 				r.handle = append(r.handle, h)
 			}
@@ -124,6 +138,37 @@ func routeList(v any) ([]adaptedRoute, error) {
 		routes = append(routes, r)
 	}
 	return routes, nil
+}
+
+// bundleCap is the bundle's cap as the texts name it: the handler's own
+// figure (exchange.go), so the two cannot drift.
+var bundleCap = fmt.Sprintf("%d MiB", maxBody>>20)
+
+// requestBodySetting reads a request_body handler's two settings as
+// Caddy does (requestbody.RequestBody.ServeHTTP): a `set` that is not
+// the empty string replaces every body, whatever `max_size` says, and
+// a `max_size` is a cap only when positive. Each is read in Caddy's
+// shape for it; null is absent, as in the TLS policies.
+func requestBodySetting(hm map[string]any) (string, error) {
+	if v, ok := hm["set"]; ok && v != nil {
+		s, ok := v.(string)
+		if !ok {
+			return "", errAdaptation
+		}
+		if s != "" {
+			return "set", nil
+		}
+	}
+	if v, ok := hm["max_size"]; ok && v != nil {
+		n, ok := v.(float64)
+		if !ok {
+			return "", errAdaptation
+		}
+		if n > 0 && n < maxBody {
+			return "max_size", nil
+		}
+	}
+	return "", nil
 }
 
 // reach asks the question of adapted for host, the box_webhook host
@@ -287,19 +332,59 @@ func carriesWebhook(routes []adaptedRoute) bool {
 
 // serverSettings is what of a server's own keys the workflow's
 // connection meets before any route runs: the protocols its listeners
-// serve, its listener wrappers, its TLS connection policies and its
-// strict SNI check. Only these keys are encoded again and decoded into
-// Caddy's shapes for them (its own type, for client authentication),
+// serve, its listener wrappers, its TLS connection policies, its
+// strict SNI check and the request limits the floors are asked of.
+// Only these keys are encoded again and decoded into Caddy's shapes
+// for them (its own types, for client authentication and a duration),
 // so a value of another shape is the adaptation's fault, as in the
 // routes; no other key of the server is read.
 type serverSettings struct {
-	Protocols        []string          `json:"protocols"`
-	ListenProtocols  [][]string        `json:"listen_protocols"`
-	ListenerWrappers []map[string]any  `json:"listener_wrappers"`
-	StrictSNIHost    *bool             `json:"strict_sni_host"`
-	RawPolicies      []json.RawMessage `json:"tls_connection_policies"`
-	policies         []tlsPolicy
+	Protocols         []string          `json:"protocols"`
+	ListenProtocols   [][]string        `json:"listen_protocols"`
+	ListenerWrappers  []map[string]any  `json:"listener_wrappers"`
+	StrictSNIHost     *bool             `json:"strict_sni_host"`
+	RawPolicies       []json.RawMessage `json:"tls_connection_policies"`
+	ReadTimeout       caddy.Duration    `json:"read_timeout"`
+	ReadHeaderTimeout caddy.Duration    `json:"read_header_timeout"`
+	ReadIdleTimeout   caddy.Duration    `json:"read_idle_timeout"`
+	ReadMinRate       int64             `json:"read_min_rate"`
+	WriteTimeout      caddy.Duration    `json:"write_timeout"`
+	MaxHeaderBytes    int               `json:"max_header_bytes"`
+	policies          []tlsPolicy
 }
+
+// serverKeys are the keys settingsOf reads: serverSettings' JSON tags,
+// so a field added there is read without a second list to keep.
+var serverKeys = func() []string {
+	t := reflect.TypeFor[serverSettings]()
+	keys := make([]string, 0, t.NumField())
+	for i := range t.NumField() {
+		if tag := t.Field(i).Tag.Get("json"); tag != "" {
+			keys = append(keys, tag)
+		}
+	}
+	return keys
+}()
+
+// The floors on the box server's request limits (DESIGN-box.md, Caps,
+// and "The request limits" in "Reachability"): every site on the
+// server shares them, so only a value the workflow's request cannot
+// work with is refused. A limit counts only when positive: zero or
+// absent is Caddy's default (App.Provision: 16 KiB of header, a minute
+// to read the header, a minute's read idle, no whole-read deadline, no
+// rate, no write deadline), and a negative one is no limit, to Go's
+// net/http and to Caddy's idle reader alike (max_header_bytes: the
+// default again). The rate counts only while a read idle deadline
+// applies: Caddy's Server.ServeHTTP installs the reader that holds the
+// rate only for a positive ReadIdleTimeout, which zero becomes.
+const (
+	floorMaxHeaderBytes    = 8 << 10
+	floorReadHeaderTimeout = 5 * time.Second
+	floorReadTimeout       = 30 * time.Second
+	floorReadIdleTimeout   = 10 * time.Second
+	ceilingReadMinRate     = 64 << 10
+	floorWriteTimeout      = 5 * time.Second
+)
 
 // tlsPolicy is one TLS connection policy: every key it sets, for the
 // table's fail-closed default, and the values the table reads.
@@ -314,7 +399,7 @@ type tlsPolicy struct {
 func settingsOf(server any) (serverSettings, error) {
 	m, _ := server.(map[string]any)
 	keys := map[string]any{}
-	for _, k := range []string{"protocols", "listen_protocols", "listener_wrappers", "strict_sni_host", "tls_connection_policies"} {
+	for _, k := range serverKeys {
 		if v, ok := m[k]; ok {
 			keys[k] = v
 		}
@@ -340,7 +425,8 @@ func settingsOf(server any) (serverSettings, error) {
 // which curl sends none), no client certificate, no PROXY header. ""
 // when it reaches the routes; otherwise the catalogue text of the first
 // thing that refuses it, asked in the order of the tables: the
-// listeners, the wrappers, the TLS policies, then the strict SNI check.
+// listeners, the wrappers, the TLS policies, the strict SNI check,
+// then the request limits.
 func (s serverSettings) connection(host string) string {
 	served := map[string]bool{}
 	for _, ps := range s.listeners() {
@@ -404,6 +490,29 @@ func (s serverSettings) connection(host string) string {
 	}
 	if strict && sni != host {
 		return "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"
+	}
+	return s.limits()
+}
+
+// limits is the Reachability table of request limits, in its order:
+// "" when every limit set is one the workflow's request can work
+// with, else the catalogue text of the first that is not. Each text is
+// fixed words naming the setting and its floor, never the value.
+func (s serverSettings) limits() string {
+	under := func(d caddy.Duration, floor time.Duration) bool { return d > 0 && time.Duration(d) < floor }
+	switch {
+	case s.MaxHeaderBytes > 0 && s.MaxHeaderBytes < floorMaxHeaderBytes:
+		return fmt.Sprintf("the server's max_header_bytes is under %d KiB, the floor for a push's headers and token", floorMaxHeaderBytes>>10)
+	case under(s.ReadHeaderTimeout, floorReadHeaderTimeout):
+		return fmt.Sprintf("the server's read_header_timeout is under %s, the floor for a push's handshake and headers", floorReadHeaderTimeout)
+	case under(s.ReadTimeout, floorReadTimeout):
+		return fmt.Sprintf("the server's read_timeout is under %s, the floor for a push's upload", floorReadTimeout)
+	case under(s.ReadIdleTimeout, floorReadIdleTimeout):
+		return fmt.Sprintf("the server's read_idle_timeout is under %s, the floor for a push's upload", floorReadIdleTimeout)
+	case s.ReadMinRate > ceilingReadMinRate && s.ReadIdleTimeout >= 0:
+		return fmt.Sprintf("the server's read_min_rate is over %d KiB/s, the ceiling for a push's upload", ceilingReadMinRate>>10)
+	case under(s.WriteTimeout, floorWriteTimeout):
+		return fmt.Sprintf("the server's write_timeout is under %s, the floor for a push's handshake", floorWriteTimeout)
 	}
 	return ""
 }
@@ -550,16 +659,19 @@ const (
 	blocked
 )
 
-// reachBlock is what stood in the way: a handler by module name, a
-// terminal route that ran out of handlers (name ""; a site when at the
-// server level), box_webhook itself behind a per-request matcher, or a
-// matcher that may fail — under a match that is certain or, when may is
-// set, hangs on matcher.
+// reachBlock is what stood in the way: a handler by module name (and
+// the setting of it, when one setting is the block: request_body's
+// set or max_size), a terminal route that ran out of handlers (name
+// ""; a site when at the server level), box_webhook itself behind a
+// per-request matcher, or a matcher that may fail — under a match that
+// is certain or, when may is set, hangs on matcher.
 type reachBlock struct {
 	name     string
+	setting  string
 	terminal bool
 	site     bool
 	changes  bool
+	caps     bool
 	may      bool
 	behind   bool
 	fails    bool
@@ -586,16 +698,22 @@ func (b *reachBlock) text(host string) string {
 		what = "a terminal route"
 	case what == "":
 		what = "a nameless handler"
+	case b.setting != "":
+		what += "'s " + b.setting
 	}
 	switch {
 	case b.behind:
 		return what + " stands behind a " + matcher + " matcher decided per request"
 	case b.may && b.changes:
 		return what + " may change the request first (its " + matcher + " matcher is decided per request)"
+	case b.may && b.caps:
+		return what + " may cap the body under " + bundleCap + " first (its " + matcher + " matcher is decided per request)"
 	case b.may:
 		return what + " may answer first (its " + matcher + " matcher is decided per request)"
 	case b.changes:
 		return what + " changes the request first"
+	case b.caps:
+		return what + " caps the body under " + bundleCap + " first"
 	default:
 		return what + " answers first"
 	}
@@ -672,7 +790,9 @@ func (w *reachWalk) routes(rs []adaptedRoute, outer matchVerdict, top bool) (rea
 				}
 			case classPasses:
 			case classChanges:
-				return blocked, &reachBlock{name: h.name, changes: true, may: may, matcher: v.matcher}
+				return blocked, &reachBlock{name: h.name, setting: h.setting, changes: true, may: may, matcher: v.matcher}
+			case classCaps:
+				return blocked, &reachBlock{name: h.name, setting: h.setting, caps: true, may: may, matcher: v.matcher}
 			default:
 				return blocked, &reachBlock{name: h.name, may: may, matcher: v.matcher}
 			}
@@ -692,6 +812,7 @@ const (
 	classAnswers handlerClass = iota
 	classPasses
 	classChanges
+	classCaps
 	classSubroute
 	classReached
 )
@@ -703,12 +824,20 @@ func classify(h adaptedHandler) handlerClass {
 		return classReached
 	case "subroute":
 		return classSubroute
-	case "vars", "map", "log_append", "tracing", "request_body", "timeouts",
+	case "vars", "map", "log_append", "tracing", "timeouts",
 		"encode", "push", "hint_penaltybox":
 		return classPasses
 	case "headers":
 		if h.request {
 			return classChanges
+		}
+		return classPasses
+	case "request_body":
+		switch h.setting {
+		case "set":
+			return classChanges
+		case "max_size":
+			return classCaps
 		}
 		return classPasses
 	case "rewrite":

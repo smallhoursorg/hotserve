@@ -268,20 +268,48 @@ func TestReachTemplate(t *testing.T) {
 
 // TestReachConnection is the connection's tables (DESIGN-box.md,
 // "Reachability") on adapted Caddyfiles: the protocols the box
-// server's listeners serve, its listener wrappers, and the TLS
-// connection policy for the host. global goes in the global options.
+// server's listeners serve, its listener wrappers, the TLS
+// connection policy for the host, and the floors on its request
+// limits — Caddy's defaults and the usual hardening pass, a value the
+// workflow's request cannot work with is refused by name. global goes
+// in the global options.
 func TestReachConnection(t *testing.T) {
 	const (
 		servers    = "\tservers {\n%s\t}\n"
+		timeouts   = "\tservers {\n\t\ttimeouts {\n%s\t\t}\n\t}\n"
 		clientAuth = "\ttls {\n\t\tclient_auth {\n\t\t\tmode require\n\t\t}\n\t}\n"
 		noH1H2     = "a listener's protocols include neither h1 nor h2"
 		requires   = "a TLS connection policy for deploy.example.com requires a client certificate"
+		readHeader = "the server's read_header_timeout is under 5s, the floor for a push's handshake and headers"
+		readBody   = "the server's read_timeout is under 30s, the floor for a push's upload"
+		readIdle   = "the server's read_idle_timeout is under 10s, the floor for a push's upload"
+		minRate    = "the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload"
+		maxHeader  = "the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token"
+		write      = "the server's write_timeout is under 5s, the floor for a push's handshake"
 	)
 	for name, c := range map[string]struct {
 		global, inside, after string
 		want                  string
 	}{
-		"the design's example":                    {},
+		"the design's example":                                    {},
+		"the usual hardening":                                     {global: fmt.Sprintf(servers, "\t\tmax_header_size 16KB\n\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 30s\n\t\t\tread_body_idle 30s 1024\n\t\t\twrite 30s\n\t\t\tidle 1m\n\t\t}\n")},
+		"read_header at the floor":                                {global: fmt.Sprintf(timeouts, "\t\t\tread_header 5s\n")},
+		"read_header under the floor":                             {global: fmt.Sprintf(timeouts, "\t\t\tread_header 1s\n"), want: readHeader},
+		"read_header 0s, Caddy's default":                         {global: fmt.Sprintf(timeouts, "\t\t\tread_header 0s\n")},
+		"read_body at the floor":                                  {global: fmt.Sprintf(timeouts, "\t\t\tread_body 30s\n")},
+		"read_body under the floor":                               {global: fmt.Sprintf(timeouts, "\t\t\tread_body 29s\n"), want: readBody},
+		"read_body_idle at the floor, the rate at its ceiling":    {global: fmt.Sprintf(timeouts, "\t\t\tread_body_idle 10s 65536\n")},
+		"read_body_idle under the floor":                          {global: fmt.Sprintf(timeouts, "\t\t\tread_body_idle 9s\n"), want: readIdle},
+		"a rate over the ceiling":                                 {global: fmt.Sprintf(timeouts, "\t\t\tread_body_idle 30s 65537\n"), want: minRate},
+		"write at the floor":                                      {global: fmt.Sprintf(timeouts, "\t\t\twrite 5s\n")},
+		"write under the floor":                                   {global: fmt.Sprintf(timeouts, "\t\t\twrite 1s\n"), want: write},
+		"write_idle, its rate, idle and the keepalives, no floor": {global: fmt.Sprintf(servers, "\t\ttimeouts {\n\t\t\twrite_idle 1s 1000000\n\t\t\tidle 1s\n\t\t}\n\t\tkeepalive_interval 1s\n\t\tkeepalive_idle 1s\n\t\tkeepalive_count 1\n")},
+		"max_header_size at the floor":                            {global: fmt.Sprintf(servers, "\t\tmax_header_size 8KiB\n")},
+		"max_header_size under the floor":                         {global: fmt.Sprintf(servers, "\t\tmax_header_size 4KB\n"), want: maxHeader},
+		// humanize reads KB as 1000 bytes: 8KB is 8000, under 8 KiB.
+		"max_header_size 8KB, which is 8000 bytes":          {global: fmt.Sprintf(servers, "\t\tmax_header_size 8KB\n"), want: maxHeader},
+		"limits on another port's server":                   {global: "\tservers :8443 {\n\t\tmax_header_size 1KB\n\t\ttimeouts {\n\t\t\tread_header 1s\n\t\t}\n\t}\n"},
+		"a short read_header ahead of a responder in front": {global: fmt.Sprintf(timeouts, "\t\t\tread_header 1s\n") + "\torder respond first\n", inside: "\trespond ok\n", want: readHeader},
 		"protocols h1":                            {global: fmt.Sprintf(servers, "\t\tprotocols h1\n")},
 		"protocols h2 and h3":                     {global: fmt.Sprintf(servers, "\t\tprotocols h2 h3\n")},
 		"protocols h3":                            {global: fmt.Sprintf(servers, "\t\tprotocols h3\n"), want: noH1H2},
@@ -387,12 +415,40 @@ func TestReachConnectionJSON(t *testing.T) {
 		"an IP host, strict SNI on":                         {host: ip, settings: `"strict_sni_host":true,`, want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
 		"an IP host, strict SNI on by another site's client authentication": {host: ip, settings: `"tls_connection_policies":[{"match":{"sni":["example.com"]},"client_authentication":{"mode":"require"}},{}],`,
 			want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
-		"a nameless setting":                 {settings: `"tls_connection_policies":[{"":1}],`, want: "a TLS connection policy for deploy.example.com sets nameless, which may refuse the handshake"},
-		"a nameless matcher":                 {settings: `"tls_connection_policies":[{"match":{"":1},"drop":true},{}],`, want: "a TLS connection policy that may apply to deploy.example.com drops the connection (its nameless matcher is decided per connection)"},
-		"a hostname, strict SNI on":          {settings: `"strict_sni_host":true,`},
-		"protocols that do not read":         {settings: `"protocols":"h1",`, want: "error"},
-		"listener wrappers that do not read": {settings: `"listener_wrappers":{"wrapper":"tls"},`, want: "error"},
-		"policies that do not read":          {settings: `"tls_connection_policies":[1],`, want: "error"},
+		"a nameless setting":        {settings: `"tls_connection_policies":[{"":1}],`, want: "a TLS connection policy for deploy.example.com sets nameless, which may refuse the handshake"},
+		"a nameless matcher":        {settings: `"tls_connection_policies":[{"match":{"":1},"drop":true},{}],`, want: "a TLS connection policy that may apply to deploy.example.com drops the connection (its nameless matcher is decided per connection)"},
+		"a hostname, strict SNI on": {settings: `"strict_sni_host":true,`},
+		// The request limits, in Caddy's shapes: a duration as a number
+		// of nanoseconds or as a string, bytes as an integer. Zero or
+		// null is Caddy's default, a negative value no limit; the
+		// boundary is the floor itself.
+		"read_header_timeout as a string, under":     {settings: `"read_header_timeout":"4s",`, want: "the server's read_header_timeout is under 5s, the floor for a push's handshake and headers"},
+		"read_header_timeout as nanoseconds, under":  {settings: `"read_header_timeout":4999999999,`, want: "the server's read_header_timeout is under 5s, the floor for a push's handshake and headers"},
+		"read_header_timeout at the floor":           {settings: `"read_header_timeout":5000000000,`},
+		"read_header_timeout zero":                   {settings: `"read_header_timeout":0,`},
+		"read_header_timeout null":                   {settings: `"read_header_timeout":null,`},
+		"read_header_timeout negative, no timeout":   {settings: `"read_header_timeout":-1,`},
+		"read_timeout under":                         {settings: `"read_timeout":"29s",`, want: "the server's read_timeout is under 30s, the floor for a push's upload"},
+		"read_idle_timeout under":                    {settings: `"read_idle_timeout":"9s",`, want: "the server's read_idle_timeout is under 10s, the floor for a push's upload"},
+		"write_timeout under":                        {settings: `"write_timeout":"4s",`, want: "the server's write_timeout is under 5s, the floor for a push's handshake"},
+		"max_header_bytes under":                     {settings: `"max_header_bytes":8191,`, want: "the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token"},
+		"max_header_bytes at the floor":              {settings: `"max_header_bytes":8192,`},
+		"max_header_bytes negative, Caddy's default": {settings: `"max_header_bytes":-5,`},
+		"read_min_rate at the ceiling":               {settings: `"read_min_rate":65536,`},
+		"read_min_rate over":                         {settings: `"read_min_rate":65537,`, want: "the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload"},
+		"read_min_rate negative, no rate":            {settings: `"read_min_rate":-1,`},
+		"read_min_rate over, under a negative read idle, which Caddy never applies": {settings: `"read_idle_timeout":-1,"read_min_rate":65537,`},
+		"read_min_rate over, read idle zero, the default":                           {settings: `"read_idle_timeout":0,"read_min_rate":65537,`, want: "the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload"},
+		"write_idle_timeout, write_min_rate and idle_timeout, no floor":             {settings: `"write_idle_timeout":1,"write_min_rate":1000000,"idle_timeout":1,`},
+		"two limits under: the table's first is named":                              {settings: `"read_header_timeout":"1s","max_header_bytes":1,`, want: "the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token"},
+		"a limit under, behind a strict SNI refusal":                                {host: ip, settings: `"strict_sni_host":true,"max_header_bytes":1,`, want: "the server's strict_sni_host refuses a request to an IP address, which carries no SNI"},
+		"a duration that does not read":                                             {settings: `"read_header_timeout":"soon",`, want: "error"},
+		"a duration with a fraction":                                                {settings: `"read_timeout":1.5,`, want: "error"},
+		"a byte count that does not read":                                           {settings: `"max_header_bytes":"8KB",`, want: "error"},
+		"a rate that does not read":                                                 {settings: `"read_min_rate":"fast",`, want: "error"},
+		"protocols that do not read":                                                {settings: `"protocols":"h1",`, want: "error"},
+		"listener wrappers that do not read":                                        {settings: `"listener_wrappers":{"wrapper":"tls"},`, want: "error"},
+		"policies that do not read":                                                 {settings: `"tls_connection_policies":[1],`, want: "error"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			host := c.host
@@ -429,19 +485,41 @@ func TestReachJSON(t *testing.T) {
 		adapted []byte
 		want    string // "" reachable; "error" a plain error; else the refusal
 	}{
-		"the penaltybox hint ahead":                     {adapted: reachJSON(`{"handle":[{"handler":"hint_penaltybox"}]},`, ""), want: ""},
-		"vars, map, log and tracing ahead":              {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"encode"},{"handler":"request_body"}]},`, ""), want: ""},
-		"templates ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
-		"templates ahead with its default types":        {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},
-		"intercept ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
-		"a response headers handler":                    {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
-		"a request headers handler":                     {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
-		"a handler the table does not name":             {adapted: reachJSON(`{"handle":[{"handler":"cache"}]},`, ""), want: "cache answers first"},
-		"invoke":                                        {adapted: reachJSON(`{"handle":[{"handler":"invoke","name":"r"}]},`, ""), want: "invoke answers first"},
-		"an undecided matcher on a handler that passes": {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
-		"an undecided matcher on a responder":           {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its remote_ip matcher is decided per request)"},
-		"two sets, one decided no and one undecided":    {adapted: reachJSON(`{"match":[{"path":["/x"]},{"header":{"X-A":["b"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
-		"two sets, one decided yes":                     {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}},{"path":["/"]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
+		"the penaltybox hint ahead":        {adapted: reachJSON(`{"handle":[{"handler":"hint_penaltybox"}]},`, ""), want: ""},
+		"vars, map, log and tracing ahead": {adapted: reachJSON(`{"handle":[{"handler":"vars"},{"handler":"map"},{"handler":"log_append"},{"handler":"tracing"},{"handler":"timeouts"},{"handler":"push"},{"handler":"encode"},{"handler":"request_body"}]},`, ""), want: ""},
+		// request_body: a set replaces every body; a positive max_size
+		// under the bundle's cap refuses a bundle the handler would
+		// take; either under a per-request matcher is "may". Read as
+		// Caddy reads them: "" and null are absent, a non-positive cap
+		// is none, and set wins over the cap (it runs first).
+		"request_body with a set":                                         {adapted: reachJSON(`{"handle":[{"handler":"request_body","set":"{}"}]},`, ""), want: "request_body's set changes the request first"},
+		"request_body with a set under a header matcher":                  {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"request_body","set":"x"}]},`, ""), want: "request_body's set may change the request first (its header matcher is decided per request)"},
+		"request_body with a set under a failing matcher":                 {adapted: reachJSON(`{"match":[{"expression":{"expr":"true"}}],"handle":[{"handler":"request_body","set":"x"}]},`, ""), want: "the expression matcher ahead of it may fail (decided per request)"},
+		"request_body with an empty set":                                  {adapted: reachJSON(`{"handle":[{"handler":"request_body","set":""}]},`, ""), want: ""},
+		"request_body with set null":                                      {adapted: reachJSON(`{"handle":[{"handler":"request_body","set":null}]},`, ""), want: ""},
+		"request_body with a max_size under the bundle cap":               {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":16777215}]},`, ""), want: "request_body's max_size caps the body under 16 MiB first"},
+		"request_body with a max_size at the bundle cap":                  {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":16777216}]},`, ""), want: ""},
+		"request_body with a max_size of 1 MiB under a remote_ip matcher": {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"request_body","max_size":1048576}]},`, ""), want: "request_body's max_size may cap the body under 16 MiB first (its remote_ip matcher is decided per request)"},
+		"request_body with a max_size on another path":                    {adapted: reachJSON(`{"match":[{"path":["/x"]}],"handle":[{"handler":"request_body","max_size":1}]},`, ""), want: ""},
+		"request_body with max_size zero":                                 {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":0}]},`, ""), want: ""},
+		"request_body with a negative max_size":                           {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":-1}]},`, ""), want: ""},
+		"request_body with max_size null":                                 {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":null}]},`, ""), want: ""},
+		"request_body with a set and a max_size under":                    {adapted: reachJSON(`{"handle":[{"handler":"request_body","set":"x","max_size":1}]},`, ""), want: "request_body's set changes the request first"},
+		"request_body with a set behind box_webhook":                      {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"listen":[":443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"},{"handler":"request_body","set":"x"}]}]}],"terminal":true}]}}}}}`), want: ""},
+		"request_body whose set does not read":                            {adapted: reachJSON(`{"handle":[{"handler":"request_body","set":5}]},`, ""), want: "error"},
+		"request_body whose max_size does not read":                       {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":"1MB"}]},`, ""), want: "error"},
+		"another handler's set and max_size keys":                         {adapted: reachJSON(`{"handle":[{"handler":"vars","set":5,"max_size":"1MB"}]},`, ""), want: ""},
+		"templates ahead":                                                 {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
+		"templates ahead with its default types":                          {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},
+		"intercept ahead":                                                 {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
+		"a response headers handler":                                      {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
+		"a request headers handler":                                       {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
+		"a handler the table does not name":                               {adapted: reachJSON(`{"handle":[{"handler":"cache"}]},`, ""), want: "cache answers first"},
+		"invoke":                                                          {adapted: reachJSON(`{"handle":[{"handler":"invoke","name":"r"}]},`, ""), want: "invoke answers first"},
+		"an undecided matcher on a handler that passes":                   {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
+		"an undecided matcher on a responder":                             {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its remote_ip matcher is decided per request)"},
+		"two sets, one decided no and one undecided":                      {adapted: reachJSON(`{"match":[{"path":["/x"]},{"header":{"X-A":["b"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
+		"two sets, one decided yes":                                       {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}},{"path":["/"]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
 		// Sets run in order until one matches: a set that matches for
 		// sure shields the sets after it, not the ones before.
 		"a failing set after one that matches":                       {adapted: reachJSON(`{"match":[{"path":["/"]},{"expression":{"expr":"true"}}],"handle":[{"handler":"vars"}]},`, ""), want: ""},

@@ -119,11 +119,13 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) error {
 		return p.respond(http.StatusConflict, errorBody(msgAdmitting))
 	}
 	defer release()
-	// The deadline replaces, for this body, any read_body timeout the
-	// operator set (DESIGN-box.md, Caps). HTTP/1.1, HTTP/2 and HTTP/3
-	// all take one; a writer in the chain that hides the method is said
-	// in the journal, since the slot then has no bound but the
-	// connection's.
+	// The deadline bounds the body until its first read; from then on
+	// Caddy's idle reader re-arms the connection's deadline before every
+	// read, within the server's own limits (DESIGN-box.md, Caps, "bundle
+	// upload"; the floors on those limits, "The request limits").
+	// HTTP/1.1, HTTP/2 and HTTP/3 all take one; a writer in the chain
+	// that hides the method is said in the journal, since the slot then
+	// has no bound but the connection's.
 	rc := http.NewResponseController(w)
 	upload := h.upload
 	if upload == 0 {

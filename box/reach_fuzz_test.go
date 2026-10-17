@@ -37,6 +37,12 @@ func FuzzReach(f *testing.F) {
 	f.Add(connJSON(`"listener_wrappers":[{"wrapper":"proxy_protocol","fallback_policy":"REQUIRE"},{"wrapper":"tls"}],`), "deploy.example.com", "")
 	f.Add(connJSON(`"tls_connection_policies":[{"match":{"remote_ip":{}}},{"match":{"sni":["*.example.com"]},"client_authentication":{"mode":"require"}}],`), "deploy.example.com", "")
 	f.Add(connJSON(`"strict_sni_host":true,`), "203.0.113.5", "")
+	// The request limits, in both of a duration's shapes, and
+	// request_body's two settings.
+	f.Add(connJSON(`"read_header_timeout":"1s","max_header_bytes":8191,`), "deploy.example.com", "")
+	f.Add(connJSON(`"read_timeout":1000000000,"read_min_rate":65537,`), "deploy.example.com", "")
+	f.Add(reachJSON(`{"handle":[{"handler":"request_body","set":"x","max_size":1}]},`, ""), "deploy.example.com", "")
+	f.Add(reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"request_body","max_size":1048576}]},`, ""), "deploy.example.com", "")
 	// The door: kept in another spelling, moved, a placeholder, a port
 	// range, an address that does not parse, a listen of another shape.
 	f.Add(connJSON(""), "deploy.example.com", "tcp/:443 :443")
@@ -72,16 +78,24 @@ func FuzzReach(f *testing.F) {
 
 // catalogueReach is the 422 rows' reachability texts: a moved door, or
 // what refuses the connection (the protocols, a listener wrapper, a TLS
-// connection policy and what it does), or what stands in the way of the
-// request (a module name, an earlier site, a terminal route) and one of
-// the four verbs.
+// connection policy and what it does, a request limit under its floor
+// — each limit's text in full, since the floors are fixed words), or
+// what stands in the way of the request (a module name, with its
+// setting for request_body, an earlier site, a terminal route) and one
+// of the five verbs.
 var catalogueReach = regexp.MustCompile(`^(` + regexp.QuoteMeta(msgListenMoved) + `|` +
 	`the new Caddyfile does not reach box_webhook on /: (` +
 	`a listener's protocols include neither h1 nor h2|` +
 	`the .+ listener wrapper may refuse the connection|` +
 	`the server's strict_sni_host refuses a request to an IP address, which carries no SNI|` +
+	`the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token|` +
+	`the server's read_header_timeout is under 5s, the floor for a push's handshake and headers|` +
+	`the server's read_timeout is under 30s, the floor for a push's upload|` +
+	`the server's read_idle_timeout is under 10s, the floor for a push's upload|` +
+	`the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload|` +
+	`the server's write_timeout is under 5s, the floor for a push's handshake|` +
 	`a TLS connection policy for .* ` + policyWhat + `|` +
 	`a TLS connection policy that may apply to .* ` + policyWhat + ` \(its .+ matcher is decided per connection\)|` +
-	`(.+) (answers first|changes the request first|may (answer|change the request) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\))))$`)
+	`(.+) (answers first|changes the request first|caps the body under 16 MiB first|may (answer|change the request|cap the body under 16 MiB) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\))))$`)
 
 const policyWhat = `(requires a client certificate|drops the connection|offers neither h2 nor http/1\.1 by ALPN|sets .+, which may refuse the handshake)`

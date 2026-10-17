@@ -542,21 +542,25 @@ satisfies its group only as far as that route does, since Caddy's
 group map is one per request across nesting. Before the walk, the
 handler asks whether that server still listens where this push
 arrived ("The door", below), then whether the workflow's connection
-reaches its routes at all ("The connection").
+reaches its routes at all ("The connection"), the server's request
+limits included ("The request limits").
 
 | Handler (module) | Treated as | Why |
 |---|---|---|
 | `box_webhook` | reached | |
 | `subroute` | recursed, its routes in order | a site, `handle`, `route` and `handle_path` adapt to one |
-| `vars`, `map`, `log_append`, `tracing`, `request_body`, `timeouts`, `encode`, `push`, `headers` without a `request` section, `hint_penaltybox` | passes | the request reaches the next handler as sent and its answer comes back with the status and body it wrote: the first four touch only variables, a log field or a trace span; `headers` here edits response headers, never the status or the body the workflow reads; `request_body` and `timeouts` bound the read (`request_body`'s `set`, which replaces the body, and a `max_size` below every bundle are owed, "Triage"); `encode` compresses what the client asked for, `push` adds HTTP/2 pushes; `hint_penaltybox` answers 429 only to a client in its box, which the workflow reports red with its status and body: `box_webhook` itself never answers 429 |
-| `rewrite`; `headers` with a `request` section | refused: `<handler> changes the request first` | `rewrite` (also `uri`, `try_files` and `handle_path`'s strip) moves `/` away before `box_webhook` sees it; `request_header -Authorization` turns every push into a 401 with nothing in the answer to say why |
+| `vars`, `map`, `log_append`, `tracing`, `timeouts`, `encode`, `push`, `headers` without a `request` section, `request_body` with neither a `set` nor a `max_size` under the bundle's cap, `hint_penaltybox` | passes | the request reaches the next handler as sent and its answer comes back with the status and body it wrote: the first four touch only variables, a log field or a trace span; `headers` here edits response headers, never the status or the body the workflow reads; `timeouts` bounds the read ("Not caught here"), and `request_body` here caps the body at the bundle's cap or above, which the handler's own cap meets first; `encode` compresses what the client asked for, `push` adds HTTP/2 pushes; `hint_penaltybox` answers 429 only to a client in its box, which the workflow reports red with its status and body: `box_webhook` itself never answers 429 |
+| `rewrite`; `headers` with a `request` section; `request_body` with a `set` | refused: `<handler> changes the request first` (`request_body's set changes the request first`) | `rewrite` (also `uri`, `try_files` and `handle_path`'s strip) moves `/` away before `box_webhook` sees it; `request_header -Authorization` turns every push into a 401 with nothing in the answer to say why; `request_body`'s `set` replaces every body with its text before the cap is applied, so no push's bundle reaches `box_webhook` — Caddy reads a `set` that is `""` or `null` as none (`requestbody.ServeHTTP`), and so does the walk |
+| `request_body` with a `max_size` that is positive and under 16 MiB, the bundle's cap | refused: `request_body's max_size caps the body under 16 MiB first` | Caddy wraps the body in a `MaxBytesReader` of that size, so a bundle the handler would take fails its read; zero, `null` or a negative `max_size` is no cap (Caddy applies only a positive one), and one at the cap or above is met by the handler's own 413 first. The figure is the handler's own constant, so the two cannot drift. Under a per-request matcher: `request_body's max_size may cap the body under 16 MiB first (its <matcher> matcher is decided per request)`. The box site's routes are its own, so this floor stands in no app site's way |
 | anything else — `static_response`, `reverse_proxy`, `file_server`, `error`, `authentication`, `acme_server`, `metrics`, `invoke`, `intercept`, `templates`, `liveswap_webhook`, a handler this table does not list | refused: `<handler> answers first` | fail-closed: a handler the table has not weighed is one that may answer; `invoke`'s named route is not followed; `intercept` lets `box_webhook` run and then replaces its answer with its own `handle_response`, and `templates` renders whatever types it is told to (`mime application/json` included) over a body whose `diff` is bundle-derived text — so the workflow never sees the result it is told to poll |
 
 The standard directives Caddy orders before `box_webhook` (`tracing`,
 `map`, `vars`, `fs`, `root`, `log_append`, `log_skip`, `log_name`,
-`header`, `request_body`, `timeouts`) all adapt to the "passes" row, so
-a box site refuses nothing unless an `order` global option moves a
-directive ahead. The sites Caddy sorts ahead of a bare hostname
+`header`, `request_body`, `timeouts`) all adapt to the "passes" row —
+`request_body` to it only with neither setting the rows above name —
+so a box site refuses nothing unless an `order` global option moves a
+directive ahead, or a `request_body` caps or replaces the body. The
+sites Caddy sorts ahead of a bare hostname
 (longer host first, then longer path, wildcard hosts after exact ones)
 are those with the same host and a path, `host/*`; a second block
 naming the bare host is "ambiguous site definition" to the adapter,
@@ -635,9 +639,9 @@ door, compared, never the skip (none receives a push).
 
 **The connection.** Before any route runs, the workflow's connection
 meets the server that carries `box_webhook`: its listeners'
-protocols, its listener wrappers, its TLS connection policies and its
-strict SNI check. The handler asks those next (and no other server
-setting: "Not caught here"), of the connection `bin/apply`'s curl
+protocols, its listener wrappers, its TLS connection policies, its
+strict SNI check and its request limits. The handler asks those next
+(and no other server setting: "Not caught here"), of the connection `bin/apply`'s curl
 makes on the workflow's Ubuntu runner: HTTP/1.1 or HTTP/2 over TLS,
 both offered by ALPN, the host as its SNI — none for an IP address,
 to which curl sends none — no client certificate, no PROXY header.
@@ -650,7 +654,9 @@ protocols include neither h1 nor h2`: with neither, Caddy opens no TCP
 listener for it, or (`h2c`) one the workflow's TLS connection cannot
 use. Its listener wrappers and the TLS connection policy for the host
 are the next two tables, fail-closed as the first: what they have not
-weighed refuses.
+weighed refuses. The request limits come last ("The request limits"):
+floors, not a fail-closed table, since every site on the server
+shares them.
 
 | Listener wrapper | Treated as | Why |
 |---|---|---|
@@ -694,6 +700,44 @@ whose requests carry no SNI, is then refused `the server's
 strict_sni_host refuses a request to an IP address, which carries no
 SNI`.
 
+**The request limits.** Last, the server's request limits, which
+every site on it shares (the `servers` option: `max_header_size`, and
+`timeouts { read_header; read_body; read_body_idle <idle> [<rate>];
+write }`). A compare with the loaded server's, as the door's, would
+refuse the ordinary hardening of the app sites beside the box host,
+so each limit has a floor instead — a value under which the workflow's
+request cannot work — and only a value under the floor is refused
+(over it, for the rate); the floors, each a constant with no directive
+to override it, are in the Caps table with their reasons. A limit
+counts only when positive: zero or unset is Caddy's default
+(`App.Provision` on v2.11.7: 16 KiB of header, a minute to read the
+header, a minute's read idle, no whole-read deadline, no rate, no
+write deadline), and a negative value is no limit, to Go's `net/http`
+and to Caddy's idle reader alike (for `max_header_bytes`, the default
+again); the rate counts only while a read idle deadline applies (zero
+or positive), since Caddy installs the reader that holds it only then
+(`Server.ServeHTTP`). Each is read in Caddy's shape for
+it — a duration as nanoseconds or as a string, bytes as an integer —
+and one of another shape is the box's error, as validate refused it
+first. The refusal is fixed words naming the setting and its floor,
+never the value, since a value may come from an expanded `{$VAR}`:
+
+| Server setting (Caddyfile option) | Refused when | Text (after `the new Caddyfile does not reach box_webhook on /: `) |
+|---|---|---|
+| `max_header_bytes` (`max_header_size`) | positive and under 8 KiB; Caddy reads the option with SI prefixes, so `8KB` is 8000 bytes and under, `8KiB` at the floor | `the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token` |
+| `read_header_timeout` (`timeouts { read_header }`) | positive and under 5 s | `the server's read_header_timeout is under 5s, the floor for a push's handshake and headers` |
+| `read_timeout` (`timeouts { read_body }`) | positive and under 30 s | `the server's read_timeout is under 30s, the floor for a push's upload` |
+| `read_idle_timeout` (`timeouts { read_body_idle }`) | positive and under 10 s | `the server's read_idle_timeout is under 10s, the floor for a push's upload` |
+| `read_min_rate` (`read_body_idle`'s second argument, bytes a second) | over 64 KiB/s | `the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload` |
+| `write_timeout` (`timeouts { write }`) | positive and under 5 s | `the server's write_timeout is under 5s, the floor for a push's handshake` |
+| `write_idle_timeout`, `write_min_rate`, `idle_timeout`, `max_write_chunk`, the keepalives | never | the poll recovers a cut answer, and an idle connection is not a push's |
+
+The limits are asked in that order, and the first under its floor is
+named. The cost: a limit at its floor still bounds a push's upload (a
+16 MiB bundle under `read_body 30s` needs about 550 KiB/s), and a push
+that outlasts it fails its body read, 400 and named, with a retry as
+the remedy (Accepted residuals).
+
 The cost, as with "may": the questions are asked of the connection
 as curl makes it, not as whatever stands in front of the box passes it
 on. A box host that a proxy reaches with a client certificate
@@ -712,16 +756,15 @@ so a file `init` installs that serves `/` first is found by the first
 push, which meets the front handler's answer instead of this one's;
 the console is the way back ("At 3am"), and whether the workflow asks
 `GET /` for this handler's status before it posts is the template's
-call. A `request_body` cap below the bundle's 16 MiB, or a `timeouts`
-read deadline shorter than the upload, ahead of `box_webhook` is not
-caught either: the push reaches the handler and fails its body read
-(400), which names the bundle; one below every bundle strands the box
-(owed, "Triage"). No other server setting is read: a
-push that sets the server's request limits below what the workflow
-sends (`timeouts { read_header }` shorter than a handshake from the
-runner, `max_header_size` below its headers and their OIDC token)
-passes, and the next push is refused before any route (owed,
-"Triage"). Nor is a host without a certificate. Where the server
+call. A `timeouts` handler ahead of `box_webhook` (the directive, as
+against the `servers` option's limits above) is not weighed: it wraps
+the body read in an idle deadline of its own, with an optional minimum
+rate, and one the upload cannot meet fails the push's body read (400,
+naming the bundle); one that no push can meet strands the box (owed,
+"Triage"). No other server setting is read, and the box server's
+limits are asked of the file alone, as floors, not compared with the
+loaded server's ("The request limits"). Nor is a host without a
+certificate. Where the server
 listens is "The door": kept, or refused; whether the kept addresses
 are the ones the workflow's `https://<host>/` arrives at is proven by
 the push itself.
@@ -952,13 +995,15 @@ can do both by other means.
 | `make check`'s refusal of a hotserve that reads no secrets names no release, so the line alone does not say which binary or release failed | examples/box/bin/check | 2 | 5 | 1 | 10; red and named, and the refusal says how the workflow picks its release (the box's `HOTSERVE_VERSION` file; without one, the latest stable, or the one the `HOTSERVE_VERSION` variable names), whose install step's line names it; a box with a file is checked with `hotserve-<version>`, which the box's green line names. `hotserve version` on a release that old prints only Caddy's version, and naming the release from `HOTSERVE_VERSION` is a branch on `GITHUB_ACTIONS` that trusts the workflow's steps (size 2, risk 2) |
 | A box host that a proxy reaches with a client certificate (Cloudflare's Authenticated Origin Pulls), or that a balancer reaches through a `proxy_protocol` falling back to `REQUIRE`, or whose TLS policy sets ciphers or curves: every push is refused, though the workflow's connection would arrive | Reachability, "The connection" | 2 | 5 | 1 | 10; red and named, and each remedy there keeps the box reachable. Admitting the setting needs the door's compare applied to the wrappers and policies, against the configuration the admin API serves, since the loaded server holds them as provisioned modules ("The door"; size 3) |
 | A box server whose TLS policies are in an order no Caddyfile adapts to passes as walked: a list in which no policy is sure to apply to the host (Caddy then refuses the handshake), or, past 30 policies, one matching the host by wildcard or by matcher ahead of one naming it exactly (Caddy looks at that one first) | Reachability, "The connection" | 4 | 1 | 3 | 12; the input is always the adapter's, which ends every list with a catch-all and writes a policy naming a host ahead of any other matching it |
+| A box server limit at or above its floor still bounds a push's upload: a 16 MiB bundle under `read_body 30s` needs about 550 KiB/s, and a runner that cannot sustain it fails its body read | Reachability, "The request limits" | 2 | 2 | 1 | 4; a hardened limit and a slow runner together; red and named (400, `could not read the bundle`), a retry is the remedy, the floors are sized for a runner's upload with room, and a bundle without secrets is kilobytes |
+| A box server limit under its floor that the loaded server already runs (set at the console, and this push's own handshake, headers and token arrived under it) is refused all the same by the next push that keeps it, since the floors are asked of the file alone | Reachability, "The request limits" | 2 | 5 | 1 | 10; red and named, the remedy is the limit at its floor in the file, and the door's shape (refuse only a value that differs from the loaded server's) would need the six loaded fields threaded from the request's context beside the door (size 2) for a case the floors were sized to make rare: the owner chose floors over a compare for these limits (2026-10-16) |
 
 **Owed** (over the bar, not yet fixed):
 
 | Finding | S | O | D | Where the fix lands |
 |---|---|---|---|---|
-| A push sets the box server's request limits below what the workflow sends (`timeouts { read_header }` shorter than a handshake from the runner, `max_header_size` below its headers and their OIDC token): it applies green, and the next push is refused before any route | 4 | 5 | 3 | 60; found while fixing the connection check. Decided 2026-10-16, floors sized together: the box host shares its server with every app site on :443, so a compare rule would block ordinary app hardening. A follow-up refuses only values the workflow cannot work with, for `read_header_timeout`, `read_timeout`, `read_idle_timeout`, `read_min_rate` and `max_header_bytes`; the `write_*` limits get none, since the poll recovers a cut POST. The sizes are agreed with the owner before it is built |
-| A `request_body` ahead of `box_webhook` passes the walk whatever it sets: a `set` replaces every push's body, and a `max_size` below the smallest bundle refuses every push; the push that adds it applies green, and the box is reachable only from the console | 4 | 5 | 3 | 60; found answering a question on this change. `set` is one branch in the handler table ("changes the request first"); `max_size` is a floor, sized with the floors above (the box site's routes are its own, so app hardening is not in its way); the owner decides |
+| A `timeouts` handler ahead of `box_webhook` (the directive) whose read idle deadline, or minimum rate, no push's upload can meet: the push that adds it applies green, and every push after fails its body read (400, "could not read the bundle") | 4 | 5 | 3 | 60; found building the floors on the `servers` option's limits, which the handler's `read_timeout` (an idle deadline) and `read_min_rate` mirror per route. The fix is the same two floors in the handler table, one row; the owner decides |
+| The handler's 120 s upload deadline does not bound a body that keeps trickling: Caddy's idle reader re-arms the connection's read deadline before every read (Caps, "bundle upload"), so a client that sends a byte inside each idle window holds the one push slot until the server's `read_timeout`, which Caddy's defaults leave unset, and every other push is 409 meanwhile | 4 | 2 | 3 | 24; found building the floors. A runner does not trickle, and a signer who would is one who can push any file; the fix is the handler's own bound on the body, independent of the connection's deadline (a timer that closes the body at 120 s), measured against the real server first; the owner decides |
 
 ## Admission
 
@@ -1137,7 +1182,14 @@ Every numeric bound, in one place, with its reason.
 |---|---|---|
 | bundle body | 16 MiB | a bundle without secrets is kilobytes. With them it carries their ciphertext too: about the values' length plus some 200 bytes per reader per secret, which does not compress. The secrets caps below would allow more, so this cap is the one that binds, and `hotserve box describe` warns when a box's secrets pass 12 MiB (75%) of ciphertext, in the pull request's check run, before a push meets the 413 |
 | pushes in memory | one per hotserve process, from its body to its drop, shared across reloads; another push is 409 "a push is being admitted; retry in a moment", its body unread | the body is read before the admission lock (step 2), so without this nothing would bound how many authenticated requests hold 16 MiB each; honest runs are one at a time already (the workflow's `concurrency` group) |
-| bundle upload | 120 s, a read deadline on the connection while the push slot is held, in place of any `read_body` timeout the operator set for this body; past it 400 "could not read the bundle" and a `box push upload failed` line | a stalled upload would otherwise hold the one slot until its connection ends; a bundle is kilobytes |
+| bundle upload | 120 s, a read deadline the handler sets on the connection while the push slot is held; past it 400 "could not read the bundle" and a `box push upload failed` line. On Caddy v2.11.7 the server's idle reader re-arms that deadline before every body read (`read_idle_timeout`, a minute by default, plus the rate's credit, capped at `read_timeout` when one is set), so from the first read the body is bounded by the server's limits: a stall ends at the idle bound, and a trickle that never stalls that long runs to `read_timeout`, or on with none set (owed, "Triage") | a stalled upload would otherwise hold the one slot until its connection ends; a bundle is kilobytes |
+| the box server's `max_header_bytes`, floor | 8 KiB: a positive value under it is refused at step 6 ("The request limits") | a push's headers are the request line, a few short headers and `Authorization: Bearer` with the workflow's OIDC token — an RS256 JWT of some thirty claims, about 2 KiB (estimated from GitHub's documented example and a 2048-bit signature, not measured). Caddy's default is 16 KiB; under 8 KiB a push could be answered 431 by Go's server before any route, and the next push too |
+| the box server's `read_header_timeout`, floor | 5 s | Go's `net/http` bounds the TLS handshake by the smallest positive one of `read_header_timeout`, `read_timeout` and `write_timeout` (`Server.tlsHandshakeTimeout`), then reads the headers under it; a runner's handshake and headers take well under a second, and 5 s leaves room for a loaded box. Caddy's default is a minute |
+| the box server's `read_timeout`, floor | 30 s | the one hard deadline on the whole upload (Caddy's idle reader caps every reset at it): a bundle at the 16 MiB cap then needs about 550 KiB/s, far under a runner's upload; 30 s over 60 s so that a hardened app site keeps a tight bound (the owner's choice, 2026-10-17). Caddy's default is none |
+| the box server's `read_idle_timeout`, floor | 10 s | the body read's stall bound, reset on every read; a runner's upload does not pause for seconds, and a shorter one would cut a push on an ordinary pause. Caddy's default is a minute |
+| the box server's `read_min_rate`, ceiling | 64 KiB/s (65536 bytes a second): a value over it is refused | the least throughput the server may demand of the upload, averaged from its start; a runner sustains megabytes a second, and a higher demand would cut a slow push. Caddy's default is none |
+| the box server's `write_timeout`, floor | 5 s | for the handshake bound alone (the `read_header_timeout` row): a cut POST answer is recovered by the poll, so the writing of the answer gets no floor, nor do `write_idle_timeout`, `write_min_rate` and `idle_timeout` |
+| `request_body`'s `max_size` ahead of `box_webhook`, floor | 16 MiB, the bundle body's cap above, by the same constant | a positive cap under it refuses a bundle the handler would take; one at or above it is met by the handler's own 413 first (the handler table, in "Reachability") |
 | bundle decompressed | 16 MiB, reader stops at cap + 1 | the per-type caps below sum to more; this one wins, and a `stat` is not a bound |
 | Caddyfile / blob | 1 MiB | the record embeds it |
 | tree object | 1 MiB | |
@@ -1580,9 +1632,9 @@ says. The workflow's action is in the last column.
 | 422 | `refused` | `this file is for <host2>; this box is <host1>` | both | fail |
 | 422 | `refused` | `this box's file is <recorded path>; the bundle is <path> — a box's file is <host>/Caddyfile at the top of the repository: move it there` (the recorded path is already `<host>/Caddyfile`) / `…: hotserve init, run again from that directory, records it` (it is not) | both | fail |
 | 422 | `refused` | `the new Caddyfile has no box block` / `… has no signer` / `… has no deploy_trust` / `… has no site with box_webhook` / `… has more than one site with box_webhook` / `… has a box_webhook site whose address is not one bare hostname (<address>)` / `… has a site without braces (<address>)` / `… has box_webhook inside a snippet or named route (<name>); write it in the site` / `… has box_webhook inside <block>; it must stand directly in the site block, where no matcher or nested route can leave / unserved` / `… has box_webhook with arguments (<args>); it takes none, and a matcher would leave / unserved` / `… imports <path>; inline the snippet` / `… has a placeholder where a directive name, a site address or a box line goes (<token>)` / `… reads differently once its placeholders are expanded` / `… is empty` / `… has a global options block that is not the first block` / `… has more than one box block` / `… has a signer line that is not \`signer <principal> <key-type> <base64>\`` / `… has a bad signer <principal>: <what>` / `… does not tokenize: <lexer error>` / `… does not parse: <what>` / `… drops the key that signed this commit (<principal>); add the new key in one push, let it apply, then remove the old one` | both | fail |
-| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name, `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
+| 422 | `refused` | `hotserve validate: <redacted>` / `hotserve-backup validate: <redacted>` / `the new Caddyfile does not reach box_webhook on /: <what> answers first` / `… : <what> changes the request first` / `… : <what> may answer first (its <matcher> matcher is decided per request)` / `… : <what> may change the request first (its <matcher> matcher is decided per request)` / `… : request_body's max_size caps the body under 16 MiB first` / `… : request_body's max_size may cap the body under 16 MiB first (its <matcher> matcher is decided per request)` — `<what>` is a handler's module name (`request_body's set` for that setting), `an earlier site for <host>`, or `a terminal route` (one below a site that ran out of handlers; no directive adapts to one) / `… : box_webhook stands behind a <matcher> matcher decided per request` (the webhook itself under a per-request matcher; nothing the walk accepts adapts to one, the contract is kept anyway) / `… : the <matcher> matcher ahead of it may fail (decided per request)` / `the new Caddyfile's adaptation is larger than 16 MiB` / `hotserve adapt: did not finish within 2m0s` (the deadline, as validate's; any other end of the adapt child is the box's 500) | handler | fail |
 | 422 | `refused` | `this push changes where the box's server listens (its listen addresses differ from the loaded config's): a push cannot move the address it arrives on; make that change at the console` — fixed words; no address is quoted, since one may hold a value from the service's environment ("The door", in "Reachability") | handler | fail; a deliberate move is made at the console ("At 3am"), after which the push of the same commit is admitted |
-| 422 | `refused` | `the new Caddyfile does not reach box_webhook on /: a listener's protocols include neither h1 nor h2` / `… : the <wrapper> listener wrapper may refuse the connection` / `… : the server's strict_sni_host refuses a request to an IP address, which carries no SNI` / `… : a TLS connection policy for <host> <what>` / `… : a TLS connection policy that may apply to <host> <what> (its <matcher> matcher is decided per connection)` — `<what>` is `requires a client certificate`, `drops the connection`, `offers neither h2 nor http/1.1 by ALPN` or `sets <setting>, which may refuse the handshake` ("The connection", in "Reachability") | handler | fail |
+| 422 | `refused` | `the new Caddyfile does not reach box_webhook on /: a listener's protocols include neither h1 nor h2` / `… : the <wrapper> listener wrapper may refuse the connection` / `… : the server's strict_sni_host refuses a request to an IP address, which carries no SNI` / `… : a TLS connection policy for <host> <what>` / `… : a TLS connection policy that may apply to <host> <what> (its <matcher> matcher is decided per connection)` — `<what>` is `requires a client certificate`, `drops the connection`, `offers neither h2 nor http/1.1 by ALPN` or `sets <setting>, which may refuse the handshake` ("The connection", in "Reachability") / `… : the server's max_header_bytes is under 8 KiB, the floor for a push's headers and token` / `… : the server's read_header_timeout is under 5s, the floor for a push's handshake and headers` / `… : the server's read_timeout is under 30s, the floor for a push's upload` / `… : the server's read_idle_timeout is under 10s, the floor for a push's upload` / `… : the server's read_min_rate is over 64 KiB/s, the ceiling for a push's upload` / `… : the server's write_timeout is under 5s, the floor for a push's handshake` — fixed words, the value never quoted ("The request limits") | handler | fail; in the file, raise the limit to its floor or above (for `read_min_rate`, lower it to its ceiling or below) |
 | 422 | `refused` | the consistency checks of "Which checks run where", each text as that table gives it | handler | fail |
 | 422 | `refused` | `hotserve is not running; nothing applied` / `hotserve is still starting after 300 s; nothing applied` | applier | fail |
 | 422 | `refused` | `<path> is not encrypted to this box's key (<recipient>): put that key first in <host>/secrets/recipients and run make rekey` / `<path> does not decrypt: <reason>` (one of the four reasons in "Values and the env file") / `<app>/<VAR>: the value has a line break` / `<app>/<VAR>: the value has a NUL byte` / `<app>/<VAR>: the value is not UTF-8` / `app <app>'s env file would be <n> bytes; the cap is 65536` (step 15a) | applier | fail |
@@ -2472,3 +2524,11 @@ Dated one-liners; the full text of each is in git.
   deliberate move is made at the console ("At 3am"). The compare is
   not applied to the connection's tables, whose loaded form is
   provisioned modules, not JSON.
+- 2026-10-17 — Floors on the box server's request limits ("The request
+  limits") and on a `request_body` ahead of `box_webhook` (the handler
+  table): a positive `max_header_bytes`, `read_header_timeout`,
+  `read_timeout`, `read_idle_timeout` or `write_timeout` under its
+  floor, or a `read_min_rate` over its ceiling, is refused in fixed
+  words naming the setting and the floor; `request_body`'s `set`, and a
+  `max_size` under the bundle's cap, refuse by name. Sized by the owner
+  (Caps); the `timeouts` handler stays owed.
