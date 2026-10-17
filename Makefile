@@ -187,7 +187,7 @@ usage:
 # It is also the only lane that runs the python image, so Dependabot's
 # bumps of that pin are exercised.
 usage-check:
-	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I .github/scripts/usage_test.py
+	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I -B .github/scripts/usage_test.py
 	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I .github/scripts/usage.py render
 	git diff --exit-code -- docs/footprint.md
 
