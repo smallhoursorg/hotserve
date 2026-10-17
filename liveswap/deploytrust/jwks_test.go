@@ -51,7 +51,9 @@ func fetches(t *testing.T, iss *trusttest.Issuer, want int64, what string) {
 
 // A bad signature under a kid the key set holds is refused on the
 // spot, however long since the last fetch: a forged token naming the
-// issuer's real kid costs the box no outbound request.
+// issuer's real kid costs the box no outbound request. The refusal
+// names the one case that never fetches its way out — the issuer
+// replaced the key and kept its kid — and the remedy.
 func TestKeySetNeverFetchesForAKidItHolds(t *testing.T) {
 	iss := trusttest.NewIssuer(t)
 	c := trusttest.NewClock()
@@ -69,8 +71,8 @@ func TestKeySetNeverFetchesForAKidItHolds(t *testing.T) {
 		c.Advance(KeyRefetchInterval)
 		_, err := v.verify(ctx, iss.Mint(t, forger, "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute)))
 		refusedPlainly(t, err, "bad signature under a held kid")
-		if !strings.Contains(err.Error(), `does not verify under the issuer's key "`+iss.KID+`"`) {
-			t.Fatalf("bad signature under a held kid: reason = %q, want it to name the key", err)
+		if want := `signature does not match the key held for kid "` + iss.KID + `"; if the issuer replaced that key, systemctl reload hotserve`; !strings.Contains(err.Error(), want) {
+			t.Fatalf("bad signature under a held kid: reason = %q, want %q", err, want)
 		}
 	}
 	fetches(t, iss, 1, "bad signatures under a held kid")

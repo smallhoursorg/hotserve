@@ -90,7 +90,11 @@ func (ks *keySet) VerifySignature(ctx context.Context, raw string) ([]byte, erro
 	case payload != nil:
 		return payload, nil
 	case held:
-		return nil, fmt.Errorf("signature does not verify under the issuer's key %q", kid)
+		// The one refusal no later token fetches its way out of: a held
+		// kid never fetches, so an issuer that replaced the key and kept
+		// its kid is picked up only by a reload (a new key set). Said
+		// here, in the journal's refused field, in the README's words.
+		return nil, fmt.Errorf("signature does not match the key held for kid %q; if the issuer replaced that key, systemctl reload hotserve", kid)
 	}
 	return nil, fmt.Errorf("the issuer's keys hold none that verifies it (kid %q)", kid)
 }
