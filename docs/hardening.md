@@ -113,7 +113,10 @@ each SSH login, and the `ssh-keygen` a push to the box's repository
 runs.
 
 What it does not do: update hotserve, whose `.deb` comes from no
-repository ([Upgrading](upgrading.md) is how). Nor does it reach what
+repository ([Upgrading](upgrading.md) is how), or an app's runtime
+that did not come from Debian, such as the Deno under
+`/usr/local/bin` or the Node example's own executable
+([Patching the host](upgrading.md#patching-the-host)). Nor does it reach what
 a running app or daemon has already loaded, which waits for a
 relaunch, or the running kernel, which waits for a reboot, both at a
 time you choose; apps run on the box's own `/usr`, so a file an app
@@ -121,32 +124,38 @@ first reads after the upgrade is the new one. An app launched long ago
 can thus be behind what the box has, and
 [Patching the host](upgrading.md#patching-the-host) says how to give
 it a launch. It never reboots the box: `Automatic-Reboot` is off
-unless you turn it on, and this page does not.
+unless you turn it on, and this page does not. When a kernel update
+lands it leaves the reboot to you and notes it: `cat
+/run/reboot-required.pkgs` lists the packages waiting for one, and
+the file is absent while none does.
 
 As root on the box, first see whether it is already on, since a
 provider's image may ship it:
 
 ```sh
-apt-config dump APT::Periodic::Unattended-Upgrade    # "1": already on; nothing: not installed; "0": installed, turned off
+apt-config dump APT::Periodic::Unattended-Upgrade    # "1": on; "0" or nothing: off
 ```
 
-If that prints nothing:
+If it is off, install the package — on a box without it, this writes
+`/etc/apt/apt.conf.d/20auto-upgrades`, which turns it on — and run
+the check again:
 
 ```sh
-apt install unattended-upgrades      # turns itself on: writes /etc/apt/apt.conf.d/20auto-upgrades
+apt install unattended-upgrades
 ```
 
-If it prints `"0"`, the image installed the package and turned it
-off; installing again changes nothing, so write the file the package
-writes when it is on:
+If it still does not print `"1"`, the image installed the package
+turned off, and installing again changes nothing, so write the file
+the package writes when it is on:
 
 ```sh
 printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
 ```
 
-In every case, check what it would do:
+In every case, check that it is on and what it would do:
 
 ```sh
+apt-config dump APT::Periodic::Unattended-Upgrade    # "1"; anything else: a later file in /etc/apt/apt.conf.d/ turns it off (grep -r Periodic::Unattended-Upgrade /etc/apt/apt.conf.d/)
 apt-config dump Unattended-Upgrade::Origins-Pattern    # three origin=Debian lines, nothing else
 apt-config dump Unattended-Upgrade::Automatic-Reboot   # prints nothing, or "false": no automatic reboot
 unattended-upgrade --dry-run -v    # what the next run would install; "No packages found" on a box that is up to date
