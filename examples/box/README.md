@@ -125,7 +125,7 @@ what it runs.
    comments aside, and prints nothing once all are changed:
 
    ```sh
-   grep -n '^[^#]*\(your-org\|example\.com\)' */Caddyfile
+   grep -En '^([^#]*[^#A-Za-z0-9-])?(your-org|example\.com)([^A-Za-z0-9.-]|$)' */Caddyfile
    ```
 
    The `app example` block is hotserve's examples/node; a Deno app's
@@ -147,11 +147,15 @@ what it runs.
 
 6. Tell the box which repo it belongs to. Copy the box's directory to
    it, as the commit has it rather than as your checkout does, and run
-   `hotserve init` there, as root, with this commit:
+   `hotserve init` there, as root, with this commit. The first line is
+   step 3's check, run on the commit: while a placeholder is left it
+   prints its line and sends nothing, so change it, commit, and run
+   the three lines again.
 
    ```sh
-   git archive HEAD deploy.yourdomain.com | ssh root@box.example.com tar -xf -
-   ssh root@box.example.com "cd deploy.yourdomain.com && hotserve init $(git rev-parse HEAD)"
+   ! git show HEAD:deploy.yourdomain.com/Caddyfile | grep -En '^([^#]*[^#A-Za-z0-9-])?(your-org|example\.com)([^A-Za-z0-9.-]|$)' &&
+     git archive HEAD deploy.yourdomain.com | ssh root@box.example.com tar -xf - &&
+     ssh root@box.example.com "cd deploy.yourdomain.com && hotserve init $(git rev-parse HEAD)"
    ```
 
    It installs the file, reloads hotserve, and records the commit; the
