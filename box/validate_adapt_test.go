@@ -57,10 +57,11 @@ func TestValidateAdapt(t *testing.T) {
 		if msg, err := c.validate(context.Background(), randomID(t), file, stubHost, []string{addr}); msg != "" || err != nil {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
-		// The value past the refusal's bound: filtered whole before the
-		// cut, so not even its prefix is quoted.
+		// The value across the refusal's bound (it begins at byte 290 of
+		// a list cut at 300): filtered whole before the cut, so not even
+		// its prefix is quoted.
 		var many strings.Builder
-		for i := range 40 {
+		for i := range 20 {
 			fmt.Fprintf(&many, `"10.0.0.%d:443",`, i)
 		}
 		withMany := strings.Replace(reachableAdaptation, `"srv0":{`, `"srv0":{"listen":[`+many.String()+`"'"$BIND_ADDR"'"],`, 1)

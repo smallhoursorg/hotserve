@@ -259,10 +259,11 @@ func TestReachDoorJSON(t *testing.T) {
 		t.Fatalf("a control byte reached the text: %q", got)
 	}
 	// The filter runs over the whole list before the bound cuts it, so
-	// a value past the cap is replaced, not cut to a readable prefix.
+	// a value across the cap (it begins at byte 290 of a list cut at
+	// 300) is replaced, not cut to a readable prefix.
 	value := "198.51.100.77:443"
-	long := make([]string, 0, 40)
-	for i := range 40 {
+	long := make([]string, 0, 20)
+	for i := range 20 {
 		long = append(long, fmt.Sprintf("10.0.0.%d:443", i))
 	}
 	redact := func(s string) string { return strings.ReplaceAll(s, value, "[x]") }
