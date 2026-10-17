@@ -426,6 +426,15 @@ CP=$(commit alice "$work/fcapped")
 push "$CP"
 refused "a file that caps the body under the bundle's" "the new Caddyfile does not reach box_webhook on /: request_body's max_size caps the body under 16 MiB first"
 
+# timeouts ahead of box_webhook (the directive, which the default
+# order puts there too): a read_timeout under the floor is refused by
+# name.
+sed 's/^\tbox_webhook$/\ttimeouts {\n\t\tread_timeout 1s\n\t}\n\tbox_webhook/' "$work/f2" >"$work/fcut"
+grep -q 'read_timeout 1s' "$work/fcut" || fail "the cut file was not made"
+CT=$(commit alice "$work/fcut")
+push "$CT"
+refused "a file whose timeouts would cut an upload" "the new Caddyfile does not reach box_webhook on /: timeouts's read_timeout cuts an upload that stalls under 10s first"
+
 echo "=== box apply 4: a config that validates but does not load is rolled back ==="
 # Validation binds no listener; loading does, and 192.0.2.1 (TEST-NET-1)
 # is on no interface here.

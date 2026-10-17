@@ -21,6 +21,7 @@ func FuzzReach(f *testing.F) {
 		reachFile([]string{"respond first"}, "", "\t@m header X-A b\n\trespond @m ok\n", ""),
 		reachFile([]string{"handle first"}, "", "\thandle {\n\t\theader X-A b\n\t}\n\thandle {\n\t\trespond no\n\t}\n", ""),
 		reachFile([]string{"rewrite first"}, "", "\trewrite * /x\n", ""),
+		reachFile(nil, "", "\ttimeouts {\n\t\tread_timeout 1s 65537\n\t}\n", ""),
 	} {
 		cfg, _, err := adapt(f, in)
 		if err != nil {
@@ -37,12 +38,14 @@ func FuzzReach(f *testing.F) {
 	f.Add(connJSON(`"listener_wrappers":[{"wrapper":"proxy_protocol","fallback_policy":"REQUIRE"},{"wrapper":"tls"}],`), "deploy.example.com", "")
 	f.Add(connJSON(`"tls_connection_policies":[{"match":{"remote_ip":{}}},{"match":{"sni":["*.example.com"]},"client_authentication":{"mode":"require"}}],`), "deploy.example.com", "")
 	f.Add(connJSON(`"strict_sni_host":true,`), "203.0.113.5", "")
-	// The request limits, in both of a duration's shapes, and
-	// request_body's two settings.
+	// The request limits, in both of a duration's shapes, request_body's
+	// two settings and timeouts' two.
 	f.Add(connJSON(`"read_header_timeout":"1s","max_header_bytes":7999,`), "deploy.example.com", "")
 	f.Add(connJSON(`"read_timeout":1000000000,"read_min_rate":65537,`), "deploy.example.com", "")
 	f.Add(reachJSON(`{"handle":[{"handler":"request_body","set":"x","max_size":1}]},`, ""), "deploy.example.com", "")
 	f.Add(reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"request_body","max_size":1048576}]},`, ""), "deploy.example.com", "")
+	f.Add(reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":10000000000,"read_min_rate":65537}]},`, ""), "deploy.example.com", "")
+	f.Add(reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"timeouts","read_timeout":1}]},`, ""), "deploy.example.com", "")
 	// The door: kept in another spelling, moved, a placeholder, a port
 	// range, an address that does not parse, a listen of another shape.
 	f.Add(connJSON(""), "deploy.example.com", "tcp/:443 :443")
@@ -81,8 +84,8 @@ func FuzzReach(f *testing.F) {
 // connection policy and what it does, a request limit under its floor
 // — each limit's text in full, since the floors are fixed words), or
 // what stands in the way of the request (a module name, with its
-// setting for request_body, an earlier site, a terminal route) and one
-// of the five verbs.
+// setting for request_body and timeouts, an earlier site, a terminal
+// route) and one of the six verbs.
 var catalogueReach = regexp.MustCompile(`^(` + regexp.QuoteMeta(msgListenMoved) + `|` +
 	`the new Caddyfile does not reach box_webhook on /: (` +
 	`a listener's protocols include neither h1 nor h2|` +
@@ -96,6 +99,8 @@ var catalogueReach = regexp.MustCompile(`^(` + regexp.QuoteMeta(msgListenMoved) 
 	`the server's write_timeout is under 5s, the floor for a push's handshake|` +
 	`a TLS connection policy for .* ` + policyWhat + `|` +
 	`a TLS connection policy that may apply to .* ` + policyWhat + ` \(its .+ matcher is decided per connection\)|` +
-	`(.+) (answers first|changes the request first|caps the body under 16 MiB first|may (answer|change the request|cap the body under 16 MiB) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\))))$`)
+	`(.+) (answers first|changes the request first|caps the body under 16 MiB first|cuts ` + cutWhat + ` first|may (answer|change the request|cap the body under 16 MiB|cut ` + cutWhat + `) first \(its .+ matcher is decided per request\)|stands behind a .+ matcher decided per request|may fail \(decided per request\))))$`)
+
+const cutWhat = `an upload (that stalls under 10s|under 64 KiB/s)`
 
 const policyWhat = `(requires a client certificate|drops the connection|offers neither h2 nor http/1\.1 by ALPN|sets .+, which may refuse the handshake)`

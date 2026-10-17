@@ -7,7 +7,7 @@ package box
 // the workflow's connection reaches that server's routes (its request
 // limits among them), and whether a GET and a POST for / on the
 // box_webhook host then meet box_webhook before any handler that could
-// answer them, or cap or replace their body. Pure: the JSON and the
+// answer them, or cap, replace or cut short their body. Pure: the JSON and the
 // door in, a verdict out, no module loaded but the five matcher types
 // it decides with and Caddy's SNI matcher. Fail-closed every way: a
 // handler, a listener wrapper or a TLS policy setting the tables have
@@ -54,10 +54,11 @@ var errAdaptation = errors.New("the adaptation does not parse")
 // single pass linear in its size, into the shape the walk reads: a
 // route's group, matcher sets, handlers and terminal flag; a handler's
 // module name, whether a headers handler has a request section, which
-// of a request_body handler's settings the table refuses, and a
-// subroute's routes. Another module's keys are never read, whatever
-// they hold; a value of the wrong shape where a route list, a set, a
-// handler or one of those settings must be is the adaptation's fault.
+// of a request_body or a timeouts handler's settings the table refuses,
+// and a subroute's routes. Another module's keys are never read,
+// whatever they hold; a value of the wrong shape where a route list, a
+// set, a handler or one of those settings must be is the adaptation's
+// fault.
 type adaptedRoute struct {
 	group    string
 	match    []map[string]any
@@ -67,7 +68,9 @@ type adaptedRoute struct {
 
 // adaptedHandler's setting is "set" for a request_body that replaces
 // the body, else "max_size" for one whose cap is positive and under
-// the bundle's; "" otherwise.
+// the bundle's; "read_timeout" for a timeouts whose read idle deadline
+// is positive and under its floor, else "read_min_rate" for one whose
+// rate, under a positive deadline, is over its ceiling; "" otherwise.
 type adaptedHandler struct {
 	name    string
 	request bool
@@ -133,6 +136,12 @@ func routeList(v any) ([]adaptedRoute, error) {
 						return nil, err
 					}
 					h.setting = setting
+				case "timeouts":
+					setting, err := timeoutsSetting(hm)
+					if err != nil {
+						return nil, err
+					}
+					h.setting = setting
 				}
 				r.handle = append(r.handle, h)
 			}
@@ -163,20 +172,67 @@ func requestBodySetting(hm map[string]any) (string, error) {
 			return "set", nil
 		}
 	}
-	if v, ok := hm["max_size"]; ok && v != nil {
-		num, ok := v.(json.Number)
-		if !ok {
-			return "", errAdaptation
-		}
-		n, err := num.Int64()
-		if err != nil {
-			return "", errAdaptation
-		}
-		if n > 0 && n < maxBody {
-			return "max_size", nil
-		}
+	n, err := int64Of(hm, "max_size")
+	if err != nil {
+		return "", err
+	}
+	if n > 0 && n < maxBody {
+		return "max_size", nil
 	}
 	return "", nil
+}
+
+// timeoutsSetting reads a timeouts handler's two read settings as
+// Caddy does (timeouts.Timeouts.ServeHTTP): `read_timeout` installs
+// its reader on the body only when positive — with no rate an idle
+// deadline reset on every read, with `read_min_rate` an allowance from
+// the start of read_timeout plus a second per read_min_rate bytes
+// received (caddyhttp.IdleDeadline.next) — so the rate counts only
+// under a positive deadline. The floors are the server's for the
+// limits they mirror (read_idle_timeout's and read_min_rate's), and a
+// deadline under its floor is named ahead of a rate over its ceiling.
+// Each is read in Caddy's shape for it: a time.Duration and an int64,
+// both whole numbers (that field reads no duration string), so a
+// string, a fraction or a number past int64 is the adaptation's fault,
+// as validate refused it first; null is absent. The write settings and
+// max_write_chunk bound the answer, which the poll recovers, and are
+// not read.
+func timeoutsSetting(hm map[string]any) (string, error) {
+	idle, err := int64Of(hm, "read_timeout")
+	if err != nil {
+		return "", err
+	}
+	rate, err := int64Of(hm, "read_min_rate")
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case idle <= 0:
+	case time.Duration(idle) < floorReadIdleTimeout:
+		return "read_timeout", nil
+	case rate > ceilingReadMinRate:
+		return "read_min_rate", nil
+	}
+	return "", nil
+}
+
+// int64Of is a handler's whole-number setting as Caddy's int64 fields
+// read it: absent or null is zero, and a value of another shape, a
+// fraction or a number past int64 is the adaptation's fault.
+func int64Of(hm map[string]any, key string) (int64, error) {
+	v, ok := hm[key]
+	if !ok || v == nil {
+		return 0, nil
+	}
+	num, ok := v.(json.Number)
+	if !ok {
+		return 0, errAdaptation
+	}
+	n, err := num.Int64()
+	if err != nil {
+		return 0, errAdaptation
+	}
+	return n, nil
 }
 
 // reach asks the question of adapted for host, the box_webhook host
@@ -390,7 +446,10 @@ var serverKeys = func() []string {
 // net/http and to Caddy's idle reader alike (max_header_bytes: the
 // default again). The rate counts only while a read idle deadline
 // applies: Caddy's Server.ServeHTTP installs the reader that holds the
-// rate only for a positive ReadIdleTimeout, which zero becomes.
+// rate only for a positive ReadIdleTimeout, which zero becomes. The
+// idle floor and the rate's ceiling are asked as well of a `timeouts`
+// handler ahead of box_webhook (timeoutsSetting), whose read_timeout
+// and read_min_rate are the same two bounds per route.
 const (
 	floorMaxHeaderBytes    = 8000 // 8 KB: Caddy reads `max_header_size 8KB` with SI prefixes, and that spelling passes
 	floorReadHeaderTimeout = 5 * time.Second
@@ -675,7 +734,8 @@ const (
 
 // reachBlock is what stood in the way: a handler by module name (and
 // the setting of it, when one setting is the block: request_body's
-// set or max_size), a terminal route that ran out of handlers (name
+// set or max_size, timeouts' read_timeout or read_min_rate), a
+// terminal route that ran out of handlers (name
 // ""; a site when at the server level), box_webhook itself behind a
 // per-request matcher, or a matcher that may fail — under a match that
 // is certain or, when may is set, hangs on matcher.
@@ -686,6 +746,7 @@ type reachBlock struct {
 	site     bool
 	changes  bool
 	caps     bool
+	cuts     bool
 	may      bool
 	behind   bool
 	fails    bool
@@ -722,15 +783,30 @@ func (b *reachBlock) text(host string) string {
 		return what + " may change the request first (its " + matcher + " matcher is decided per request)"
 	case b.may && b.caps:
 		return what + " may cap the body under " + bundleCap + " first (its " + matcher + " matcher is decided per request)"
+	case b.may && b.cuts:
+		return what + " may cut " + cut(b.setting) + " first (its " + matcher + " matcher is decided per request)"
 	case b.may:
 		return what + " may answer first (its " + matcher + " matcher is decided per request)"
 	case b.changes:
 		return what + " changes the request first"
 	case b.caps:
 		return what + " caps the body under " + bundleCap + " first"
+	case b.cuts:
+		return what + " cuts " + cut(b.setting) + " first"
 	default:
 		return what + " answers first"
 	}
+}
+
+// cut is what a timeouts setting past its floor does to a push, for
+// the block's text: the upload the rate cuts, or the one the deadline
+// cuts, each named by its floor, the server's own figure for that
+// bound.
+func cut(setting string) string {
+	if setting == "read_min_rate" {
+		return fmt.Sprintf("an upload under %d KiB/s", ceilingReadMinRate>>10)
+	}
+	return fmt.Sprintf("an upload that stalls under %s", floorReadIdleTimeout)
 }
 
 // groupState is what a route group has matched so far: Caddy skips a
@@ -807,6 +883,8 @@ func (w *reachWalk) routes(rs []adaptedRoute, outer matchVerdict, top bool) (rea
 				return blocked, &reachBlock{name: h.name, setting: h.setting, changes: true, may: may, matcher: v.matcher}
 			case classCaps:
 				return blocked, &reachBlock{name: h.name, setting: h.setting, caps: true, may: may, matcher: v.matcher}
+			case classCuts:
+				return blocked, &reachBlock{name: h.name, setting: h.setting, cuts: true, may: may, matcher: v.matcher}
 			default:
 				return blocked, &reachBlock{name: h.name, may: may, matcher: v.matcher}
 			}
@@ -827,6 +905,7 @@ const (
 	classPasses
 	classChanges
 	classCaps
+	classCuts
 	classSubroute
 	classReached
 )
@@ -838,7 +917,7 @@ func classify(h adaptedHandler) handlerClass {
 		return classReached
 	case "subroute":
 		return classSubroute
-	case "vars", "map", "log_append", "tracing", "timeouts",
+	case "vars", "map", "log_append", "tracing",
 		"encode", "push", "hint_penaltybox":
 		return classPasses
 	case "headers":
@@ -852,6 +931,11 @@ func classify(h adaptedHandler) handlerClass {
 			return classChanges
 		case "max_size":
 			return classCaps
+		}
+		return classPasses
+	case "timeouts":
+		if h.setting != "" {
+			return classCuts
 		}
 		return classPasses
 	case "rewrite":

@@ -7,6 +7,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	// The `timeouts` directive, so the adapter here writes the handler
+	// as hotserve's binary (Caddy's standard modules) does: its keys
+	// and the shape of each value are then the real adapter's to prove.
+	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp/timeouts"
 )
 
 // reachFile assembles a Caddyfile around the design's example box site
@@ -65,6 +70,8 @@ func TestReach(t *testing.T) {
 	const (
 		respondFirst = "static_response answers first"
 		mayHeader    = "static_response may answer first (its header matcher is decided per request)"
+		cutStall     = "timeouts's read_timeout cuts an upload that stalls under 10s first"
+		cutRate      = "timeouts's read_min_rate cuts an upload under 64 KiB/s first"
 	)
 	for name, c := range map[string]struct {
 		order                 []string
@@ -144,6 +151,29 @@ func TestReach(t *testing.T) {
 		"not over a header":                              {order: []string{"respond first"}, inside: "\t@m not header X-A b\n\trespond @m ok\n", want: "static_response may answer first (its not matcher is decided per request)"},
 		"a decided path beside an undecided header": {order: []string{"respond first"},
 			inside: "\t@m path /x\n\t@n header X-A b\n\trespond @m ok\n\trespond @n ok\n", want: mayHeader},
+
+		// The timeouts directive, which Caddy's default order puts ahead
+		// of box_webhook: its read_timeout is an idle deadline that
+		// counts only when positive, its rate only under one; the
+		// floors are the server's for read_body_idle; the write settings
+		// get none.
+		"timeouts with the usual hardening":                    {inside: "\ttimeouts {\n\t\tread_timeout 30s 1024\n\t\twrite_timeout 30s 1024\n\t\tmax_write_chunk 64KB\n\t}\n"},
+		"timeouts with nothing set":                            {inside: "\ttimeouts\n"},
+		"timeouts read_timeout at the floor":                   {inside: "\ttimeouts {\n\t\tread_timeout 10s\n\t}\n"},
+		"timeouts read_timeout under the floor":                {inside: "\ttimeouts {\n\t\tread_timeout 9s\n\t}\n", want: cutStall},
+		"timeouts read_timeout 0s, no reader":                  {inside: "\ttimeouts {\n\t\tread_timeout 0s\n\t}\n"},
+		"timeouts read_timeout negative, no reader":            {inside: "\ttimeouts {\n\t\tread_timeout -1s\n\t}\n"},
+		"timeouts rate at the ceiling":                         {inside: "\ttimeouts {\n\t\tread_timeout 10s 65536\n\t}\n"},
+		"timeouts rate over the ceiling":                       {inside: "\ttimeouts {\n\t\tread_timeout 10s 65537\n\t}\n", want: cutRate},
+		"timeouts rate over the ceiling under no deadline":     {inside: "\ttimeouts {\n\t\tread_timeout 0s 65537\n\t}\n"},
+		"timeouts read_timeout under and rate over":            {inside: "\ttimeouts {\n\t\tread_timeout 1s 65537\n\t}\n", want: cutStall},
+		"timeouts write_timeout and max_write_chunk, no floor": {inside: "\ttimeouts {\n\t\twrite_timeout 1ms 1000000000\n\t\tmax_write_chunk 1\n\t}\n"},
+		"timeouts on another path":                             {inside: "\ttimeouts /x {\n\t\tread_timeout 1s\n\t}\n"},
+		"timeouts under a header matcher":                      {inside: "\t@m header X-A b\n\ttimeouts @m {\n\t\tread_timeout 1s\n\t}\n", want: "timeouts's read_timeout may cut an upload that stalls under 10s first (its header matcher is decided per request)"},
+		"timeouts for the POST alone":                          {inside: "\t@m method POST\n\ttimeouts @m {\n\t\tread_timeout 1s\n\t}\n", want: cutStall},
+		// Refused though the GET reads no body: the method is not weighed
+		// in the walk (Accepted residuals).
+		"timeouts for the GET alone": {inside: "\t@m method GET\n\ttimeouts @m {\n\t\tread_timeout 1s\n\t}\n", want: cutStall},
 	} {
 		t.Run(name, func(t *testing.T) {
 			wantReach(t, reachOf(t, reachFile(c.order, c.before, c.inside, c.after)), c.want)
@@ -521,18 +551,45 @@ func TestReachJSON(t *testing.T) {
 		"request_body with a max_size past int64":                         {adapted: reachJSON(`{"handle":[{"handler":"request_body","max_size":9223372036854775808}]},`, ""), want: "error"},
 		"a value after the adaptation":                                    {adapted: append(reachJSON("", ""), " 1"...), want: "error"},
 		"whitespace after the adaptation":                                 {adapted: append(reachJSON("", ""), " \n"...), want: ""},
-		"another handler's set and max_size keys":                         {adapted: reachJSON(`{"handle":[{"handler":"vars","set":5,"max_size":"1MB"}]},`, ""), want: ""},
-		"templates ahead":                                                 {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
-		"templates ahead with its default types":                          {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},
-		"intercept ahead":                                                 {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
-		"a response headers handler":                                      {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
-		"a request headers handler":                                       {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
-		"a handler the table does not name":                               {adapted: reachJSON(`{"handle":[{"handler":"cache"}]},`, ""), want: "cache answers first"},
-		"invoke":                                                          {adapted: reachJSON(`{"handle":[{"handler":"invoke","name":"r"}]},`, ""), want: "invoke answers first"},
-		"an undecided matcher on a handler that passes":                   {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
-		"an undecided matcher on a responder":                             {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its remote_ip matcher is decided per request)"},
-		"two sets, one decided no and one undecided":                      {adapted: reachJSON(`{"match":[{"path":["/x"]},{"header":{"X-A":["b"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
-		"two sets, one decided yes":                                       {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}},{"path":["/"]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
+		"another handler's set, max_size and read_timeout keys":           {adapted: reachJSON(`{"handle":[{"handler":"vars","set":5,"max_size":"1MB","read_timeout":"1s"}]},`, ""), want: ""},
+		// timeouts: read_timeout, an idle deadline, counts only when
+		// positive, and read_min_rate only under one; the floors are
+		// the server's for read_idle_timeout and read_min_rate. Read as
+		// Caddy reads them: whole numbers (a time.Duration reads no
+		// string), null absent; the deadline is named ahead of the rate.
+		"timeouts with a read_timeout under the floor":                        {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":9999999999}]},`, ""), want: "timeouts's read_timeout cuts an upload that stalls under 10s first"},
+		"timeouts with a read_timeout at the floor":                           {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":10000000000}]},`, ""), want: ""},
+		"timeouts with read_timeout zero":                                     {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":0}]},`, ""), want: ""},
+		"timeouts with a negative read_timeout":                               {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":-1}]},`, ""), want: ""},
+		"timeouts with read_timeout null":                                     {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":null}]},`, ""), want: ""},
+		"timeouts with a rate over the ceiling":                               {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":10000000000,"read_min_rate":65537}]},`, ""), want: "timeouts's read_min_rate cuts an upload under 64 KiB/s first"},
+		"timeouts with a rate at the ceiling":                                 {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":10000000000,"read_min_rate":65536}]},`, ""), want: ""},
+		"timeouts with a rate over the ceiling and no read_timeout":           {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_min_rate":65537}]},`, ""), want: ""},
+		"timeouts with a rate over the ceiling under a negative read_timeout": {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":-1,"read_min_rate":65537}]},`, ""), want: ""},
+		"timeouts with a read_timeout under and a rate over":                  {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":1,"read_min_rate":65537}]},`, ""), want: "timeouts's read_timeout cuts an upload that stalls under 10s first"},
+		"timeouts with a rate at int64's edge":                                {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":10000000000,"read_min_rate":9223372036854775807}]},`, ""), want: "timeouts's read_min_rate cuts an upload under 64 KiB/s first"},
+		"timeouts with a read_timeout at int64's edge":                        {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":9223372036854775807}]},`, ""), want: ""},
+		"timeouts with the write settings alone":                              {adapted: reachJSON(`{"handle":[{"handler":"timeouts","write_timeout":1,"write_min_rate":1000000000,"max_write_chunk":1}]},`, ""), want: ""},
+		"timeouts with a read_timeout under a remote_ip matcher":              {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"timeouts","read_timeout":1}]},`, ""), want: "timeouts's read_timeout may cut an upload that stalls under 10s first (its remote_ip matcher is decided per request)"},
+		"timeouts with a rate over under a header matcher":                    {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}}],"handle":[{"handler":"timeouts","read_timeout":10000000000,"read_min_rate":65537}]},`, ""), want: "timeouts's read_min_rate may cut an upload under 64 KiB/s first (its header matcher is decided per request)"},
+		"timeouts with a read_timeout under a failing matcher":                {adapted: reachJSON(`{"match":[{"expression":{"expr":"true"}}],"handle":[{"handler":"timeouts","read_timeout":1}]},`, ""), want: "the expression matcher ahead of it may fail (decided per request)"},
+		"timeouts with a read_timeout under, on another path":                 {adapted: reachJSON(`{"match":[{"path":["/x"]}],"handle":[{"handler":"timeouts","read_timeout":1}]},`, ""), want: ""},
+		"timeouts with a read_timeout under, behind box_webhook":              {adapted: []byte(`{"apps":{"http":{"servers":{"srv0":{"listen":[":443"],"routes":[{"match":[{"host":["deploy.example.com"]}],"handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"box_webhook"},{"handler":"timeouts","read_timeout":1}]}]}],"terminal":true}]}}}}}`), want: ""},
+		"timeouts whose read_timeout is a duration string":                    {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":"10s"}]},`, ""), want: "error"},
+		"timeouts whose read_timeout has a fraction":                          {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":1.5}]},`, ""), want: "error"},
+		"timeouts whose read_timeout is past int64":                           {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_timeout":9223372036854775808}]},`, ""), want: "error"},
+		"timeouts whose rate does not read, under no read_timeout":            {adapted: reachJSON(`{"handle":[{"handler":"timeouts","read_min_rate":"fast"}]},`, ""), want: "error"},
+		"templates ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"templates","mime_types":["application/json"]}]},`, ""), want: "templates answers first"},
+		"templates ahead with its default types":        {adapted: reachJSON(`{"handle":[{"handler":"templates"}]},`, ""), want: "templates answers first"},
+		"intercept ahead":                               {adapted: reachJSON(`{"handle":[{"handler":"intercept","handle_response":[{"match":{"status_code":[2]},"routes":[{"handle":[{"handler":"static_response","body":"maintenance"}]}]}]}]},`, ""), want: "intercept answers first"},
+		"a response headers handler":                    {adapted: reachJSON(`{"handle":[{"handler":"headers","response":{"set":{"X-A":["b"]}}}]},`, ""), want: ""},
+		"a request headers handler":                     {adapted: reachJSON(`{"handle":[{"handler":"headers","request":{"delete":["Authorization"]}}]},`, ""), want: "headers changes the request first"},
+		"a handler the table does not name":             {adapted: reachJSON(`{"handle":[{"handler":"cache"}]},`, ""), want: "cache answers first"},
+		"invoke":                                        {adapted: reachJSON(`{"handle":[{"handler":"invoke","name":"r"}]},`, ""), want: "invoke answers first"},
+		"an undecided matcher on a handler that passes": {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"encode"}]},`, ""), want: ""},
+		"an undecided matcher on a responder":           {adapted: reachJSON(`{"match":[{"remote_ip":{"ranges":["10.0.0.0/8"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its remote_ip matcher is decided per request)"},
+		"two sets, one decided no and one undecided":    {adapted: reachJSON(`{"match":[{"path":["/x"]},{"header":{"X-A":["b"]}}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response may answer first (its header matcher is decided per request)"},
+		"two sets, one decided yes":                     {adapted: reachJSON(`{"match":[{"header":{"X-A":["b"]}},{"path":["/"]}],"handle":[{"handler":"static_response"}]},`, ""), want: "static_response answers first"},
 		// Sets run in order until one matches: a set that matches for
 		// sure shields the sets after it, not the ones before.
 		"a failing set after one that matches":                       {adapted: reachJSON(`{"match":[{"path":["/"]},{"expression":{"expr":"true"}}],"handle":[{"handler":"vars"}]},`, ""), want: ""},
