@@ -222,7 +222,10 @@ Properties that matter to the model:
   that each source makes at most once a minute, every other such token
   meanwhile waiting on that fetch or answered from its outcome (`keySet`,
   liveswap/deploytrust/jwks.go). So the throttle is not what bounds
-  CPU, and traffic does not set how often the box calls an issuer.
+  CPU, and once a source's discovery has succeeded, traffic does not
+  set how often the box fetches its issuer's keys; while discovery
+  fails, each verification tries it again (`oidcVerifier.ensure`,
+  liveswap/deploytrust/deploytrust.go), one at a time per source.
   One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413

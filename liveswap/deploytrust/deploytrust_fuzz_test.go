@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -140,37 +141,40 @@ func FuzzCaddyStripsKey(f *testing.F) {
 // accepts carries both, and its exp - iat, read from the raw JSON
 // numbers, is under the bound plus the two seconds go-jose's
 // truncation of each to whole seconds can hide. The verifier's clock
-// is fixed, so a seed can be accepted; the bound is kept under ten
-// years, far inside time.Duration's range.
+// is fixed, so a seed can be accepted; the bound is any positive
+// duration, the largest included, where exp - iat would saturate.
 func FuzzLocalTokenLifetime(f *testing.F) {
+	const day = int64(24 * time.Hour)
 	for _, s := range []struct {
 		iat, exp string
-		maxSec   int64
+		maxNs    int64
 	}{
 		// trusttest.NewClock's instant is 1700000000.
-		{"1700000000", "1700086400", 86400}, // exactly the bound: accepted
-		{"1700000000", "1700086401", 86400}, // a second over
-		{"1700000000", "2015360000", 86400}, // ten years
-		{"1.7e9", "1.7000864e9", 86400},
-		{"1699999999.9", "1700086400.9", 86400},
-		{"1700000000", "1700086400.99", 86400},
-		{"-0", "1700000000", 86400},
-		{"-4611686018427387903", "4611686018427387903", 86400},
-		{"", "1700000060", 86400}, // no iat
-		{"1700000000", "1700000060", 1},
+		{"1700000000", "1700086400", day}, // exactly the bound: accepted
+		{"1700000000", "1700086401", day}, // a second over
+		{"1700000000", "2015360000", day}, // ten years
+		{"1.7e9", "1.7000864e9", day},
+		{"1699999999.9", "1700086400.9", day},
+		{"1700000000", "1700086400.99", day},
+		{"-0", "1700000000", day},
+		{"-4611686018427387903", "4611686018427387903", day},
+		{"", "1700000060", day}, // no iat
+		{"1700000000", "1700000060", int64(time.Second)},
+		{"1700000000", "10900000000", math.MaxInt64}, // inside the largest bound (~292 years)
+		{"1700000000", "32503680000", math.MaxInt64}, // the year 3000: past it
 	} {
-		f.Add(s.iat, s.exp, s.maxSec)
+		f.Add(s.iat, s.exp, s.maxNs)
 	}
 	priv, pub := trusttest.GenerateKey()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: priv}, nil)
 	if err != nil {
 		f.Fatal(err)
 	}
-	f.Fuzz(func(t *testing.T, iat, exp string, maxSec int64) {
+	f.Fuzz(func(t *testing.T, iat, exp string, maxNs int64) {
 		if !jsonNumber(exp) || (iat != "" && !jsonNumber(iat)) {
 			return
 		}
-		limit := time.Duration(max(1, uint64(maxSec)%(10*365*24*3600))) * time.Second
+		limit := max(1, time.Duration(maxNs&math.MaxInt64))
 		payload := `{"aud":"a","exp":` + exp
 		if iat != "" {
 			payload += `,"iat":` + iat
@@ -192,7 +196,9 @@ func FuzzLocalTokenLifetime(f *testing.F) {
 			t.Fatalf("accepted %s, which has no iat", payload)
 		}
 		life := new(big.Float).Sub(rawNumber(t, exp), rawNumber(t, iat))
-		if bound := new(big.Float).SetInt64(int64(limit/time.Second) + 2); life.Cmp(bound) >= 0 {
+		bound := new(big.Float).Quo(new(big.Float).SetInt64(int64(limit)), big.NewFloat(float64(time.Second)))
+		bound.Add(bound, big.NewFloat(2))
+		if life.Cmp(bound) >= 0 {
 			t.Fatalf("accepted %s: exp - iat is %s s, over max_token_ttl %v", payload, life.Text('f', 3), limit)
 		}
 	})

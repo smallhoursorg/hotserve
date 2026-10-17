@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -208,9 +209,24 @@ func TestLocalTokenLifetimeBound(t *testing.T) {
 			t.Errorf("max_token_ttl %v: a token that lives exactly that long was refused: %v", limit, err)
 		}
 		_, _, err := authorize(context.Background(), vs, lives(limit+time.Second))
-		if err == nil || !strings.Contains(err.Error(), "over this source's max_token_ttl") {
+		if err == nil || !strings.Contains(err.Error(), "max_token_ttl "+limit.String()+" after its iat") {
 			t.Errorf("max_token_ttl %v: a token a second longer: err = %v, want a refusal naming max_token_ttl", limit, err)
 		}
+	}
+
+	// At the largest bound a duration holds (~292 years), exp - iat
+	// would saturate at the bound itself; a token minted to outlive it
+	// is still refused, and one inside it accepted.
+	src := localTrust(pub, "a")
+	src.maxTTL = time.Duration(math.MaxInt64)
+	vs := Verifiers([]Source{src}, nil)
+	inside := trusttest.SignEdDSA(t, priv, trusttest.Claims("", "a", now, now.AddDate(292, 0, 0), nil))
+	if _, _, err := authorize(context.Background(), vs, inside); err != nil {
+		t.Errorf("largest max_token_ttl: a token inside it was refused: %v", err)
+	}
+	beyond := trusttest.SignEdDSA(t, priv, trusttest.Claims("", "a", now, now.AddDate(974, 0, 0), nil))
+	if _, _, err := authorize(context.Background(), vs, beyond); err == nil || !strings.Contains(err.Error(), "max_token_ttl") {
+		t.Errorf("largest max_token_ttl: a token that outlives it: err = %v, want a refusal naming max_token_ttl", err)
 	}
 }
 

@@ -890,8 +890,14 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) (Identity, er
 	if std.IssuedAt == nil {
 		return Identity{}, fmt.Errorf("local token has no iat claim, which max_token_ttl is measured from")
 	}
-	if life := std.Expiry.Time().Sub(std.IssuedAt.Time()); life > v.maxTTL {
-		return Identity{}, fmt.Errorf("local token lives %v (exp - iat), over this source's max_token_ttl %v", life, v.maxTTL)
+	// exp against iat + max, not exp - iat against max: the difference
+	// saturates at time.Duration's largest value, so against a bound
+	// that large it would let a longer-lived token through. go-jose
+	// keeps both within ±2^62 s, so neither the sum nor the times
+	// printed below overflow.
+	if exp, iat := std.Expiry.Time(), std.IssuedAt.Time(); exp.After(iat.Add(v.maxTTL)) {
+		return Identity{}, fmt.Errorf("local token's exp (%s) is more than this source's max_token_ttl %v after its iat (%s)",
+			exp.UTC().Format(time.RFC3339), v.maxTTL, iat.UTC().Format(time.RFC3339))
 	}
 	now := time.Now()
 	if v.clock != nil {
