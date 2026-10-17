@@ -322,12 +322,14 @@ git add -A && git commit -m "$host: the box's config"
 
 **Tell the box which repository it belongs to.** Copy the box's
 directory to it, as the commit has it, and run `hotserve init` there
-as root with that commit. The first line is the placeholder check
-above, run on the commit: while one is left it prints its line and
-sends nothing, so change it, commit, and run the three lines again.
+as root with that commit. The first two lines check the commit: that
+it has `$host/Caddyfile`, and then the placeholder check above. While
+one is left it prints its line and sends nothing, so change it,
+commit, and run the four lines again.
 
 ```sh
-! git show HEAD:$host/Caddyfile | grep -En '^([^#]*[^#A-Za-z0-9-])?(your-org|example\.com)([^A-Za-z0-9.-]|$)' &&
+git cat-file -e HEAD:$host/Caddyfile &&
+  ! git show HEAD:$host/Caddyfile | grep -En '^([^#]*[^#A-Za-z0-9-])?(your-org|example\.com)([^A-Za-z0-9.-]|$)' &&
   git archive HEAD $host | ssh root@box.example.com tar -xf - &&
   ssh root@box.example.com "cd $host && hotserve init $(git rev-parse HEAD)"
 ```
@@ -346,7 +348,7 @@ unreachable by its own channel — and a directory not named for that
 site. Otherwise it installs the file over the starter config and
 reloads hotserve. A file that does not load is put back, the starter
 keeps serving, and `init` says so; `journalctl -u hotserve -n 50
---no-pager` on the box says why. Fix it, commit, and run the three
+--no-pager` on the box says why. Fix it, commit, and run the four
 lines again. The reload is also liveswap's first start, which tries the
 sandbox: on a host that cannot give one, the journal names what is
 missing, and the fix is the host's, not the file's
