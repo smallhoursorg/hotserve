@@ -406,6 +406,10 @@ type fakeStore struct {
 	state appState
 	ok    bool
 	err   error
+	// onSave, when set, runs at each save with the state saved: a
+	// test's look at what else was visible then. Set it before any
+	// goroutine that saves is started.
+	onSave func(appState)
 }
 
 func (s *fakeStore) load() (appState, bool, error) {
@@ -415,6 +419,9 @@ func (s *fakeStore) load() (appState, bool, error) {
 }
 
 func (s *fakeStore) save(st appState) error {
+	if s.onSave != nil {
+		s.onSave(st)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state = st

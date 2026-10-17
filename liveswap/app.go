@@ -1478,13 +1478,9 @@ type statusSnapshot struct {
 
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
-	var wd *watchdogSnapshot
 	var deploys []deploySummary
 	available := []string{} // always an array in the JSON, never null
 	if c.spec != nil {
-		if c.clock != nil {
-			wd = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
-		}
 		// Read releases outside ma.mu — it is disk I/O, and status is polled.
 		if rels := listReleases(c.spec.dirs.releases); rels != nil {
 			available = rels
@@ -1493,7 +1489,7 @@ func (ma *managedApp) status() statusSnapshot {
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, Watchdog: wd, AvailableVersions: available, Deploys: deploys}
+	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, AvailableVersions: available, Deploys: deploys}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Socket = ma.current.socket
@@ -1502,6 +1498,12 @@ func (ma *managedApp) status() statusSnapshot {
 		s.Command = hs.Command
 		s.Unit = hs.Unit
 		s.Running = c.runner.Alive(ma.current.handle)
+	}
+	// After current: the watchdog records a restart before it installs
+	// the new instance, so a status that shows the instance shows why
+	// it was started.
+	if c.spec != nil && c.clock != nil {
+		s.Watchdog = ma.wd.statusSnapshot(c.clock.Now(), c.spec.wdWindow)
 	}
 	return s
 }

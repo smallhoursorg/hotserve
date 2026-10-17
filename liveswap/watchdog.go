@@ -570,11 +570,14 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 			zap.String("version", inst.version), zap.Error(err))
 		return true
 	}
+	// Recorded before it is published: a status read that shows the
+	// new instance must show why it was started, not the previous
+	// restart's cause.
+	ma.wd.recordRestart(c.clock.Now(), kind)
 	if err := ma.publishInstance(c, newInst); err != nil {
 		c.logger.Warn("persisting restarted instance state", zap.Error(err))
 	}
 	inst.sock.retire()
-	ma.wd.recordRestart(c.clock.Now(), kind)
 	c.logger.Warn("watchdog: restarted app",
 		zap.String("cause", kind.String()),
 		zap.String("version", newInst.version),

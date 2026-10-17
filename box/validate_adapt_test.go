@@ -104,7 +104,9 @@ func TestValidateAdapt(t *testing.T) {
 		c, _ := stubAdapt(t, "head -c 17000000 /dev/zero | tr '\\0' 'x'; exit 0")
 		start := time.Now()
 		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, nil)
-		if err != nil || msg != msgAdaptationTooLarge || time.Since(start) > 10*time.Second {
+		// Half the deadline: the bound rules out a child that ran until
+		// it, not a slow machine.
+		if err != nil || msg != msgAdaptationTooLarge || time.Since(start) > c.timeout/2 {
 			t.Fatalf("msg %q err %v after %s", msg, err, time.Since(start))
 		}
 	})

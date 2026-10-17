@@ -43,9 +43,12 @@ func stubChildren(t *testing.T, validate, adapt, backup string, env ...string) (
 	must(t, os.Mkdir(stage, 0o700))
 	// One program answers both subcommands, as the real one does.
 	hotserve := "case \"$1\" in adapt)\n" + adapt + "\n;; esac\n" + validate
+	// The box's own deadline: a child a test means to finish must not
+	// race the machine's load (#289). Tests of the deadline set their
+	// own.
 	c := &childValidator{
 		stage: stage, hotserve: script(t, dir, "hotserve", hotserve), backup: filepath.Join(dir, "absent"),
-		env: env, timeout: 5 * time.Second, redactor: liveswap.NewRedactor(secretCandidates(env), nil),
+		env: env, timeout: validateTimeout, redactor: liveswap.NewRedactor(secretCandidates(env), nil),
 	}
 	if backup != "" {
 		c.backup = script(t, dir, "hotserve-backup", backup)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -79,6 +80,17 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 	rig := newTestRig(t)
 	deployV1(t, rig)
 	sockV1 := rig.ma.activeSocket.Load()
+	v1 := rig.ma.currentInstance()
+	// The new instance's save lands inside its publish, after the
+	// instance is installed: a status read then shows the new instance,
+	// and must show why it was started.
+	var atPublish atomic.Pointer[statusSnapshot]
+	rig.store.onSave = func(st appState) {
+		if st.Nonce != v1.nonce {
+			s := rig.ma.status()
+			atPublish.CompareAndSwap(nil, &s)
+		}
+	}
 	rig.startWatchdogT(t)
 	waitUntil(t, "watchdog to arm", func() bool {
 		s := rig.ma.wd.currentState()
@@ -94,6 +106,10 @@ func TestWatchdogRestartsOnCrash(t *testing.T) {
 		p := rig.ma.activeSocket.Load()
 		return p != nil && p != sockV1
 	})
+	waitUntil(t, "restart persisted", func() bool { return atPublish.Load() != nil })
+	if s := atPublish.Load(); s.Socket == v1.socket || s.Watchdog == nil || s.Watchdog.LastRestartCause != "crash" {
+		t.Fatalf("a status showing the new instance must show its restart: socket %s, %+v", s.Socket, s.Watchdog)
+	}
 	st, ok, _ := rig.store.load()
 	if !ok || st.CurrentVersion != "v1" {
 		t.Fatalf("restart must persist state for the same version: %+v", st)
@@ -201,9 +217,15 @@ func TestWatchdogHealthFailureOnDeadInstanceIsACrash(t *testing.T) {
 	})
 	rig.runner.handleAt(0).dieQuietly()
 	rig.prober.setProbeErr(nil)
-	advanceUntil(t, rig, time.Second, "restart", func() bool {
-		return rig.runner.startCount() == 2
+	// The record, not the second Start: the cause is written after
+	// the launch returns (TestWatchdogRestartsAfterConsecutiveHealthFailures).
+	advanceUntil(t, rig, time.Second, "restart recorded", func() bool {
+		s := rig.ma.status()
+		return s.Watchdog != nil && s.Watchdog.LastRestartCause != ""
 	})
+	if got := rig.runner.startCount(); got != 2 {
+		t.Fatalf("expected exactly one relaunch (2 starts), got %d", got)
+	}
 	if rig.runner.stopCount() != 0 {
 		t.Fatalf("a dead instance must not be stopped, got %d stops", rig.runner.stopCount())
 	}

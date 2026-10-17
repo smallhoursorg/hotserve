@@ -341,6 +341,11 @@ The status JSON's `watchdog` object reports `state`
 (`grace|watching|backoff|throttled|disabled|idle`),
 `consecutive_failures`, `restarts_in_window`, `last_restart_at`,
 `last_restart_cause` (`crash|health`) and `last_failure`.
+`restarts_in_window` is what the budget counts: it includes a restart
+still waiting out its `backoff` (dropped again if that restart is
+called off), and a relaunch that failed to start, while
+`last_restart_at` and `last_restart_cause` describe the last restart
+that started an instance.
 
 If your health endpoint can be slow under load, raise `health_timeout`
 (probe timeouts count as failures). If it redirects — a `/health` →
