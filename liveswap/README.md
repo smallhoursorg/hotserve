@@ -526,8 +526,8 @@ already had.
 `ENOENT` for something that exists on the host: a database's unix
 socket, a data directory outside the app's own, a runtime under
 `/opt`. **There is no way to widen a view.** An app sees the OS base
-view, its own release dir and its own `shared/`. That is the whole
-list, and it is fixed.
+view, its own release dir, its own `shared/` and its instance's
+`run/<nonce>/`. That is the whole list, and it is fixed.
 
 That is a deliberate limit, not an oversight. The one mechanism that
 would widen a view is also the one that has to be correct against
@@ -551,9 +551,10 @@ Practical consequences worth planning around:
   every unit. A vendored runtime under `/opt`, or an `nvm`/`asdf` shim
   under a home directory, is not — ship it inside the release instead.
 
-An app's own `releases/<version>` and `shared/` must **be** the
-directories they name. hotserve resolves them immediately before the
-unit is created and refuses to launch if either points somewhere else,
+An app's own `releases/<version>`, `shared/` and `run/<nonce>/` must
+**be** the directories they name. hotserve resolves them immediately
+before the unit is created and refuses to launch if any points
+somewhere else,
 because the app dir is writable by the app: a symlink placed there
 cannot be told from one you meant. To put an app's data on another
 disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
@@ -1329,8 +1330,9 @@ the defaults and a `pre_start`, plus the artifact's transfer: the
 one `health_interval` and two `health_timeout`s (9s) + `drain` (5s) +
 `grace` (10s) = 10m24s, which leaves 4m36s for the download. Raise it
 with any of those settings. A curl that gives up before the cutover
-fails the deploy, and the old version keeps serving; one that gives up
-after it turns red a deploy the box completed.
+fails the deploy, and the old version keeps serving — and a `pre_start`
+still running is stopped where it is, mid-migration; one that gives up
+after the cutover turns red a deploy the box completed.
 
 ## Server layout
 
@@ -1346,7 +1348,8 @@ after it turns red a deploy the box completed.
 ```
 
 Inside its sandbox an instance sees only `releases/<its version>/`
-and `shared/` of this tree (see [Sandbox](#sandbox)).
+and `shared/` of this tree, and its own `run/<nonce>/`, where it binds
+its socket (see [Sandbox](#sandbox)).
 
 ## Semantics and trade-offs (read this)
 

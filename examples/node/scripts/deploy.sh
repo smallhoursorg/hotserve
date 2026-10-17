@@ -208,8 +208,8 @@ stream() { # <curl args...>: runs the request, prints it, keeps it
 		# and grace (10s) come to 10m24s; 900 leaves 4m36s for the
 		# transfer. Raise it with any of those settings. Giving up before
 		# the cutover fails the deploy with the old version still
-		# serving; giving up after it reports a deploy the box completed
-		# as failed.
+		# serving, and stops a running pre_start mid-migration; giving up
+		# after the cutover reports a deploy the box completed as failed.
 		curl --fail-with-body --silent --show-error --no-buffer --max-time 900 \
 			-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
 			-D "$hdrs" "$@" || rc=$?

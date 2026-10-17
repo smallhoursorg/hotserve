@@ -131,8 +131,8 @@ below as a contract the sandbox path must keep.
   fails `203/EXEC` — measured, and exactly what the capability probe
   (which has no directories of its own) would otherwise do. Empty list
   properties MUST NOT be emitted.
-- An app's mandatory binds — the release being started and `shared/` —
-  MUST resolve to the directories they name, and a launch whose bind
+- An app's mandatory binds — the release being started, `shared/` and
+  the instance's `run/<nonce>/` — MUST resolve to the directories they name, and a launch whose bind
   source resolves anywhere else MUST be refused. The only permitted
   difference is one an alias on the liveswap root itself explains.
   Resolution to a path outside the root is unsound: the app's own

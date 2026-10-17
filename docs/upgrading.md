@@ -33,7 +33,7 @@ does not fit it as it stands. This one does, with `<tag>` replaced by
 the tag the maintainer announced, without its `v`:
 
 ```sh
-v=<tag>                             # the announced tag, without the v
+v='<tag>'                           # the announced tag, without the v
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 deb=hotserve_$(echo "$v" | tr - .)_${arch}.deb
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v

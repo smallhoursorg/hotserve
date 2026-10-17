@@ -91,7 +91,7 @@ check makes that source refetch its issuer's JWKS first (go-oidc's
 unknown name each pay the round trips of their own sources. Where those
 differ — plainest when the global sources hold no OIDC source, and an
 unknown name is refused at once — an app name can be confirmed by
-timing (owed: #296). Config load refuses an app
+timing (owed: #296, #306). Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.
@@ -222,7 +222,7 @@ Properties that matter to the model:
   paid; against an OIDC source, a well-formed token that fails the
   signature check also costs a refetch of the issuer's JWKS, so a
   client sending forged tokens keeps the box fetching from the issuer,
-  one fetch in flight per source at a time (owed: #296). One limiter for the process, not per handler, so a
+  one fetch in flight per source at a time (owed: #296, #306). One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413
   (`maxPayloadBytes`, enforced in `Handler.deployURL`,
@@ -931,9 +931,9 @@ grant.
 **The property set**, on every unit — `unitProperties` renders the
 lifecycle properties and appends `sandboxProperties` for the rest, and
 `userManagerClient.StartTransientUnit` adds `LimitNOFILE=`
-(liveswap/systemd_dbus.go). The capability probe's unit (below) has
-no `BindPaths=` and no `ExecStopPost=`: it binds nothing of an app's
-and has no socket.
+(liveswap/systemd_dbus.go). The capability probe's unit (below) is a
+`oneshot` run from `/`, with no `BindPaths=` and no `ExecStopPost=`:
+it binds nothing of an app's and has no socket.
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
   `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app

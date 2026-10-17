@@ -222,9 +222,10 @@ func (s *sandboxSpec) resolveBindSources() error {
 	// the configured app name, NOT from what appDir itself resolves to.
 	// Resolving appDir would let the alias vouch for itself: a link at
 	// <root>/blog pointing at <root>/shop would make
-	// shop's directory the expected base, and both of blog's mandatory
-	// binds would then match it exactly — handing the sibling's release
-	// and shared data to the new sandbox.
+	// shop's directory the expected base, and every one of blog's
+	// mandatory binds (release, shared, run/<nonce>) would then match
+	// it exactly — handing the sibling's release and shared data to the
+	// new sandbox.
 	appC := filepath.Join(rootC, s.appName)
 	own := func(dest, resolved string) error {
 		// The only difference a mandatory bind may have from its

@@ -288,9 +288,10 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	// Global trust sources back the unknown-app path: a request for an
 	// app that does not exist is still authenticated (against the
-	// global sources) before its 404, so app names never leak to
-	// unauthenticated callers. The same wiring serves the box webhook
-	// (New).
+	// global sources) before its 404, so the status never leaks app
+	// names to unauthenticated callers; the time to the 401 still can
+	// (DESIGN-threat-model.md, "Webhook endpoint"; #296, #306). The
+	// same wiring serves the box webhook (New).
 	if a.globalVerifiers, err = deploytrust.Resolve(repl, a.DeployTrust, clients.jwks); err != nil {
 		return err
 	}
