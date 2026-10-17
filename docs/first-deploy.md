@@ -7,6 +7,15 @@ push a signed commit, a GitHub Actions workflow that deploys every
 push of the app with no stored secret, and the shape you copy for
 every app after it.
 
+Signed commits are the bar every change to the box's config meets: the
+box applies a commit only if a key on its own list signed it, and
+those keys stay on the signers' laptops, so a stolen GitHub login or a
+compromised workflow cannot change the config with anything a signer
+did not sign.
+The same check means GitHub's merge button cannot make a commit the
+box applies: a pull request someone reviewed is landed from a signer's
+laptop ([the rules](../examples/box/README.md#the-rules)).
+
 You work as root on the box only to install software and, once, to
 tell the box which repository its config comes from (step 3);
 everything else happens on your laptop and on GitHub.
