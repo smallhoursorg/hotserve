@@ -43,9 +43,20 @@ Concept map from the Nomad-era stack:
 - The webhook MUST authenticate every request by verifying an
   `Authorization: Bearer <JWT>` against the app's `deploy_trust`
   sources (OIDC against an issuer's public JWKS, or a local public
-  key), and MUST NOT reveal whether an app exists to unauthenticated
-  callers (unknown apps verify against the global trust sources, then
-  404). No shared secret is stored on the box.
+  key), and its answer MUST NOT reveal whether an app exists to
+  unauthenticated callers (unknown apps verify against the global trust
+  sources, then 404; a refused token gets the same 401 either way). Its
+  timing can, within a bound (DESIGN-threat-model.md, "Webhook
+  endpoint", the residual; owed: #306): a token is checked against
+  each source a name resolves to in turn, the signature before the
+  issuer, so an OIDC source refuses a forged token after a local
+  signature check when it holds the token's kid, and, when it does
+  not, after a fetch of its issuer's keys that it makes at most once a
+  minute, whatever issuer the token names. A name that does not exist
+  goes to the global sources: it is refused at once when they hold no
+  OIDC source, and otherwise pays the same on their own key sets.
+  The fetch window is per app, not shared across apps that trust the
+  same issuer. No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
   sources.
 - Config load and every launch MUST warn when an app's `env_file` is
@@ -597,6 +608,7 @@ severity × occurrence × detection, then the fix's size and risk.
 | A request cancelled before or during `pre_start` does not stop it: the migration runs to its end, then the deploy starts the new instance and the health gate fails it on the cancelled request (phase `soaking`, `deploy canceled while waiting for health`). The new instance runs its startup for that moment, the release is removed, and a retry runs `pre_start` again, as it does after any gate failure that follows a `pre_start`. | `deployLocked`, after `pre_start` | 3 | 3 | 1 | 9 | size 2, risk 1 (a request check before the start); size 3, risk 3 (run the rest of the deploy detached) | Rule 2 holds (it ends red, the cause named); under rule 3 the product is under 20 and neither fix is size 1, risk 1. The shape is the owner's decision (#295, 2026-10-17): the gate aborts the deploy as it does for any client that left. The old instance serves throughout, and a migration that cannot run twice already meets the same retry after any gate failure. |
 | A `pre_start` that exits within milliseconds of `deadline` can still read as timed out: `jobResult` prefers a job result already received when the context ends, but not one whose signal is still in flight. The deploy fails red naming the deadline, and the release of a migration that ran is removed. | `jobResult` | 2 | 3 | 1 | 6 | size 3 (a second completion source: a oneshot's transient unit is unloaded on success, so no `Result` is left to ask for) | Rule 2 holds (red, named); under rule 3 the product is under 20. A migration that ends on its deadline has used its whole budget; raising `deadline` is the remedy. |
 | A Debian 13 host that passes the tutorial's step 2 (apt's `systemd (>= 257)` floor, `systemd-detect-virt --container`) but whose kernel or container refuses the sandbox's namespaces installs and serves the starter config, and first fails at step 3: `hotserve init`'s reload is liveswap's first start. That reload is refused, the probe's error names the cause, and the starter keeps serving; the box's repository, signer and workflow carry over to a fixed or new host. | `probeSandboxCapability`, from `App.Start` | 2 | 5 | 1 | 10 | size 3, risk 1 (a sandbox-check subcommand that step 2 runs as the hotserve user) | Rule 2 holds (it ends red and named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#274, 2026-10-17; #225 scored the same case at occurrence 3, but a host is the operator's choice, so it scores as input). The probe needs the hotserve user and its lingering manager, which the package's postinst creates, so the earliest any check could run is the end of `apt install`, minutes before step 3, with the same refusal and the same fix. A check in postinst could only warn, since a failed postinst leaves the package half-configured: one line in apt's output, after up to two 30-second probe budgets inside dpkg. And liveswap with no apps runs no probe (`len(a.managed) > 0` in `App.Start`), so the starter config cannot carry one. |
+| `max_token_ttl {env.NAME}` in a `deploy_trust local` block is refused at config load (`invalid max_token_ttl "{env.NAME}"`), though the README says `{env.*}` placeholders are resolved at config load: the duration is parsed when the Caddyfile is, before placeholders are. | `deploytrust.Parse` | 2 | 5 | 1 | 10 | size 2, risk 2 (a string field, resolved in `ResolvePlaceholders` and parsed in `Build`) | Rule 2 holds (refused and named, before anything runs); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#296, 2026-10-17). Every liveswap duration directive (`health_interval`, `deadline`, …) parses the same way, so this one matches them; the Caddyfile's own `{$NAME}`, substituted when the file is read, works for all of them. |
 
 ## Non-goals
 

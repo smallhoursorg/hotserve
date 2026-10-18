@@ -56,17 +56,30 @@ const gitlabIssuerDefault = "https://gitlab.com"
 // issuer when validating exp/nbf/iat.
 const oidcLeeway = 60 * time.Second
 
+// DefaultMaxTokenTTL is a local source's max_token_ttl when its block
+// sets none: the longest exp - iat it accepts. A local token is a
+// bearer credential for as long as it lives, and nothing on the box
+// can revoke one short of removing the key, so the bound is what a
+// leaked token is worth. A day covers a job that mints once and runs
+// for hours; one that runs for longer mints per deploy, or its block
+// raises the bound.
+const DefaultMaxTokenTTL = 24 * time.Hour
+
 // TrustConfig is one `deploy_trust` block in Caddyfile/JSON form. Kind
 // is the preset named on the block (`github`, `gitlab`, `oidc`,
 // `local`); the remaining fields are resolved and validated into a
 // Source by Build.
 type TrustConfig struct {
-	Kind      string            `json:"kind,omitempty"`
-	Issuer    string            `json:"issuer,omitempty"`     // oidc/gitlab override
-	Audience  string            `json:"audience,omitempty"`   // required for OIDC presets
-	PublicKey string            `json:"public_key,omitempty"` // local: path to a PKIX PEM ed25519 key
-	Subject   string            `json:"subject,omitempty"`    // sugar for claim `sub`
-	Claims    map[string]string `json:"claims,omitempty"`     // exact-match claim constraints
+	Kind      string `json:"kind,omitempty"`
+	Issuer    string `json:"issuer,omitempty"`     // oidc/gitlab override
+	Audience  string `json:"audience,omitempty"`   // required for OIDC presets
+	PublicKey string `json:"public_key,omitempty"` // local: path to a PKIX PEM ed25519 key
+	// MaxTokenTTL is local's longest exp - iat accepted; nil is
+	// DefaultMaxTokenTTL. A pointer, so an explicit zero reaches Build
+	// to be refused.
+	MaxTokenTTL *caddy.Duration   `json:"max_token_ttl,omitempty"`
+	Subject     string            `json:"subject,omitempty"` // sugar for claim `sub`
+	Claims      map[string]string `json:"claims,omitempty"`  // exact-match claim constraints
 }
 
 // Source is a validated, resolved trust declaration: presets
@@ -78,6 +91,7 @@ type Source struct {
 	audience    string
 	pubKey      ed25519.PublicKey // local
 	keyPath     string            // local (for error messages)
+	maxTTL      time.Duration     // local: the longest exp - iat accepted
 	claims      map[string]string
 	attribution []string // the preset's attributionClaims, kept past the fold to "oidc"
 }
@@ -222,6 +236,9 @@ func resolveTrustConfig(tc TrustConfig) (Source, error) {
 		if tc.PublicKey != "" {
 			return Source{}, fmt.Errorf("%s does not take a public_key", tc.Kind)
 		}
+		if tc.MaxTokenTTL != nil {
+			return Source{}, fmt.Errorf("%s does not take a max_token_ttl (the issuer sets its tokens' lifetime)", tc.Kind)
+		}
 		if err := requireIdentityClaim(tc.Kind, claims); err != nil {
 			return Source{}, err
 		}
@@ -234,11 +251,17 @@ func resolveTrustConfig(tc TrustConfig) (Source, error) {
 		if tc.Issuer != "" {
 			return Source{}, fmt.Errorf("local does not take an issuer")
 		}
+		maxTTL := DefaultMaxTokenTTL
+		if tc.MaxTokenTTL != nil {
+			if maxTTL = time.Duration(*tc.MaxTokenTTL); maxTTL <= 0 {
+				return Source{}, fmt.Errorf("max_token_ttl must be positive, got %v", maxTTL)
+			}
+		}
 		key, err := loadEd25519PublicKey(tc.PublicKey)
 		if err != nil {
 			return Source{}, fmt.Errorf("local public_key: %w", err)
 		}
-		return Source{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, claims: claims, attribution: attributionClaims["local"]}, nil
+		return Source{kind: "local", audience: tc.Audience, pubKey: key, keyPath: tc.PublicKey, maxTTL: maxTTL, claims: claims, attribution: attributionClaims["local"]}, nil
 
 	case "":
 		return Source{}, fmt.Errorf("missing preset (use `deploy_trust github|gitlab|oidc|local { ... }`)")
@@ -523,17 +546,23 @@ func (id Identity) Claim(name string) (value string, ok bool) {
 // It is infallible: key loading and preset validation already happened
 // in Build, so a config reload can rewire auth without error.
 func Verifiers(sources []Source, jwksClient *http.Client) []Verifier {
+	return VerifiersOn(systemClock{}, sources, jwksClient)
+}
+
+// VerifiersOn is Verifiers with the OIDC sources' KeyRefetchInterval
+// on clock: for tests, which advance it.
+func VerifiersOn(clock Clock, sources []Source, jwksClient *http.Client) []Verifier {
 	out := make([]Verifier, 0, len(sources))
 	for _, ts := range sources {
 		switch ts.kind {
 		case "oidc":
 			out = append(out, &oidcVerifier{
 				issuer: ts.issuer, audience: ts.audience,
-				claims: ts.claims, attribution: ts.attribution, client: jwksClient,
+				claims: ts.claims, attribution: ts.attribution, client: jwksClient, clock: clock,
 			})
 		case "local":
 			out = append(out, &localVerifier{
-				audience: ts.audience, pub: ts.pubKey,
+				audience: ts.audience, pub: ts.pubKey, maxTTL: ts.maxTTL,
 				keyPath: ts.keyPath, claims: ts.claims, attribution: ts.attribution,
 			})
 		}
@@ -541,11 +570,12 @@ func Verifiers(sources []Source, jwksClient *http.Client) []Verifier {
 	return out
 }
 
-// Warm best-effort pre-fetches OIDC discovery/JWKS in the
-// background so the first real deploy — and, importantly, the first
-// verification of a *known* app — does not pay the discovery latency
-// that would otherwise distinguish it (by timing) from an unknown app.
-// Errors are ignored; a real request retries.
+// Warm best-effort pre-fetches OIDC discovery in the background so
+// the first real deploy — and, importantly, the first verification of
+// a *known* app — does not pay the discovery latency that would
+// otherwise distinguish it (by timing) from an unknown app. The keys
+// are fetched by the first token that needs them (keySet). Errors are
+// ignored; a real request retries.
 func Warm(verifierSets ...[]Verifier) {
 	for _, set := range verifierSets {
 		for _, v := range set {
@@ -568,8 +598,9 @@ func Warm(verifierSets ...[]Verifier) {
 // 401, and its "webhook auth failed" lines count against the same
 // budgets, so a CI loop retrying through an outage writes no more of
 // them than any other. Charging costs a deployer nothing real: the
-// first valid token after the outage is admitted from a throttled
-// address. What an unavailable changes is
+// first valid token the source can judge again — the issuer back and,
+// for its keys, KeyRefetchInterval past the failed fetch — is
+// admitted from a throttled address. What an unavailable changes is
 // the journal: one line per source per window naming it, written
 // however spent the budgets are (Limiter.outage) and whether or
 // not another source then accepted the token, so a CI loop retrying
@@ -699,6 +730,7 @@ type oidcVerifier struct {
 	claims      map[string]string
 	attribution []string
 	client      *http.Client
+	clock       Clock // the key set's refetch interval runs on it; nil is the system clock
 
 	mu  sync.Mutex
 	idv *oidc.IDTokenVerifier
@@ -706,6 +738,10 @@ type oidcVerifier struct {
 
 func (v *oidcVerifier) Label() string { return "oidc:" + v.issuer }
 
+// ensure is the source's IDTokenVerifier, after discovery on first
+// use. It is the one the provider's Verifier would build — the
+// issuer's advertised algorithms that go-oidc supports, RS256 when it
+// advertises none — over keySet in place of go-oidc's RemoteKeySet.
 func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -724,18 +760,39 @@ func (v *oidcVerifier) ensure(ctx context.Context) (*oidc.IDTokenVerifier, error
 		}
 		return nil, unavailable{v.Label(), err}
 	}
-	v.idv = provider.Verifier(&oidc.Config{ClientID: v.audience})
+	// NewProvider has decoded this document already, so the decode
+	// cannot fail on it now.
+	var meta struct {
+		JWKS string   `json:"jwks_uri"`
+		Algs []string `json:"id_token_signing_alg_values_supported"`
+	}
+	if err := provider.Claims(&meta); err != nil {
+		return nil, fmt.Errorf("oidc discovery for %s: %w", v.issuer, err)
+	}
+	var algs []string
+	for _, a := range meta.Algs {
+		if slices.Contains(signingAlgs, jose.SignatureAlgorithm(a)) {
+			algs = append(algs, a)
+		}
+	}
+	clock := v.clock
+	if clock == nil {
+		clock = systemClock{}
+	}
+	keys := &keySet{url: meta.JWKS, client: v.client, clock: clock}
+	v.idv = oidc.NewVerifier(v.issuer, keys, &oidc.Config{ClientID: v.audience, SupportedSigningAlgs: algs})
 	return v.idv, nil
 }
 
-// keyFetchFailed prefixes go-oidc's error when the issuer's JWKS could
-// not be fetched — the issuer down, or answering anything but 200. The
-// key set wraps its fetch error, but the verifier flattens it (%v) into
-// the signature failure, so the text is the only handle; a non-200 is
-// not a typed error at any layer either. TestOIDCVerifierIssuerDown
-// holds it against the pinned library, so a bump that changes it fails
-// there rather than silently turning an outage back into a plain
-// refusal, which would lose the journal line naming the source.
+// keyFetchFailed prefixes the error a verify returns when the issuer's
+// keys could not be fetched — the issuer down, or answering anything
+// but 200: go-oidc's verifier flattens (%v) what the key set returns
+// into "failed to verify signature: <it>", and a failed fetch's error
+// begins "fetching keys" (keySet.fetch), so the text is the only
+// handle. TestOIDCVerifierIssuerDown holds the first half against the
+// pinned library, so a bump that changes it fails there rather than
+// silently turning an outage back into a plain refusal, which would
+// lose the journal line naming the source.
 const keyFetchFailed = "failed to verify signature: fetching keys"
 
 func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, error) {
@@ -746,11 +803,10 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, e
 	tok, err := idv.Verify(oidc.ClientContext(ctx, v.client), rawToken)
 	if err != nil {
 		// The signature is checked before any claim, and a token whose
-		// key is not cached (or does not verify against the cached one)
-		// fetches; so during an outage every well-formed token lands
-		// here, and only a malformed one is still a refusal of its own.
-		// A caller that went away mid-fetch gets the same text (the
-		// fetch waits on its ctx) and is not an outage.
+		// kid the key set holds no key for needs a fetch; so during an
+		// outage such a token lands here, while one under a key the
+		// set holds is judged as ever. A caller that went away while
+		// waiting on the fetch gets the same text and is not an outage.
 		if ctx.Err() == nil && strings.HasPrefix(err.Error(), keyFetchFailed) {
 			return Identity{}, unavailable{v.Label(), err}
 		}
@@ -792,14 +848,16 @@ func decodeClaims(raw []byte) (map[string]any, error) {
 
 // localVerifier validates a JWT signed by the operator's local private
 // key against the configured public key. Standard-claim checks (exp,
-// nbf, aud) are enforced here because there is no OIDC provider to do
-// them.
+// nbf, iat, aud) and the lifetime bound are enforced here because
+// there is no OIDC provider to do them.
 type localVerifier struct {
 	audience    string
 	pub         ed25519.PublicKey
+	maxTTL      time.Duration // the longest exp - iat accepted
 	keyPath     string
 	claims      map[string]string
 	attribution []string
+	clock       Clock // what exp, nbf and iat are judged against; nil is the system clock
 }
 
 func (v *localVerifier) Label() string { return "local:" + v.keyPath }
@@ -823,12 +881,29 @@ func (v *localVerifier) verify(_ context.Context, rawToken string) (Identity, er
 		return Identity{}, err
 	}
 	// ValidateWithLeeway only checks exp when present, so a local token
-	// with no expiry would be accepted forever. Require it — the
-	// short-lived-token guarantee depends on it.
+	// with no expiry would be accepted forever. Require it, and the
+	// iat its lifetime is measured from: the bound below is what a
+	// leaked token is worth.
 	if std.Expiry == nil {
 		return Identity{}, fmt.Errorf("local token has no exp claim")
 	}
-	expected := jwt.Expected{Time: time.Now()}
+	if std.IssuedAt == nil {
+		return Identity{}, fmt.Errorf("local token has no iat claim, which max_token_ttl is measured from")
+	}
+	// exp against iat + max, not exp - iat against max: the difference
+	// saturates at time.Duration's largest value, so against a bound
+	// that large it would let a longer-lived token through. go-jose
+	// keeps both within ±2^62 s, so neither the sum nor the times
+	// printed below overflow.
+	if exp, iat := std.Expiry.Time(), std.IssuedAt.Time(); exp.After(iat.Add(v.maxTTL)) {
+		return Identity{}, fmt.Errorf("local token's exp (%s) is more than this source's max_token_ttl %v after its iat (%s)",
+			exp.UTC().Format(time.RFC3339), v.maxTTL, iat.UTC().Format(time.RFC3339))
+	}
+	now := time.Now()
+	if v.clock != nil {
+		now = v.clock.Now()
+	}
+	expected := jwt.Expected{Time: now}
 	if v.audience != "" {
 		expected.AnyAudience = jwt.Audience{v.audience}
 	}

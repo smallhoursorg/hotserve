@@ -96,8 +96,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	// sources, so the status never leaks valid app names to
 	// unauthenticated callers (with no global trust configured, an
 	// unknown app is simply unauthenticable → 401). The time to the
-	// 401 still can: DESIGN-threat-model.md, "Webhook endpoint" (#296,
-	// #306).
+	// 401 still can, within the bound DESIGN-threat-model.md states
+	// ("Webhook endpoint", the residual; owed: #306).
 	verifiers := h.app.globalVerifiers
 	if ma != nil {
 		verifiers = ma.currentVerifiers()

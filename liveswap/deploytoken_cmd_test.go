@@ -2,7 +2,9 @@ package liveswap
 
 import (
 	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseClaimsFlagRejectsReserved(t *testing.T) {
@@ -17,6 +19,44 @@ func TestParseClaimsFlagRejectsReserved(t *testing.T) {
 	}
 	if m["repository"] != "o/r" || m["ref"] != "refs/heads/main" {
 		t.Fatalf("claims parsed wrong: %v", m)
+	}
+}
+
+// A --ttl over an hour is minted with a warning on stderr saying what
+// a box does with it; an hour or less is minted silently.
+func TestDeployTokenWarnsOverAnHour(t *testing.T) {
+	for ttl, warns := range map[time.Duration]bool{
+		5 * time.Minute:         false,
+		time.Hour:               false,
+		time.Hour + time.Second: true,
+		87600 * time.Hour:       true,
+	} {
+		got := ttlWarning(ttl)
+		if (got != "") != warns {
+			t.Errorf("--ttl %v: warning %q, want one: %t", ttl, got, warns)
+		}
+		if warns && (!strings.Contains(got, ttl.String()) || !strings.Contains(got, "max_token_ttl")) {
+			t.Errorf("--ttl %v: warning %q, want it to name the ttl and max_token_ttl", ttl, got)
+		}
+	}
+}
+
+// The lifetime a token encodes, exp - iat in whole seconds, is --ttl
+// rounded down, never up, however fractional the mint time: so a
+// token minted with --ttl equal to a box's fractional max_token_ttl
+// verifies there, and a whole-second --ttl keeps its whole lifetime.
+func TestDeployTokenLifetimeRoundsDown(t *testing.T) {
+	at := time.Unix(1_700_000_000, 750_000_000) // a mint at .750 s
+	for ttl, want := range map[time.Duration]int64{
+		1500 * time.Millisecond: 1,
+		1400 * time.Millisecond: 1,
+		time.Second:             1,
+		5 * time.Minute:         300,
+	} {
+		iat, exp := tokenTimes(at, ttl)
+		if got := int64(*exp) - int64(*iat); got != want {
+			t.Errorf("--ttl %v minted at .750 s encodes %d s, want %d", ttl, got, want)
+		}
 	}
 }
 
