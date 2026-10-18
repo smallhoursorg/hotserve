@@ -85,13 +85,20 @@ against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so its refusal is the same 401 as a known
 app's (`Handler.ServeHTTP`, liveswap/handler.go). The time to that 401
-need not be: a well-formed token that fails an OIDC source's signature
-check makes that source refetch its issuer's JWKS first (go-oidc's
-`RemoteKeySet`), with no issuer check before it, so a known and an
-unknown name each pay the round trips of their own sources. Where those
-differ — plainest when the global sources hold no OIDC source, and an
-unknown name is refused at once — an app name can be confirmed by
-timing (owed: #296, #306). Config load refuses an app
+need not be, and that is the **residual** (S3 × O5 × D5 = 75, as #296
+scored it; owed: #306). A token is checked against each source a name
+resolves to in turn, the signature before the issuer, so an OIDC
+source refuses a forged token after a local signature check when it
+holds the token's kid, and, when it does not, after a fetch of its
+issuer's keys that it makes at most once a minute (`keySet`,
+liveswap/deploytrust/jwks.go), whatever issuer the token names. A name
+that does not exist goes to the global sources: it is refused at once
+when they hold no OIDC source, and otherwise pays the same on their own
+key sets. The fetch window is per app, not shared across apps that
+trust the same issuer: each app's sources keep their own key set, so
+one unknown-kid token per app per minute can wait on an issuer round
+trip that one to a missing name, sent just before, did not, and an app
+name can be confirmed by timing. Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.
@@ -219,10 +226,17 @@ Properties that matter to the model:
   deploy-denial primitive for whoever shares it. Verification cost is
   therefore not bounded by the throttle. Against a local key it is one
   signature check, comparable to the TLS handshake the request already
-  paid; against an OIDC source, a well-formed token that fails the
-  signature check also costs a refetch of the issuer's JWKS, so a
-  client sending forged tokens keeps the box fetching from the issuer,
-  one fetch in flight per source at a time (owed: #296, #306). One limiter for the process, not per handler, so a
+  paid; against an OIDC source it is the same for a token under a kid
+  the source holds a key for, and, for one under a kid it does not, a
+  fetch of the issuer's keys that each source makes at most once a
+  minute, every other such token meanwhile waiting on that fetch or
+  answered from its outcome (`keySet`, liveswap/deploytrust/jwks.go;
+  the wait is owed: #306). So the throttle is not what bounds CPU, and
+  once a source's discovery has succeeded, traffic does not set how
+  often the box fetches its issuer's keys; while discovery fails, each
+  verification tries it again (`oidcVerifier.ensure`,
+  liveswap/deploytrust/deploytrust.go), one at a time per source.
+  One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413
   (`maxPayloadBytes`, enforced in `Handler.deployURL`,
@@ -272,8 +286,11 @@ Properties that matter to the model:
   it answers no question about what is running. Artifact URLs *are*
   redacted before logs/errors (`redactURL`, liveswap/download.go), so
   query signatures do not leak.
-- **Replay / downgrade is bounded.** The bearer JWT is short-lived
-  (`exp`), so a captured request is replayable only within that window.
+- **Replay / downgrade is bounded.** The bearer JWT expires (`exp`) —
+  an OIDC token at the expiry its issuer set, a local one at most its
+  block's `max_token_ttl` after its `iat`, 24h unless the block sets
+  one (`localVerifier.verify`, liveswap/deploytrust/deploytrust.go) —
+  so a captured request is replayable only within that window.
   Versions are immutable: re-deploying an existing version (running or
   not) is refused 422, so replaying an *older* deploy's payload does not
   downgrade the app. A token-holder can still downgrade deliberately
@@ -1031,8 +1048,15 @@ only public material:
   one — warned about at load — a token minted for any box that trusts
   the same key is accepted.
 
-Implementation: `liveswap/deploytrust/` (verification via the vetted
-`go-oidc`/`go-jose`, never hand-rolled). Effects on the model:
+Implementation: `liveswap/deploytrust/` (signatures checked by the
+vetted `go-jose`, never hand-rolled; an OIDC token's standard claims by
+`go-oidc`, a local one's by go-jose's `ValidateWithLeeway`; then
+deploytrust's own checks, `localVerifier.verify` requiring a local
+token's `exp` and `iat` and holding it to `max_token_ttl`, and
+`matchClaims` holding either kind to the block's claim allowlist; the
+issuer's key set is fetched and cached by deploytrust's own `keySet`,
+liveswap/deploytrust/jwks.go, which bounds the refetch). Effects on
+the model:
 
 - **No deploy credential on the box.** `/proc/<supervisor>/environ`
   would yield ACME tokens, not a deploy key; the top asset is ACME
@@ -1043,7 +1067,11 @@ Implementation: `liveswap/deploytrust/` (verification via the vetted
 - **T4 has no online guessing:** forging a token needs the issuer's or
   operator's private key; there is nothing to brute-force. The
   per-address failure throttle bounds the log-amplification vector.
-- **Replay is bounded** by the token's `exp` (minutes).
+- **Replay is bounded** by the token's `exp`: for an OIDC token, the
+  one its issuer set; for a local one, at most its block's
+  `max_token_ttl` after its `iat` (24h unless the block sets one). The
+  box refuses a local token minted to live longer, or without an `iat`,
+  and `hotserve deploy-token` warns above an hour.
 
 What it does **not** do: ACME tokens and TLS keys still live on the box,
 so the sandbox is still required. Auth design shrinks the prize; it

@@ -112,26 +112,29 @@ func MintExpired(tb testing.TB, priv ed25519.PrivateKey, audience string, claims
 type Issuer struct {
 	URL    string
 	Client *http.Client
-	Priv   *rsa.PrivateKey
-	KID    string
+	// Priv and KID are the signing key and its kid; Rotate replaces
+	// both. Read them from the test's goroutine only.
+	Priv *rsa.PrivateKey
+	KID  string
 	// DiscoveryDown / JWKSDown make that endpoint answer 503: the
 	// issuer is up but the box cannot get what it needs from it.
 	DiscoveryDown, JWKSDown atomic.Bool
 	// DiscoveredAs, when set, is the issuer the discovery document
 	// claims — someone other than the URL it was fetched from.
 	DiscoveredAs atomic.Value
+	// JWKSFetches counts the requests the JWKS endpoint has answered,
+	// 503s included.
+	JWKSFetches atomic.Int64
+
+	jwks atomic.Pointer[jose.JSONWebKeySet] // what the JWKS endpoint serves
 }
 
-// NewIssuer starts an issuer, closed when the test ends.
+// NewIssuer starts an issuer, closed when the test ends. Its
+// discovery document advertises RS256, as GitHub's and GitLab's do.
 func NewIssuer(tb testing.TB) *Issuer {
 	tb.Helper()
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	iss := &Issuer{Priv: priv, KID: "test-key"}
-	pubJWK := jose.JSONWebKey{Key: priv.Public(), KeyID: iss.KID, Algorithm: "RS256", Use: "sig"}
-	jwks := jose.JSONWebKeySet{Keys: []jose.JSONWebKey{pubJWK}}
+	iss := &Issuer{}
+	iss.setKey(tb, "test-key")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
@@ -144,16 +147,18 @@ func NewIssuer(tb testing.TB) *Issuer {
 			issuer = as
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":   issuer,
-			"jwks_uri": iss.URL + "/jwks",
+			"issuer":                                issuer,
+			"jwks_uri":                              iss.URL + "/jwks",
+			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		iss.JWKSFetches.Add(1)
 		if iss.JWKSDown.Load() {
 			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(jwks)
+		_ = json.NewEncoder(w).Encode(iss.jwks.Load())
 	})
 	srv := httptest.NewServer(mux)
 	tb.Cleanup(srv.Close)
@@ -162,11 +167,39 @@ func NewIssuer(tb testing.TB) *Issuer {
 	return iss
 }
 
-// Mint signs a token as this issuer (or with an off-key private key, to
-// exercise the unknown-signing-key path).
+// setKey makes a fresh RSA key the issuer's signing key under kid,
+// and the only key its JWKS endpoint serves.
+func (iss *Issuer) setKey(tb testing.TB, kid string) {
+	tb.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	iss.Priv, iss.KID = priv, kid
+	pub := jose.JSONWebKey{Key: priv.Public(), KeyID: kid, Algorithm: "RS256", Use: "sig"}
+	iss.jwks.Store(&jose.JSONWebKeySet{Keys: []jose.JSONWebKey{pub}})
+}
+
+// Rotate is a key rotation: a new signing key under a new kid, which
+// the JWKS endpoint then serves in place of the old one.
+func (iss *Issuer) Rotate(tb testing.TB) {
+	tb.Helper()
+	iss.setKey(tb, iss.KID+"-next")
+}
+
+// Mint signs a token as this issuer under its kid (with an off-key
+// private key, a bad signature under a kid the issuer publishes).
 func (iss *Issuer) Mint(tb testing.TB, priv *rsa.PrivateKey, audience string, claims map[string]string, exp time.Time) string {
 	tb.Helper()
-	return sign(tb, iss.key(priv), Claims(iss.URL, audience, time.Now(), exp, claims))
+	return iss.MintKID(tb, priv, iss.KID, audience, claims, exp)
+}
+
+// MintKID signs a token as this issuer under the kid given: one the
+// issuer does not publish, for a forgery whose key no one has fetched.
+func (iss *Issuer) MintKID(tb testing.TB, priv *rsa.PrivateKey, kid, audience string, claims map[string]string, exp time.Time) string {
+	tb.Helper()
+	key := jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: priv, KeyID: kid}}
+	return sign(tb, key, Claims(iss.URL, audience, time.Now(), exp, claims))
 }
 
 // MintClaims signs a token as this issuer with arbitrary custom claims,

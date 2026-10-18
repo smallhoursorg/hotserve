@@ -3,7 +3,6 @@ package liveswap
 import (
 	"crypto/ed25519"
 	"testing"
-	"time"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
@@ -54,18 +53,4 @@ func mustBuild(t *testing.T, configs []deploytrust.TrustConfig) []deploytrust.So
 // filesystem; verifier construction is lazy).
 func githubTrust() []deploytrust.TrustConfig {
 	return []deploytrust.TrustConfig{{Kind: "github", Audience: "hotserve", Claims: map[string]string{"repository": "org/blog"}}}
-}
-
-// eventually retries check for a second, for a condition another
-// goroutine establishes.
-func eventually(t *testing.T, what string, check func() error) {
-	t.Helper()
-	var err error
-	for range 40 {
-		if err = check(); err == nil {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("%s: %v", what, err)
 }
