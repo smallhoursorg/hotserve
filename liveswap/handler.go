@@ -216,7 +216,7 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	if !ma.deployMu.TryLock() {
 		return h.mapDeployResult(w, ma, errDeployInProgress)
 	}
-	defer ma.deployMu.Unlock()
+	defer ma.endDeploy()
 
 	// One snapshot for both staging and the pipeline, so a reload during
 	// the upload can't stage under one spec and extract under another.

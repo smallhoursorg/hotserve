@@ -282,8 +282,13 @@ type managedApp struct {
 	// deployMu serializes deploys per app. TryLock (not a queue): a
 	// concurrent webhook gets an immediate 409 and CI can retry. The
 	// one blocking Lock is Destruct's, on the app's removal, and it is
-	// never released.
+	// never released. Every other holder but the watchdog lets go
+	// through unlockDeploy or endDeploy, which wake the watchdog.
 	deployMu sync.Mutex
+	// deploysEnded counts deploys that have let go of deployMu
+	// (endDeploy): what tells a restart waiting out its backoff that a
+	// deploy over its instance ended, from any other wake-up.
+	deploysEnded atomic.Uint64
 
 	// mu guards current, phase, phases and lastDeploy.
 	mu         sync.Mutex
@@ -643,14 +648,33 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 	if !ma.deployMu.TryLock() {
 		return errDeployInProgress
 	}
-	defer ma.deployMu.Unlock()
+	defer ma.endDeploy()
 	c := ma.snapshot()
 	c.onPhase = req.onPhase
 	return ma.deployLocked(ctx, req, c)
 }
 
+// unlockDeploy lets go of deployMu for any holder but the watchdog, and
+// wakes the watchdog: a restart that found the lock held waits for
+// this, not for a timer (handleFailure). A poke where nothing changed
+// reads as a re-read, so one more is harmless.
+func (ma *managedApp) unlockDeploy() {
+	ma.deployMu.Unlock()
+	ma.pokeWatchdog()
+}
+
+// endDeploy is unlockDeploy at a deploy's end, whatever it came to,
+// counted first: a restart waiting out its backoff over an instance a
+// failed deploy left dead goes now rather than at the end of its step.
+// A promoted deploy has already woken the watchdog with its instance.
+func (ma *managedApp) endDeploy() {
+	ma.deploysEnded.Add(1)
+	ma.unlockDeploy()
+}
+
 // deployLocked runs the blue/green pipeline. The caller MUST already
-// hold deployMu: URL/rollback go through Deploy, while the push handler
+// hold deployMu, and let go of it with endDeploy: URL/rollback go
+// through Deploy, while the push handler
 // acquires the lock BEFORE staging the upload, so a concurrent push gets
 // an immediate 409 rather than streaming a whole tarball to disk only to
 // lose the lock (which would also make aggregate staging unbounded).
@@ -1049,7 +1073,7 @@ func (ma *managedApp) ensureRunning() error {
 		// before publishing anything, so recovery must look again.
 		return &transientRecoveryError{errors.New("a deploy is in progress")}
 	}
-	defer ma.deployMu.Unlock()
+	defer ma.unlockDeploy()
 	// Recovery pins and adopts, or relaunches into, this app's socket
 	// dirs; the start-time sweep of unconfigured apps prunes such dirs.
 	// Holding the app's ownerLock across recovery is what keeps the two

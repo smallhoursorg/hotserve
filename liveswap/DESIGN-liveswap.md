@@ -454,7 +454,7 @@ backwards edges reappearing *despite* this table.
 | `download.go` | capped, redacted artifact download; `releaseFetcher` (download+extract orchestration) |
 | `extract.go` | validate-then-extract hardened tar handling |
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
-| `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff |
+| `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff, the wait for a deploy holding the lock |
 | `state.go` | `state.json` atomic persistence, keep-N GC |
 | `deploytoken_cmd.go` | the `hotserve deploy-keygen` / `deploy-token` subcommands |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
@@ -524,7 +524,11 @@ author's beliefs about systemd, and only the real thing corrects them.
    watcher terminal states and transport-error immunity, PID backfill,
    Stop/RunOnce outcomes, reconcile of an ambiguous start, concurrent
    guarded sweeps, unknown-app sweep judged against the live pool);
-   watchdog crash/health/throttle/unconfirmed-stop paths; env
+   watchdog crash/health/throttle/unconfirmed-stop paths, and the
+   ledger of a restart meeting a deploy over a dead instance (one
+   crash Warn however long the deploy, the instance back on the fake
+   clock's same instant after a failed deploy, a nudge ending no
+   step), with every lock holder waking the watchdog as it lets go; env
    precedence, placeholders and key validation; malicious-tar table;
    download caps/allowlist/redaction; prober soak/flap/deadline;
    parser and Validate tables.
@@ -587,9 +591,19 @@ Design summary (full operator docs in README.md "Watchdog"):
   an instance that is dead by restart time is recorded as a crash —
   which signal noticed first is only probe interval vs. unit poll. `watchdog_grace` re-arms after every start; crashes count
   even during grace.
-- Restarts take `deployMu` (TryLock, yielding to deploys) and re-check
-  instance identity — promote swaps `current` before stopping the old
-  handle, so a deploy-stopped handle never reads as a crash. The
+- Restarts take `deployMu` and re-check instance identity — promote
+  swaps `current` before stopping the old handle, so a deploy-stopped
+  handle never reads as a crash. A restart that finds the lock held
+  waits for its holder to let go rather than re-entering supervision
+  per backoff step: every holder but the watchdog lets go through
+  `unlockDeploy`, which pokes `wdNotify`. A promoted deploy has
+  installed its own instance; after any other end the restart goes at
+  once. A deploy's end (`endDeploy`, counted in `deploysEnded`) also
+  ends a backoff step still being waited out over the same instance,
+  so a dead instance is back about a second after a failed deploy
+  rather than at the end of a step of up to 72 s; a config nudge ends
+  no step, and the step is never refunded (refunding it made a 0.8 s
+  loop, #150). The
   relaunch path is `launchVersion`, shared with boot recovery: the
   record pins the **version**, and command, env and sandbox render
   from the spec as it is now, so an app definition edited since the

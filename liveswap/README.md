@@ -340,7 +340,11 @@ also the bound on anyone who can make your health endpoint fail. A
 successful deploy is the fast path out of a throttle wait: it resets
 the budget and backoff immediately. A long-running throttle loop means
 the release itself is broken — watch `restarts_in_window` in the
-status JSON (loop alerting is on the roadmap). Health probes never
+status JSON (loop alerting is on the roadmap). A deploy running over
+a dead instance holds the restart until it ends: one that promotes
+replaces the instance, and after one that fails the restart goes
+within about a second, without waiting out the rest of its backoff.
+Health probes never
 follow redirects: a 3xx answer is simply "not 2xx".
 
 A relaunch runs the deploy's pre-flight first, and a release it
@@ -360,8 +364,8 @@ The status JSON's `watchdog` object reports `state`
 failed probe, or why nothing runs: a relaunch refused, a boot
 recovery that gave up).
 `restarts_in_window` is what the budget counts: it includes a restart
-still waiting out its `backoff` (dropped again if that restart is
-called off), and a relaunch that failed to start, while
+still waiting out its `backoff` or a deploy's end (dropped again if
+that restart is called off), and a relaunch that failed to start, while
 `last_restart_at` and `last_restart_cause` describe the last restart
 that started an instance.
 

@@ -192,10 +192,10 @@ func (w *watchdogState) takeSkipGrace(h handle) bool {
 
 // refundBudget returns the most recently claimed slot. Called when a
 // claimed restart is abandoned without a Start ever happening (a
-// deploy owns the lifecycle, or replaced the instance): those cycles
-// must not drain the budget, or a long deploy over a dead instance
-// exhausts it with zero restarts performed. No-op if a deploy's reset
-// already cleared the window.
+// deploy or recovery replaced the instance, the watchdog was turned
+// off, the app is being destructed): an abandoned restart must not
+// count against the budget. No-op if a deploy's reset already cleared
+// the window.
 func (w *watchdogState) refundBudget() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -470,6 +470,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	d := ma.wd.nextBackoff()
 	ma.wd.setState(wdStateBackoff)
 	deadline := c.clock.Now().Add(d)
+	deploys := ma.deploysEnded.Load()
 	for {
 		wait := deadline.Sub(c.clock.Now())
 		if wait <= 0 {
@@ -493,18 +494,37 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 				ma.wd.refundBudget()
 				return true // reload turned the watchdog off mid-wait
 			}
-			continue // config nudge: keep waiting out the backoff
+			if ma.deploysEnded.Load() != deploys {
+				// A deploy ended and left this instance current: it
+				// failed, and the dead instance has waited through it.
+				// Restart now rather than at the end of the step. The
+				// step is not refunded: the next failure waits longer,
+				// as after any restart.
+				deadline = c.clock.Now()
+			}
+			continue // otherwise a config nudge: keep waiting out the backoff
 		case <-c.clock.After(wait):
 		}
 	}
 
-	if !ma.deployMu.TryLock() {
-		// A running deploy owns the lifecycle and will poke wdNotify.
-		// Give the claimed slot back: no restart happened, and without
-		// the refund a long deploy over a dead instance would drain
-		// the whole budget with zero restarts performed.
-		ma.wd.refundBudget()
-		return true
+	// A deploy (or recovery) holding the lock owns the lifecycle: wait
+	// for it to let go, which wakes the loop (unlockDeploy), rather than
+	// re-entering supervision per backoff step — that logged the same
+	// dead instance once a step for as long as the deploy ran. A
+	// promoted deploy installs its own instance; after any other end
+	// the restart goes at once. The claimed slot is kept for it, and
+	// given back if it never happens.
+	for !ma.deployMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			ma.wd.refundBudget()
+			return false
+		case <-ma.wdNotify:
+			if ma.currentInstance() != inst || ma.watchdogDisabled() {
+				ma.wd.refundBudget()
+				return true
+			}
+		}
 	}
 	defer ma.deployMu.Unlock()
 	if ctx.Err() != nil {
