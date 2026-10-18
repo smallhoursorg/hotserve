@@ -121,6 +121,13 @@ func TestValidateChild(t *testing.T) {
 		if err != nil || !strings.HasPrefix(msg, "hotserve validate: "+why) || !strings.HasSuffix(msg, "...") {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
+		// The end is chosen from the line as the child wrote it: a known
+		// value redacted out of the prefix does not move the cut.
+		c, _ = stubValidator(t, "cat '"+out+"' >&2; exit 1", "", "DB_PASSWORD=adapting")
+		msg, err = c.validate(context.Background(), randomID(t), file, stubHost, nil)
+		if err != nil || strings.Contains(msg, "adapting") || !strings.Contains(msg, "wrong argument count") {
+			t.Fatalf("with a known value: msg %q err %v", msg, err)
+		}
 	})
 	t.Run("redacts the environment's values in Caddy's JSON error line", func(t *testing.T) {
 		secret := "pg-pass-" + strings.Repeat("q7", 10)
