@@ -1177,7 +1177,12 @@ does not isolate the runtime.
   filter to miss. Anything read back is text
   from disk: served only through the filter, trusted for nothing
   else unless it proves itself a record (a regular file, a valid
-  version name, an object naming that version). Nothing from disk
+  version name, an object naming that version). One that does orders
+  the releases: its write time is its version's deploy time, which
+  release GC and `available_versions` follow, since a release dir's
+  own mtime is the running app's to set (liveswap/state.go, "Release
+  order"); a release with no record falls back to that mtime and is
+  named in the status (`ordered_by_mtime`). Nothing from disk
   reaches a response except through the filter as body text; a name
   read off disk — a release directory's, a record's, `state.json`'s —
   is a safe string like any other and, like any other, never one

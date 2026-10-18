@@ -162,9 +162,19 @@ Concept map from the Nomad-era stack:
 - After cutover the pipeline MUST wait `drain`, then SIGTERM the old
   instance's unit — SIGTERM to its whole cgroup, then SIGKILL after
   `grace`.
-- Release GC MUST run only after successful deploys, keep the newest
-  `keep` dirs by mtime, and never delete the currently-serving version.
-  A failed URL or push deploy's freshly extracted release dir is
+- Release GC MUST run only after successful deploys and keep the
+  `keep` most recently deployed releases, the one the deploy promoted
+  first — so the serving version is never deleted and counts toward
+  `keep`. A release's deploy time MUST be one no app can write: its
+  deploy record's write time (`deploys/`, outside every view; the
+  version's latest deploy or rollback, failed ones included), never
+  the release dir's own mtime, which the app running from that dir can
+  set to anything. A release with no record that proves itself one
+  (deployed before records existed, or its record write failed) is
+  placed by its dir's mtime, and the status MUST name it in
+  `ordered_by_mtime`. `available_versions` lists the releases in the
+  same order, so the rollback targets an operator sees are the ones
+  GC keeps. A failed URL or push deploy's freshly extracted release dir is
   removed (a rollback, or a relaunch of the running version, launches
   an existing release and never deletes it), so its version stays
   retriable — unless the failed instance
@@ -425,7 +435,7 @@ backwards edges reappearing *despite* this table.
 | `extract.go` | validate-then-extract hardened tar handling |
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
 | `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff |
-| `state.go` | `state.json` atomic persistence, keep-N GC |
+| `state.go` | `state.json` atomic persistence; the release order (deploy time) that keep-N GC and `available_versions` share |
 | `deploytoken_cmd.go` | the `hotserve deploy-keygen` / `deploy-token` subcommands |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
 
@@ -600,6 +610,7 @@ severity × occurrence × detection, then the fix's size and risk.
 | A request cancelled before or during `pre_start` does not stop it: the migration runs to its end, then the deploy starts the new instance and the health gate fails it on the cancelled request (phase `soaking`, `deploy canceled while waiting for health`). The new instance runs its startup for that moment, the release is removed, and a retry runs `pre_start` again, as it does after any gate failure that follows a `pre_start`. | `deployLocked`, after `pre_start` | 3 | 3 | 1 | 9 | size 2, risk 1 (a request check before the start); size 3, risk 3 (run the rest of the deploy detached) | Rule 2 holds (it ends red, the cause named); under rule 3 the product is under 20 and neither fix is size 1, risk 1. The shape is the owner's decision (#295, 2026-10-17): the gate aborts the deploy as it does for any client that left. The old instance serves throughout, and a migration that cannot run twice already meets the same retry after any gate failure. |
 | A `pre_start` that exits within milliseconds of `deadline` can still read as timed out: `jobResult` prefers a job result already received when the context ends, but not one whose signal is still in flight. The deploy fails red naming the deadline, and the release of a migration that ran is removed. | `jobResult` | 2 | 3 | 1 | 6 | size 3 (a second completion source: a oneshot's transient unit is unloaded on success, so no `Result` is left to ask for) | Rule 2 holds (red, named); under rule 3 the product is under 20. A migration that ends on its deadline has used its whole budget; raising `deadline` is the remedy. |
 | A Debian 13 host that passes the tutorial's step 2 (apt's `systemd (>= 257)` floor, `systemd-detect-virt --container`) but whose kernel or container refuses the sandbox's namespaces installs and serves the starter config, and first fails at step 3: `hotserve init`'s reload is liveswap's first start. That reload is refused, the probe's error names the cause, and the starter keeps serving; the box's repository, signer and workflow carry over to a fixed or new host. | `probeSandboxCapability`, from `App.Start` | 2 | 5 | 1 | 10 | size 3, risk 1 (a sandbox-check subcommand that step 2 runs as the hotserve user) | Rule 2 holds (it ends red and named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#274, 2026-10-17; #225 scored the same case at occurrence 3, but a host is the operator's choice, so it scores as input). The probe needs the hotserve user and its lingering manager, which the package's postinst creates, so the earliest any check could run is the end of `apt install`, minutes before step 3, with the same refusal and the same fix. A check in postinst could only warn, since a failed postinst leaves the package half-configured: one line in apt's output, after up to two 30-second probe budgets inside dpkg. And liveswap with no apps runs no probe (`len(a.managed) > 0` in `App.Start`), so the starter config cannot carry one. |
+| A release with no deploy record that proves itself one (deployed before records existed, or its record write failed) is placed by its dir's mtime, which a compromised instance running from that release can set: a future mtime holds one of the `keep` places, and the recorded release in the last of them is pruned instead (`TestReleaseOrderLedger`, "the fallback's limit"). | `placeRelease`, state.go | 5 | 2 | 3 | 30 | size 1, risk 2 (place every no-record release after every recorded one); size 3 (a birth-time key, with its own fallback where a filesystem reports none) | Scores to fix (rule 1); accepted by decision (#299: mtime only as the fallback for a release with no record, named in the status). It takes two independent faults — a record that was not written, and a compromised app running from that very release — and the release is named where an operator picks a rollback target (`ordered_by_mtime`) and in the GC line that prunes (`placed_by`). The size-1 fix moves the risk rather than closing it: a single failed record write would then sort the version deployed just before the next one last, and that deploy's GC would prune the way back (S5 × O3 × D5). |
 
 ## Non-goals
 

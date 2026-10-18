@@ -168,8 +168,9 @@ a tag or another branch is refused with a 401. The box relaunches
 that release from its disk — the same start, health gate and cutover
 as a deploy, and no build — so it is live in about twenty seconds, or
 the run is red with the reason and nothing changed. A version the box
-no longer holds is a 422: it keeps the newest five releases, plus the
-running one. Roll forward the same way you deploy: push a commit.
+no longer holds is a 422: it keeps the five releases it deployed most
+recently, the running one among them (a rollback counts as a deploy).
+Roll forward the same way you deploy: push a commit.
 
 ## Deploying without CI
 

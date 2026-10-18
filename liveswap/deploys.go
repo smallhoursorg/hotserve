@@ -37,7 +37,12 @@ import (
 //     (recordedPin) — only a digest-shaped string. It lands in the
 //     new record, which goes through the filter again, and in
 //     last_deploy, where like every pin it is a safe string
-//     (redactorFor) until the next deploy replaces it.
+//     (redactorFor) until the next deploy replaces it. And one fact
+//     about a record is read back: its write time, off the open file
+//     and only for a record that proves itself one (recordWriteTime),
+//     which is its version's place in the release order that
+//     retention and available_versions follow (state.go) — a key the
+//     app cannot write.
 //  2. Nothing from disk reaches a response except through the filter
 //     as body text. A recorded version is a safe string like any
 //     other name, and no safe string equals a known value (redact.go,
@@ -233,7 +238,8 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*Red
 	safe := []string{ma.name, result.Version, result.SHA256}
 	if c.spec != nil {
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
-		safe = append(safe, listReleases(c.spec.dirs.releases)...)
+		onDisk, _ := listReleases(c.spec.dirs) // names only: the order is not this filter's concern
+		safe = append(safe, onDisk...)
 	}
 	return NewRedactor(kvs, safe), unknown
 }
@@ -356,6 +362,26 @@ func recordedPin(d appDirs, version string) string {
 		return ""
 	}
 	return s.pin()
+}
+
+// recordWriteTime is when hotserve last wrote version's record in
+// records (a directory recordsDir vouched for; "" for none): the
+// version's deploy time, which orders the releases (state.go). false
+// when there is no record that proves itself one (rule 1) — the name
+// is not a version, the file is a link or not a record of it.
+func recordWriteTime(records, version string) (time.Time, bool) {
+	if records == "" || !validVersion(version) {
+		return time.Time{}, false
+	}
+	name := versionPathComponent(version) + ".json"
+	b, written, err := openRecord(filepath.Join(records, name))
+	if err != nil {
+		return time.Time{}, false
+	}
+	if _, ok := recordHead(b, name); !ok {
+		return time.Time{}, false
+	}
+	return written, true
 }
 
 // errNoDeployRecord is a version no deploy has been recorded for.

@@ -977,7 +977,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		logger.Warn("skipping release GC for this deploy")
 		return nil
 	}
-	gcReleases(spec.dirs.releases, spec.keep, req.version, logger)
+	gcReleases(spec.dirs, spec.keep, req.version, logger)
 	return nil
 }
 
@@ -1475,27 +1475,33 @@ type statusSnapshot struct {
 	Deploys    []deploySummary   `json:"deploys,omitempty"`
 	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`
-	// AvailableVersions lists the on-disk releases, newest-first — the
-	// versions `?rollback=<version>` can relaunch. Always serialized (a
-	// healthy app with no releases reports []), so an empty set is
+	// AvailableVersions lists the on-disk releases, most recently
+	// deployed first (state.go, "Release order") — the versions
+	// `?rollback=<version>` can relaunch. Always serialized (a healthy
+	// app with no releases reports []), so an empty set is
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
+	// OrderedByMtime names the entries of AvailableVersions that have
+	// no deploy record and are placed by their release dir's mtime
+	// instead, which the app can set; absent when there are none.
+	OrderedByMtime []string `json:"ordered_by_mtime,omitempty"`
 }
 
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
 	var deploys []deploySummary
 	available := []string{} // always an array in the JSON, never null
+	var byMtime []string
 	if c.spec != nil {
 		// Read releases outside ma.mu — it is disk I/O, and status is polled.
-		if rels := listReleases(c.spec.dirs.releases); rels != nil {
-			available = rels
+		if rels, mtimes := listReleases(c.spec.dirs); rels != nil {
+			available, byMtime = rels, mtimes
 		}
 		deploys = listDeploySummaries(c.spec.dirs)
 	}
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
-	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, AvailableVersions: available, Deploys: deploys}
+	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, AvailableVersions: available, OrderedByMtime: byMtime, Deploys: deploys}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
 		s.Socket = ma.current.socket

@@ -151,8 +151,9 @@ see during the restart, and how to pick a quiet moment for it.
 - **Deploy** by pushing to `main`; **roll back** from Actions → deploy →
   **Run workflow**, with "Use workflow from" left on `main` and the
   version to go back to: a commit's first 12 characters, as the
-  releases page lists them, and one of the newest five, which is what
-  the box still holds ([examples/node](../examples/node/README.md#rolling-back)).
+  releases page lists them, and one of the five the box deployed most
+  recently (a rollback counts), which is what it still holds
+  ([examples/node](../examples/node/README.md#rolling-back)).
 - **Change the box** — an app's flags, a second app, a new site, a new
   signer, a secret — by a signed push to the box's repository (steps 1
   and 2). The run's output is what changed.
