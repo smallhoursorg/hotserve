@@ -199,14 +199,12 @@ type sandboxSpec struct {
 //
 // This is a check on a pathname, and between it and the manager
 // following that pathname a process sharing the hotserve UID could
-// swap what it points at. No such process exists any more: every app
-// is sandboxed, and inside its view the app directory is a tmpfs
-// holding mount points it cannot unlink — the symlink would have to
-// be planted from outside every sandbox, by the hotserve uid, which
-// is hotserve itself. The check stays because it is what makes that
-// true (an app's own shared dir is the one path it can write, and a
-// link planted there before sandboxing existed is exactly what the
-// first sandboxed launch must not follow).
+// swap what it points at. No such process exists: every app is
+// sandboxed, and inside its view the app directory is a tmpfs holding
+// mount points it cannot unlink — the symlink would have to be
+// planted from outside every sandbox, by hotserve itself or by root.
+// The check is for root's: an operator's symlink, made to move a
+// directory or by mistake, is what it refuses (above).
 func (s *sandboxSpec) resolveBindSources() error {
 	// Compare canonical against canonical: a resolved bind source is
 	// canonical, so a lexical root would miss a sibling reached through

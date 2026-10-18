@@ -61,11 +61,12 @@ import (
 //     unreadable file.
 //  4. The store never blocks a deploy or a status — a failure here is
 //     a warning, a missing store is an empty list — and never follows
-//     a link: the app dir was writable by the app before sandboxing
-//     existed, and a link planted then (`deploys -> ..`, a record name
-//     pointing elsewhere, an ancestor pointing at another app) is what
-//     the first use after an upgrade must not follow, as the bind
-//     sources' check says (resolveBindSources, sandbox.go).
+//     a link (`deploys -> ..`, a record name pointing elsewhere, an
+//     ancestor pointing at another app): no app can plant one, but
+//     nothing on disk says who did, and following an operator's would
+//     write into or read from a directory that is not this app's
+//     (ownfile.go). The bind sources' check draws the same line
+//     (resolveBindSources, sandbox.go).
 //
 // The file holds the result as the record filter left it, with the
 // env_file values known at the time already replaced: a secret rotated

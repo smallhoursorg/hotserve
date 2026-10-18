@@ -217,10 +217,9 @@ func TestDeployRecordIsNotTouchedBeforeAcceptanceOrByARefusal(t *testing.T) {
 	}
 }
 
-// A link planted where the records directory should be — by an app
-// that could write its app dir before sandboxing existed — is not
-// followed: nothing is written through it, read through it, or listed
-// from it.
+// A link where the records directory should be — whoever made it — is
+// not followed: nothing is written through it, read through it, or
+// listed from it.
 func TestDeployRecordsRefuseAPlantedDirectoryLink(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, os.MkdirAll(rig.spec.dirs.app, 0o750))
@@ -331,8 +330,8 @@ func TestDeployRecordIsNotWithheldByALaterUnreadableEnvFile(t *testing.T) {
 	}
 }
 
-// An ancestor that is a link — `<root>/blog -> <root>/shop`, planted
-// by a pre-sandbox app — is not followed either: blog's records are
+// An ancestor that is a link — `<root>/blog -> <root>/shop`, an
+// operator's mistake — is not followed either: blog's records are
 // not written, read or listed from shop's directory.
 func TestDeployRecordsRefuseAPlantedAncestorLink(t *testing.T) {
 	root := t.TempDir()

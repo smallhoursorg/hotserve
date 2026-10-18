@@ -541,18 +541,6 @@ still runs, and a mode changed between loads is not what takes an app
 down on a relaunch. The owner and group are not checked; the
 `install` line above sets them.
 
-**The sandbox is not containment for what an app did before it had
-one.** It restricts what an app can *reach*; it cannot un-copy. An
-app's `shared/` survives every deploy and is bound writable into every
-sandbox, so anything an instance put there before sandboxing existed
-(a hotserve older than this, where every app ran as the shared user
-with the whole host in reach) is inside the view afterwards. A
-hardlink is worse than a copy: it stays a live view of the file, so
-rotating a secret by editing it in place republishes it. If an app may
-have been compromised on such a hotserve, clear its `shared/` and
-rotate anything it could read — the sandbox does not undo access it
-already had.
-
 **When an app breaks under the sandbox** the symptom is usually an
 `ENOENT` for something that exists on the host: a database's unix
 socket, a data directory outside the app's own, a runtime under

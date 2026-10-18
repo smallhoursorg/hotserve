@@ -1233,8 +1233,8 @@ does not isolate the runtime.
   reaches a response except through the filter as body text; a name
   read off disk — a release directory's, a record's, `state.json`'s —
   is a safe string like any other and, like any other, never one
-  equal to a known value (the app dir was writable by the app before
-  sandboxing existed); and nothing is appended to a body after the
+  equal to a known value (nothing on disk says who chose a name);
+  and nothing is appended to a body after the
   filter's final pass but what the filter's own second rule names.
   Nothing there
   follows a link, ancestors included, and the store never blocks a

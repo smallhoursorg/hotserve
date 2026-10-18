@@ -158,8 +158,8 @@ below as a contract the sandbox path must keep.
   that under `shared/` it can rewrite the file and choose its own next
   launch's environment. Pinned by `TestEnvFileMayNotLandInAnotherAppsView`.
 - Nothing in `state.json` decides how much isolation a relaunch gets:
-  there is no recorded sandbox disposition, and a record written
-  before sandboxing existed relaunches sandboxed like everything else.
+  there is no recorded sandbox disposition, so a relaunch from the
+  record is sandboxed like a deploy.
   Pinned by `TestEveryLaunchIsSandboxed`.
 - A reattach MUST verify rather than trust: a recorded unit that is
   running without `PrivateUsers=`/`PrivatePIDs=` was not started by

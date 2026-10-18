@@ -593,8 +593,7 @@ func TestBuildEnvSandboxedHome(t *testing.T) {
 // starts a unit applies it — a deploy, its pre_start, and a relaunch
 // from the record (recovery, and the watchdog through the same
 // launchVersion) — with nothing read from state.json deciding how much
-// isolation an instance gets. A record written before sandboxing
-// existed relaunches sandboxed like everything else.
+// isolation an instance gets.
 func TestEveryLaunchIsSandboxed(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
@@ -616,8 +615,7 @@ func TestEveryLaunchIsSandboxed(t *testing.T) {
 		}
 	}
 
-	// A relaunch from a record — including one with no sandbox field,
-	// written before sandboxing existed — is sandboxed like a deploy.
+	// A relaunch from a record is sandboxed like a deploy.
 	rig2 := newTestRig(t)
 	must(t, rig2.store.save(appState{CurrentVersion: "v1", Nonce: "0a1b2c3d0a1b2c3d", Handle: handleState{Unit: "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service"}}))
 	must(t, mkdirRelease(rig2.spec, "v1"))
