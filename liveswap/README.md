@@ -471,7 +471,7 @@ too, and stops at a refusal rather than retrying it (see
 [Watchdog](#watchdog)).
 
 **The host is measured at start.** Capability is probed by running a
-throwaway unit and checking the namespaces from inside
+throwaway unit and checking the namespaces and seccomp from inside
 (`journalctl -t hotserve-sandbox-probe` shows what it saw). A host
 that cannot deliver the sandbox fails the start — admin socket and
 proxy included — with the probe's reason. That measurement is cached
@@ -617,7 +617,8 @@ host and why the package ships no LSM policy of its own. Some kernels
 refuse them — an LSM restriction on unprivileged user namespaces, or a
 container or LXC host with them off entirely. hotserve does not work around
 that: it probes, and a host that cannot deliver the namespaces refuses
-to start rather than running apps bare. `journalctl -t
+to start rather than running apps bare. A kernel without seccomp,
+where systemd skips the syscall filter, is refused the same way. `journalctl -t
 hotserve-sandbox-probe` says why it refused. The fix is the host's:
 permit unprivileged user namespaces for hotserve's user manager, or
 move to Debian 13. There is no way to run there without the sandbox.

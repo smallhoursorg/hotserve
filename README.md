@@ -68,9 +68,9 @@ pushed from a box repository, the root applier's units
 (`hotserve-box-apply.path` and `.service`), its directories
 (`hotserve-box.tmpfiles`) and the box's key (`hotserve box key`, as
 root). The sandbox applies here too, so the host
-needs systemd 257 or newer and has to deliver both namespaces — many
-container and LXC hosts cannot,
-and hotserve refuses to start rather than run your apps unprotected.
+needs systemd 257 or newer and has to deliver both namespaces (many
+container and LXC hosts cannot) and a seccomp filter, and hotserve
+refuses to start rather than run your apps unprotected.
 
 **systemd is not optional.** liveswap runs your apps as transient
 units on your user's systemd manager and there is no fallback runner,

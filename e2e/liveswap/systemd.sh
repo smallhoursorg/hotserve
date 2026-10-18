@@ -358,7 +358,7 @@ expect_probe io_uring_setup refused
 outside=$(as_hotserve "perl -e 'syscall(425, 1, 0); print \$!{EPERM} ? q(refused) : q(reached)'")
 [ "$outside" = "reached" ] \
 	&& pass "outside the sandbox: io_uring_setup reaches the kernel" \
-	|| fail "io_uring_setup outside the unit is '$outside', want reached: io_uring_setup=refused inside proves nothing"
+	|| fail "io_uring_setup outside the unit is '$outside', want reached: io_uring_setup=refused inside proves nothing (kernel.io_uring_disabled=$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo absent); anything but 0 can refuse it outside too)"
 # And the app saw the core-dump limit as 0/0 from inside.
 expect_probe core_soft 0
 expect_probe core_hard 0

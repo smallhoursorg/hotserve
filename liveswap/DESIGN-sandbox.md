@@ -60,13 +60,14 @@ below as a contract the sandbox path must keep.
   crash relaunch, boot recovery, reattach — gets the one sandbox, and
   there is no configuration surface that turns it off or widens it.
   The host MUST be probed by running a throwaway unit and checking the
-  namespaces from inside (the manager silently ignores `PrivatePIDs=`
-  on a kernel without PID namespaces, so accepting the property proves
-  nothing), and a host that cannot deliver the sandbox MUST fail the
-  start with the probe's reason — a weaker sandbox accepted silently is
-  the "looks configured, quietly weaker" trap, and no sandbox at all,
-  on a shared uid, hands one app every sibling's data and hotserve's
-  own keys. The runner MUST refuse a start spec with no sandbox
+  namespaces and seccomp from inside (the manager silently ignores
+  `PrivatePIDs=` on a kernel without PID namespaces, and skips
+  `SystemCallFilter=` where seccomp is unavailable, so accepting a
+  property proves nothing), and a host that cannot deliver the sandbox
+  MUST fail the start with the probe's reason — a weaker sandbox
+  accepted silently is the "looks configured, quietly weaker" trap, and
+  no sandbox at all, on a shared uid, hands one app every sibling's
+  data and hotserve's own keys. The runner MUST refuse a start spec with no sandbox
   (`TestUnitRefusesToRunWithoutASandbox`).
 - The sandboxed filesystem view MUST be **deny-by-default**: an empty
   read-only tmpfs replaces the whole filesystem
@@ -329,9 +330,12 @@ spec without a sandbox.
 
 **The probe.** At `App.Start` — every config activation —
 `probeSandboxCapability` starts a throwaway unit with the same property
-set whose script reads `/proc/self/uid_map` and its own pid, and passes
-only if the uid range is not the host's and the pid is 1 — both
-namespaces engaged. One attempt, one retry on timeout only (the shape a
+set whose script reads `/proc/self/uid_map`, its own pid and the
+`Seccomp:` line of `/proc/self/status`, and passes only if the uid range
+is not the host's, the pid is 1 and the mode is 2 — both namespaces
+engaged and seccomp in force, which the manager otherwise skips for
+every seccomp-backed setting at once. The mode does not say whose
+filter it is: one the manager itself runs under also reads 2. One attempt, one retry on timeout only (the shape a
 capable host under boot load produces; a refused start exits 1, which
 hotserve.service deliberately never retries, so without it one slow
 attempt keeps a capable box down until someone starts it by hand),

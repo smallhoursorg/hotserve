@@ -309,6 +309,13 @@ func TestSandboxProbeCommand(t *testing.T) {
 	if !strings.Contains(full[2], "uid_map") || !strings.Contains(full[2], `"$$" = 1`) {
 		t.Fatalf("full probe checks both namespaces: %q", full[2])
 	}
+	// And the syscall filter: the manager skips SystemCallFilter= where
+	// seccomp is unavailable, so the probe requires the filter mode in
+	// its own status, read by the shell (the unit's PATH is no promise
+	// that grep or sed is there).
+	if !strings.Contains(full[2], "< /proc/self/status") || !strings.Contains(full[2], `[ "$s" = 2 ]`) {
+		t.Fatalf("full probe checks the syscall filter is in force: %q", full[2])
+	}
 	if strings.Contains(full[2], "$$$$") {
 		t.Fatalf("$$$$ reaches the shell as the pid twice: %q", full[2])
 	}

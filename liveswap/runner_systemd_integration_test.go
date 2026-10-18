@@ -5,6 +5,7 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -712,6 +713,63 @@ func TestIntegrationSystemdSandboxProbe(t *testing.T) {
 	}
 }
 
+// TestIntegrationSandboxProbeRefusesAnUnfilteredUnit runs the probe's
+// own script in two units with the same namespaces, one with a syscall
+// filter and one without: the script must pass the first and fail the
+// second, on its seccomp check. That is the host where the manager
+// skips SystemCallFilter= (no seccomp), which
+// TestIntegrationSystemdSandboxProbe cannot stand in for, since this
+// kernel has seccomp. The units come from systemd-run rather than the
+// runner, which only builds the full sandbox. Oneshot, so the start
+// job fails when the script does; --expand-environment=no, so "$$"
+// reaches the shell as the runner's units pass it; --collect, so the
+// failed unit does not stay loaded.
+func TestIntegrationSandboxProbeRefusesAnUnfilteredUnit(t *testing.T) {
+	if err := userManager.probe(); err != nil {
+		t.Fatalf("no systemd user manager (run via `make test-integration`): %v", err)
+	}
+	script := sandboxProbeCommand()[2]
+	probe := func(ident string, filtered bool) error {
+		args := []string{"--user", "--quiet", "--collect", "--service-type=oneshot", "--expand-environment=no",
+			"-p", "PrivateUsers=yes", "-p", "PrivatePIDs=yes", "-p", "SyslogIdentifier=" + ident}
+		if filtered {
+			args = append(args, "-p", "SystemCallFilter=@system-service")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "systemd-run", append(args, "/bin/sh", "-c", script)...)
+		// systemd-run --user wants a bus; the manager's private socket
+		// is one, and the only one this container has.
+		cmd.Env = append(os.Environ(), "DBUS_SESSION_BUS_ADDRESS=unix:path="+userManagerSocket())
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, out)
+		}
+		return nil
+	}
+	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
+	if err := probe("itest-probe-filtered-"+nonce, true); err != nil {
+		t.Fatalf("with a filter and both namespaces the probe must pass, or the refusal below proves nothing: %v", err)
+	}
+	ident := "itest-probe-unfiltered-" + nonce
+	if err := probe(ident, false); err == nil {
+		t.Fatal("the probe passed in a unit with no syscall filter: a host whose manager skips SystemCallFilter= would start apps unfiltered (or this container runs under a seccomp filter of its own)")
+	}
+	// Refused on its seccomp check, not on anything else that differs:
+	// the probe's own journal line names the mode it saw.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		line := run(t, "journalctl", "--no-pager", "-o", "cat", "-t", ident)
+		if strings.Contains(line, ", seccomp 0") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the unfiltered probe failed, but its journal line does not say seccomp 0: %q", line)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // writeSandboxView installs the shared view probe (sandboxViewScript,
 // the same file e2e/liveswap/systemd.sh and packaging/test/smoke.sh
 // use) into the release dir, alongside a ./server that sources it and
@@ -888,7 +946,8 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	// kernel (EFAULT on the null params): otherwise "refused" above
 	// could be a filter this test inherited rather than the unit's.
 	if _, _, errno := syscall.Syscall(unix.SYS_IO_URING_SETUP, 1, 0, 0); errno == syscall.EPERM {
-		t.Errorf("io_uring_setup is refused outside the unit too, so io_uring_setup=refused inside proves nothing about the unit's filter")
+		sysctl, _ := os.ReadFile("/proc/sys/kernel/io_uring_disabled")
+		t.Errorf("io_uring_setup is refused outside the unit too, so io_uring_setup=refused inside proves nothing about the unit's filter (kernel.io_uring_disabled=%s; anything but 0 can refuse it outside too)", strings.TrimSpace(string(sysctl)))
 	}
 	unit := h.state().Unit
 	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths,LimitCORE,LimitCORESoft,SystemCallArchitectures")

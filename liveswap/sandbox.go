@@ -394,20 +394,27 @@ func probeSandboxSpec() *sandboxSpec {
 }
 
 // sandboxProbeCommand is the command the capability probe runs inside
-// a unit built with probeSandboxSpec. It checks the namespaces are in
-// effect — not merely that the manager accepted the properties: the
-// manager ignores PrivatePIDs= on a kernel without PID namespaces, and
-// a user namespace the kernel or an LSM refuses fails the unit
+// a unit built with probeSandboxSpec. It checks the namespaces and
+// seccomp are in effect — not merely that the manager accepted the
+// properties: the manager ignores PrivatePIDs= on a kernel without PID
+// namespaces, and where seccomp is unavailable to it skips
+// SystemCallFilter= with every other seccomp-backed setting at once,
+// while a user namespace the kernel or an LSM refuses fails the unit
 // outright. In a user namespace the process's own uid_map covers a
 // single id, not the 2^32-1 of the initial namespace; in a PID
-// namespace the executed process is PID 1.
+// namespace the executed process is PID 1; under a seccomp filter its
+// status reads `Seccomp: 2`. The mode does not say whose filter: one
+// the manager itself runs under reads 2 as well.
 func sandboxProbeCommand() []string {
 	// The echo lands in the journal under the probe unit's identifier
 	// (hotserve-sandbox-probe), so a refused host can be diagnosed
 	// from `journalctl -t hotserve-sandbox-probe`. The argv reaches the
 	// shell byte for byte, as every unit's command does (no-env-expand,
 	// see unitProperties), so the script is spelled as a shell reads it.
-	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; echo "sandbox probe: uid_map range $n, pid $$"; [ "$n" != 4294967295 ] && [ "$$" = 1 ]`}
+	// Builtins only: /proc/self/status is read by the shell itself, so
+	// the mode is the probe process's own, and a status with no
+	// Seccomp: line (a kernel without seccomp) reads `absent`.
+	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; s=absent; while read -r k v; do [ "$k" = Seccomp: ] && s=$v; done < /proc/self/status; echo "sandbox probe: uid_map range $n, pid $$, seccomp $s"; [ "$n" != 4294967295 ] && [ "$$" = 1 ] && [ "$s" = 2 ]`}
 }
 
 // sandboxProbeTimeout bounds one probe unit: a shell that exits at
@@ -482,7 +489,7 @@ func probeSandboxCapability(r runner) error {
 		err = attempt()
 	}
 	if err != nil {
-		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13: PrivatePIDs= needs systemd 257, and both namespaces need a kernel that permits them", err)
+		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13: PrivatePIDs= needs systemd 257, both namespaces need a kernel that permits them, and the syscall filter needs seccomp", err)
 	}
 	return nil
 }

@@ -1002,7 +1002,8 @@ it binds nothing of an app's and has no socket.
 
 **The probe stays.** At `App.Start` — every config activation —
 hotserve starts a real transient unit with this property set and reads
-back from inside it that both namespaces engaged. The verdict is
+back from inside it that both namespaces engaged and that seccomp is in
+force (`Seccomp: 2`). The verdict is
 cached against the manager connection's generation
 (`userManagerClient.cachedSandboxCapability`): later activations on
 the same connection read the cache, and a redial (a manager restart,

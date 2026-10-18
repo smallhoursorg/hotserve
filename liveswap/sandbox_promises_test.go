@@ -35,6 +35,8 @@ import (
 //	/run/systemd/resolve reachable       TestSandboxPropertiesEveryUnit
 //	user + PID namespace, every unit     TestSandboxPropertiesEveryUnit
 //	                                     TestIntegrationSystemdSandboxProbe
+//	probe checks from inside             TestSandboxProbeCommand
+//	                                     TestIntegrationSandboxProbeRefusesAnUnfilteredUnit
 //	every launch is sandboxed            TestEveryLaunchIsSandboxed
 //	no unit without a sandbox            TestUnitRefusesToRunWithoutASandbox
 //	reattach refuses a bare unit         TestSystemdRunnerReattach

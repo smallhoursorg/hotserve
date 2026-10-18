@@ -815,9 +815,9 @@ esac
 # the refusal inside proves nothing about the unit's own filter.
 expect_probe seccomp 2
 expect_probe io_uring_setup refused
-outside=$(su -s /bin/sh hotserve -c "perl -e 'syscall(425, 1, 0); print \$!{EPERM} ? q(refused) : q(reached)'")
+outside=$(as_hotserve "perl -e 'syscall(425, 1, 0); print \$!{EPERM} ? q(refused) : q(reached)'") || outside="unmeasured (su or perl failed)"
 [ "$outside" = "reached" ] \
-	|| die "io_uring_setup outside the unit is '$outside', want reached: io_uring_setup=refused inside proves nothing"
+	|| die "io_uring_setup outside the unit is '$outside', want reached: io_uring_setup=refused inside proves nothing (kernel.io_uring_disabled=$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo absent); anything but 0 can refuse it outside too)"
 [ "$(user_systemctl show -p TemporaryFileSystem --value "$unit")" = "/:ro" ] || die "unit lacks TemporaryFileSystem=/:ro — the view is not deny-by-default"
 # The retired half of the old model, read back off the live unit. Both
 # properties still exist on every service, so test the value rather
