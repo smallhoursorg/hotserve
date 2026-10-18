@@ -27,7 +27,7 @@ func TestListReleasesSkipsNamesThatAreNotVersions(t *testing.T) {
 		must(t, os.MkdirAll(filepath.Join(dir, n), 0o755))
 	}
 	must(t, os.WriteFile(filepath.Join(dir, "v9"), nil, 0o600)) // a file, not a release
-	got, _ := listReleases(d, "")
+	got, _ := listReleases(d)
 	sort.Strings(got)
 	if strings.Join(got, ",") != "2026.09.14,v1" {
 		t.Fatalf("listReleases = %v", got)
@@ -531,7 +531,8 @@ func TestReleaseOrderLedger(t *testing.T) {
 				must(t, os.Chtimes(d.release(r.name), r.dir, r.dir))
 			}
 
-			available, byMtime := listReleases(d, tc.previous)
+			available, byMtime := listReleases(d)
+			available, byMtime = runningFirst(available, tc.previous), runningFirst(byMtime, tc.previous) // as the status does
 			if got := strings.Join(available, " "); got != tc.available {
 				t.Errorf("available_versions = %q, want %q", got, tc.available)
 			}
@@ -548,7 +549,8 @@ func TestReleaseOrderLedger(t *testing.T) {
 			}
 			// What is left lists in the order it had: GC removes, and
 			// reorders nothing.
-			after, _ := listReleases(d, tc.previous)
+			after, _ := listReleases(d)
+			after = runningFirst(after, tc.previous)
 			var want []string
 			for _, v := range available {
 				if slices.Contains(onDisk, v) {

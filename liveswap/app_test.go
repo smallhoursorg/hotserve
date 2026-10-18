@@ -1051,6 +1051,39 @@ func TestALostRollbackRecordDoesNotPruneTheVersionThatServed(t *testing.T) {
 	}
 }
 
+// The status lists the running version first under the lock that
+// gives current_version: polled while rollbacks cut over between v1
+// and v2, every snapshot that lists the running version lists it
+// first, whichever side of a cutover its disk read fell on.
+func TestStatusListsTheRunningVersionFirstThroughCutovers(t *testing.T) {
+	rig := newTestRig(t)
+	base := time.Now().Add(-time.Hour)
+	deployAt(t, rig, "v1", base, 0)
+	deployAt(t, rig, "v2", base, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			v := []string{"v1", "v2"}[i%2]
+			if err := rig.ma.Deploy(context.Background(), deployRequest{version: v, rollback: true}); err != nil {
+				t.Errorf("rollback to %s: %v", v, err)
+				return
+			}
+		}
+	}()
+	for polling := true; polling; {
+		select {
+		case <-done:
+			polling = false
+		default:
+		}
+		s := rig.ma.status()
+		if s.CurrentVersion != "" && slices.Contains(s.AvailableVersions, s.CurrentVersion) && s.AvailableVersions[0] != s.CurrentVersion {
+			t.Fatalf("current_version %s, available_versions %v: the running version not first", s.CurrentVersion, s.AvailableVersions)
+		}
+	}
+}
+
 // With only proxy/ a link, the prune removes nothing — not even the
 // app's own leftovers under run/, which it checks first and would
 // otherwise remove before the refusal.

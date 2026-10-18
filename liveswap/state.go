@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -223,15 +224,13 @@ func orderRecords(d appDirs) (string, error) {
 	return dir, err
 }
 
-// listReleases returns the on-disk release versions in the order above
-// — current, the running version, first: it is what the next deploy's
-// GC keeps beside the new one, so the list an operator picks a
-// rollback target from is the list GC keeps from — and byMtime, those
-// of them placed by their dir's mtime, in the same order. Best-effort:
-// a read error yields nil and status still renders. A release is a
-// directory named as a version, nothing else (gcReleases enumerates
-// more loosely: it also removes orphans).
-func listReleases(d appDirs, current string) (versions, byMtime []string) {
+// listReleases returns the on-disk release versions in the order above,
+// and byMtime, those of them placed by their dir's mtime, in the same
+// order. The status then puts the running version first (runningFirst).
+// Best-effort: a read error yields nil and status still renders. A
+// release is a directory named as a version, nothing else (gcReleases
+// enumerates more loosely: it also removes orphans).
+func listReleases(d appDirs) (versions, byMtime []string) {
 	entries, err := os.ReadDir(d.releases)
 	if err != nil {
 		return nil, nil
@@ -252,7 +251,7 @@ func listReleases(d appDirs, current string) (versions, byMtime []string) {
 			rels = append(rels, r)
 		}
 	}
-	newestFirst(rels, current)
+	newestFirst(rels)
 	versions = make([]string, len(rels))
 	for i, r := range rels {
 		versions[i] = r.name
@@ -261,6 +260,20 @@ func listReleases(d appDirs, current string) (versions, byMtime []string) {
 		}
 	}
 	return versions, byMtime
+}
+
+// runningFirst moves the running version to the front of list, in
+// place, the rest keeping their order: it is what the next deploy's GC
+// keeps beside the new one, so the list an operator picks a rollback
+// target from is the list GC keeps from. The status applies it under
+// the lock that gives current_version, so a cutover between its disk
+// read and that lock cannot leave the two disagreeing.
+func runningFirst(list []string, running string) []string {
+	if i := slices.Index(list, running); i > 0 {
+		copy(list[1:i+1], list[:i])
+		list[0] = running
+	}
+	return list
 }
 
 // gcReleases prunes the releases directory down to the newest keep

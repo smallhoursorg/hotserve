@@ -1566,13 +1566,8 @@ func (ma *managedApp) status() statusSnapshot {
 	available := []string{} // always an array in the JSON, never null
 	var byMtime []string
 	if c.spec != nil {
-		// Read releases outside ma.mu — it is disk I/O, and status is
-		// polled — the running version first (listReleases).
-		running := ""
-		if inst := ma.currentInstance(); inst != nil {
-			running = inst.version
-		}
-		if rels, mtimes := listReleases(c.spec.dirs, running); rels != nil {
+		// Read releases outside ma.mu — it is disk I/O, and status is polled.
+		if rels, mtimes := listReleases(c.spec.dirs); rels != nil {
 			available, byMtime = rels, mtimes
 		}
 		deploys = listDeploySummaries(c.spec.dirs)
@@ -1582,6 +1577,10 @@ func (ma *managedApp) status() statusSnapshot {
 	s := statusSnapshot{App: ma.name, Phase: ma.phase, LastDeploy: ma.lastDeploy, AvailableVersions: available, OrderedByMtime: byMtime, Deploys: deploys}
 	if ma.current != nil {
 		s.CurrentVersion = ma.current.version
+		// Under the lock current_version comes from, so a cutover
+		// since the disk read cannot leave the two disagreeing.
+		s.AvailableVersions = runningFirst(s.AvailableVersions, s.CurrentVersion)
+		s.OrderedByMtime = runningFirst(s.OrderedByMtime, s.CurrentVersion)
 		s.Socket = ma.current.socket
 		hs := ma.current.handle.state()
 		s.PID = hs.PID

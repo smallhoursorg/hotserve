@@ -238,7 +238,7 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*Red
 	safe := []string{ma.name, result.Version, result.SHA256}
 	if c.spec != nil {
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
-		onDisk, _ := listReleases(c.spec.dirs, "") // names only: the order is not this filter's concern
+		onDisk, _ := listReleases(c.spec.dirs) // names only: the order is not this filter's concern
 		safe = append(safe, onDisk...)
 	}
 	return NewRedactor(kvs, safe), unknown
