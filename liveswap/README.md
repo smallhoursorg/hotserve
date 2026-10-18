@@ -935,9 +935,11 @@ latest deploy failed (a rollback to it that failed) comes after every
 one whose latest succeeded: it never served from that deploy, and
 takes no place from a version that did. A release with no record —
 deployed by a hotserve older than records, or its record could not
-be written — is placed by its directory's modification time instead,
-which the app running from it can change, and `ordered_by_mtime`
-names it. A release whose record is there but cannot be read is
+be written — sorts after every recorded one, ordered among those by
+its directory's modification time (which the app running from it can
+change), and `ordered_by_mtime` names it: it is the first release GC
+prunes after the running one and the one before it, and a rollback
+target while it is on disk. A release whose record is there but cannot be read is
 listed the same way, and release GC holds it (neither deletes it nor
 counts it toward `keep`) and says so in the journal until the record
 can be read.

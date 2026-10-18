@@ -143,9 +143,12 @@ var _ stateStore = (*fileStateStore)(nil)
 //     comes after every release whose latest deploy succeeded: that
 //     deploy never served, and must take no place from one that did.
 //   - A release with no such record — deployed before records
-//     existed, or its record could not be written — is placed by its
-//     dir's mtime, among those that succeeded, and the status names it
-//     (ordered_by_mtime): that one key is the app's to move.
+//     existed, or its record could not be written — comes after every
+//     release that has one, ordered among its kind by its dir's mtime,
+//     and the status names it (ordered_by_mtime). That mtime is the
+//     app's to move, so it decides nothing among recorded releases:
+//     such a release is the first GC candidate after the two held by
+//     rank, and a rollback target while it is on disk.
 //
 // Deploy times that tie order by name, so the order is the same on
 // every read.
@@ -184,12 +187,22 @@ func newestFirst(rels []release, first ...string) {
 		}
 		return len(first)
 	}
+	// Recorded and succeeded, then recorded and failed, then no record.
+	tier := func(r release) int {
+		switch {
+		case r.byMtime:
+			return 2
+		case r.failed:
+			return 1
+		}
+		return 0
+	}
 	sort.Slice(rels, func(i, j int) bool {
 		if ri, rj := rank(rels[i].name), rank(rels[j].name); ri != rj {
 			return ri < rj
 		}
-		if rels[i].failed != rels[j].failed {
-			return !rels[i].failed
+		if ti, tj := tier(rels[i]), tier(rels[j]); ti != tj {
+			return ti < tj
 		}
 		if !rels[i].at.Equal(rels[j].at) {
 			return rels[i].at.After(rels[j].at)

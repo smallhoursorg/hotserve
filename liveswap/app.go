@@ -1490,8 +1490,9 @@ type statusSnapshot struct {
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
 	// OrderedByMtime names the entries of AvailableVersions that have
-	// no deploy record and are placed by their release dir's mtime
-	// instead, which the app can set; absent when there are none.
+	// no deploy record: they come after every recorded release, ordered
+	// among themselves by their release dir's mtime, which the app can
+	// set; absent when there are none.
 	OrderedByMtime []string `json:"ordered_by_mtime,omitempty"`
 }
 

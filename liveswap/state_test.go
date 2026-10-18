@@ -407,7 +407,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 				{"v4", "", time.Time{}, at(6)},    // this deploy's
 			},
 			keep: 2, protect: "v4",
-			available: "v4 v3 v2 v1", byMtime: "v4", kept: "v3 v4",
+			available: "v3 v2 v1 v4", byMtime: "v4", kept: "v3 v4",
 		},
 		{
 			name: "a failed rollback does not push the version that served out of keep",
@@ -417,7 +417,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 				{"v3", "", time.Time{}, at(4)},    // this deploy's
 			},
 			keep: 2, protect: "v3",
-			available: "v3 v2 v1", byMtime: "v3", kept: "v2 v3",
+			available: "v2 v1 v3", byMtime: "v3", kept: "v2 v3",
 		},
 		{
 			name: "a rollback whose record write was lost: the version it put in service is kept next to the new one",
@@ -427,7 +427,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 				{"v3", "", time.Time{}, at(4)}, // this deploy's, replacing v1
 			},
 			keep: 2, protect: "v3", previous: "v1",
-			available: "v1 v3 v2", byMtime: "v3", kept: "v1 v3",
+			available: "v1 v2 v3", byMtime: "v3", kept: "v1 v3",
 		},
 		{
 			name: "a record that is there but cannot be read: listed by mtime and named; GC holds its release uncounted and prunes the rest",
@@ -440,7 +440,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 			available: "v2 v3 v1", byMtime: "v2", kept: "v2 v3",
 		},
 		{
-			name: "a release with no record (deployed before records existed) is placed by its dir's mtime, and named",
+			name: "a release with no record (deployed before records existed) sorts after every recorded one, and is named",
 			rels: []rel{
 				{"v0", "", time.Time{}, at(0)},
 				{"v1", "succeeded", at(1), future},
@@ -450,7 +450,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 			available: "v2 v1 v0", byMtime: "v0", kept: "v1 v2",
 		},
 		{
-			name: "the fallback's limit: no record and a future mtime takes the oldest kept recorded release's place, never the way back's",
+			name: "no record and a 2099 mtime outranks no recorded release: it is the first GC candidate after the two held",
 			rels: []rel{
 				{"v0", "", time.Time{}, future},
 				{"v1", "succeeded", at(1), at(1)},
@@ -458,7 +458,17 @@ func TestReleaseOrderLedger(t *testing.T) {
 				{"v3", "", time.Time{}, at(3)},    // this deploy's
 			},
 			keep: 3, protect: "v3", previous: "v2",
-			available: "v2 v0 v3 v1", byMtime: "v0 v3", kept: "v0 v2 v3",
+			available: "v2 v1 v0 v3", byMtime: "v0 v3", kept: "v1 v2 v3",
+		},
+		{
+			name: "the fallback's limit: among releases with no record, the dir mtime the app can set decides which goes first",
+			rels: []rel{
+				{"va", "", time.Time{}, at(1)},
+				{"vb", "", time.Time{}, future}, // whatever its age, its instance set 2099
+				{"v2", "succeeded", at(2), at(2)},
+			},
+			keep: 2, protect: "v2",
+			available: "v2 vb va", byMtime: "vb va", kept: "v2 vb",
 		},
 		{
 			name: "a record that does not prove itself one counts as none",

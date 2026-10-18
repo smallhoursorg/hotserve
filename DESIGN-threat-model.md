@@ -1209,8 +1209,9 @@ does not isolate the runtime.
   the releases: its write time is its version's deploy time, which
   release GC and `available_versions` follow, since a release dir's
   own mtime is the running app's to set (liveswap/state.go, "Release
-  order"); a release with no record falls back to that mtime and is
-  named in the status (`ordered_by_mtime`). Nothing from disk
+  order"); a release with no record sorts after every recorded one,
+  by that mtime among its kind, and is named in the status
+  (`ordered_by_mtime`). Nothing from disk
   reaches a response except through the filter as body text; a name
   read off disk — a release directory's, a record's, `state.json`'s —
   is a safe string like any other and, like any other, never one

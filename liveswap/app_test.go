@@ -861,51 +861,73 @@ func (f mtimeSettingFetcher) fetch(ctx context.Context, spec *appSpec, req deplo
 // what is now a sibling's, the next version's pre_start or instance on
 // its own before GC — and none of it moves available_versions or what
 // the next deploy's GC prunes. With keep 3 and v1..v3 deployed in that
-// order, deploying v4 prunes v1 and only v1, and lists v4 v3 v2.
+// order, deploying v4 prunes v1 and only v1, and lists v4 v3 v2. With
+// a release from before records (v0, no record) on disk too and keep 4,
+// v0 is the one pruned whatever mtime it is given — 2099 included: a
+// release with no record outranks no recorded one.
 func TestReleaseOrderIgnoresMtimesTheAppSets(t *testing.T) {
 	future := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
 	epoch := time.Unix(0, 0)
 	marks := map[string]time.Time{"untouched": {}, "future": future, "epoch": epoch}
 	names := []string{"untouched", "future", "epoch"}
-	for _, own := range names {
-		for _, sibling := range []string{"v1", "v2"} {
-			for _, sib := range names {
-				for _, next := range names {
-					t.Run(fmt.Sprintf("v3=%s/%s=%s/v4=%s", own, sibling, sib, next), func(t *testing.T) {
-						rig := newTestRig(t)
-						rig.spec.keep = 3
-						base := time.Now().Add(-time.Hour)
-						for i, v := range []string{"v1", "v2", "v3"} {
-							deployAt(t, rig, v, base, i)
-						}
-						for v, mark := range map[string]time.Time{"v3": marks[own], sibling: marks[sib]} {
-							if !mark.IsZero() {
-								must(t, os.Chtimes(rig.spec.dirs.release(v), mark, mark))
+	for _, legacy := range []bool{false, true} {
+		siblings := []string{"v1", "v2"}
+		before, pruned, after := []string{"v3", "v2", "v1"}, "v1", []string{"v4", "v3", "v2"}
+		var beforeByMtime []string
+		if legacy {
+			siblings = append(siblings, "v0")
+			before, pruned, after = []string{"v3", "v2", "v1", "v0"}, "v0", []string{"v4", "v3", "v2", "v1"}
+			beforeByMtime = []string{"v0"}
+		}
+		for _, own := range names {
+			for _, sibling := range siblings {
+				for _, sib := range names {
+					for _, next := range names {
+						t.Run(fmt.Sprintf("legacy=%t/v3=%s/%s=%s/v4=%s", legacy, own, sibling, sib, next), func(t *testing.T) {
+							rig := newTestRig(t)
+							rig.spec.keep = len(before)
+							base := time.Now().Add(-time.Hour)
+							if legacy {
+								must(t, os.MkdirAll(rig.spec.dirs.release("v0"), 0o750))
+								old := base.Add(-time.Hour)
+								must(t, os.Chtimes(rig.spec.dirs.release("v0"), old, old))
 							}
-						}
-						if got := rig.ma.status(); !slices.Equal(got.AvailableVersions, []string{"v3", "v2", "v1"}) || got.OrderedByMtime != nil {
-							t.Fatalf("before v4: available_versions = %v, ordered_by_mtime = %v", got.AvailableVersions, got.OrderedByMtime)
-						}
-						rig.ma.fetch = mtimeSettingFetcher{fakeFetcher: rig.fetch, mtime: marks[next]}
-						must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v4", version: "v4"}))
-						onDisk, err := releaseNames(rig.spec.dirs.releases)
-						must(t, err)
-						slices.Sort(onDisk)
-						if !slices.Equal(onDisk, []string{"v2", "v3", "v4"}) {
-							t.Fatalf("GC left %v, want v2 v3 v4 (v1 pruned)", onDisk)
-						}
-						if got := rig.ma.status(); !slices.Equal(got.AvailableVersions, []string{"v4", "v3", "v2"}) || got.OrderedByMtime != nil {
-							t.Fatalf("after v4: available_versions = %v, ordered_by_mtime = %v", got.AvailableVersions, got.OrderedByMtime)
-						}
-					})
+							for i, v := range []string{"v1", "v2", "v3"} {
+								deployAt(t, rig, v, base, i)
+							}
+							for v, mark := range map[string]time.Time{"v3": marks[own], sibling: marks[sib]} {
+								if !mark.IsZero() {
+									must(t, os.Chtimes(rig.spec.dirs.release(v), mark, mark))
+								}
+							}
+							if got := rig.ma.status(); !slices.Equal(got.AvailableVersions, before) || !slices.Equal(got.OrderedByMtime, beforeByMtime) {
+								t.Fatalf("before v4: available_versions = %v, ordered_by_mtime = %v", got.AvailableVersions, got.OrderedByMtime)
+							}
+							rig.ma.fetch = mtimeSettingFetcher{fakeFetcher: rig.fetch, mtime: marks[next]}
+							must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v4", version: "v4"}))
+							onDisk, err := releaseNames(rig.spec.dirs.releases)
+							must(t, err)
+							want := slices.DeleteFunc(slices.Clone(before), func(v string) bool { return v == pruned })
+							want = append(want, "v4")
+							slices.Sort(onDisk)
+							slices.Sort(want)
+							if !slices.Equal(onDisk, want) {
+								t.Fatalf("GC left %v, want %v (%s pruned)", onDisk, want, pruned)
+							}
+							if got := rig.ma.status(); !slices.Equal(got.AvailableVersions, after) || got.OrderedByMtime != nil {
+								t.Fatalf("after v4: available_versions = %v, ordered_by_mtime = %v", got.AvailableVersions, got.OrderedByMtime)
+							}
+						})
+					}
 				}
 			}
 		}
 	}
 }
 
-// A release with no deploy record is placed by its dir's mtime, and the
-// status names it so: that one key is the app's to move.
+// A release with no deploy record sorts after every recorded one, by
+// its dir's mtime among its kind, and the status names it so: that one
+// key is the app's to move.
 func TestStatusNamesReleasesPlacedByMtime(t *testing.T) {
 	rig := newTestRig(t)
 	deployAt(t, rig, "v2", time.Now().Add(-time.Hour), 0)
