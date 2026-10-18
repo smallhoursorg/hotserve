@@ -541,6 +541,15 @@ still runs, and a mode changed between loads is not what takes an app
 down on a relaunch. The owner and group are not checked; the
 `install` line above sets them.
 
+**The sandbox does not undo what an app already did.** It restricts
+what an app can *reach*; it cannot un-copy. An app's `shared/`
+survives every deploy and is bound writable into every new sandbox,
+so whatever a compromised instance left there — a copied secret, a
+payload the next version reads — is inside the view of every version
+after it. If an app may have been compromised, deploying a fixed
+version is not enough: clear its `shared/` and rotate anything it
+could read.
+
 **When an app breaks under the sandbox** the symptom is usually an
 `ENOENT` for something that exists on the host: a database's unix
 socket, a data directory outside the app's own, a runtime under

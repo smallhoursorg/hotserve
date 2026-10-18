@@ -13,12 +13,13 @@ import (
 // The files hotserve keeps in an app's directory — the deploy records
 // (deploys.go) and state.json (state.go) — are written and read by the
 // two functions here, so the stores hold one set of rules rather than
-// two copies of it. No app can write its app dir from inside its
-// sandbox, but nothing on disk says who made what stands at one of
-// these names: an operator's link (a directory moved to another disk,
-// `<root>/blog -> <root>/shop` by mistake) looks like any other, and
-// following one would write or read a file that is not this app's
-// (deploys.go, rule 4):
+// two copies of it. These names sit in the app dir itself, which no
+// app can write from inside its sandbox (it writes only its release,
+// `shared/` and `run/<nonce>/`), but nothing on disk says who made
+// what stands at one of them or where a link there was meant to
+// point: an operator's (`<root>/blog -> <root>/shop` by mistake)
+// looks like any other, so following one could write or read a file
+// that is not this app's (deploys.go, rule 4):
 //
 //   - A write goes to a fresh temp file under a random name in the
 //     same directory (os.CreateTemp: O_EXCL, mode 0600 — never a fixed

@@ -131,18 +131,15 @@ func TestStateMaxBytesBoundsTheLargestState(t *testing.T) {
 	}
 }
 
-// Rule 4 (deploys.go) for state.json's temp file: an earlier hotserve
-// wrote through the fixed state.json.tmp, so a link planted there —
-// or at a name of save's own temp pattern — must not have the next
-// save write through it. Save succeeds, the targets are untouched, and
-// the links are gone.
+// Rule 4 (deploys.go) for state.json's temp file: a link at a name of
+// save's own temp pattern must not have the next save write through
+// it. Save succeeds, the target is untouched, and the link is gone.
 func TestFileStateStoreSaveDoesNotWriteThroughAPlantedTempLink(t *testing.T) {
 	root := t.TempDir()
 	app := filepath.Join(root, "app")
 	must(t, os.MkdirAll(app, 0o750))
 	victim := filepath.Join(root, "victim.txt") // outside the app dir
 	must(t, os.WriteFile(victim, []byte("precious"), 0o600))
-	must(t, os.Symlink(victim, filepath.Join(app, "state.json.tmp")))
 	must(t, os.Symlink(victim, filepath.Join(app, ".state-planted.tmp")))
 	store := &fileStateStore{path: filepath.Join(app, "state.json")}
 	must(t, store.save(appState{CurrentVersion: "v1", Nonce: "0a1b2c3d0a1b2c3d"}))
@@ -227,13 +224,12 @@ func TestFileStateStoreLoadRefusesAnOversizedFile(t *testing.T) {
 }
 
 // A save removes what an interrupted one left: a temp file of its own
-// pattern, and the fixed state.json.tmp an earlier hotserve wrote —
-// and nothing else that happens to end in .tmp (persistState's
-// current.tmp is its own).
+// pattern, and nothing else that happens to end in .tmp
+// (persistState's current.tmp is its own).
 func TestFileStateStoreSaveRemovesLeftovers(t *testing.T) {
 	app := filepath.Join(t.TempDir(), "app")
 	must(t, os.MkdirAll(app, 0o750))
-	for _, n := range []string{".state-123456.tmp", "state.json.tmp", "other.tmp"} {
+	for _, n := range []string{".state-123456.tmp", "other.tmp"} {
 		must(t, os.WriteFile(filepath.Join(app, n), []byte("{"), 0o600))
 	}
 	must(t, os.Symlink("releases/v1", filepath.Join(app, "current.tmp")))

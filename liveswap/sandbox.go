@@ -203,8 +203,9 @@ type sandboxSpec struct {
 // sandboxed, and inside its view the app directory is a tmpfs holding
 // mount points it cannot unlink — the symlink would have to be
 // planted from outside every sandbox, by hotserve itself or by root.
-// The check is for root's: an operator's symlink, made to move a
-// directory or by mistake, is what it refuses (above).
+// That holds only while nothing else runs as the hotserve uid outside
+// a sandbox. The check is for root's links: an operator's symlink,
+// made to move a directory or by mistake, is what it refuses (above).
 func (s *sandboxSpec) resolveBindSources() error {
 	// Compare canonical against canonical: a resolved bind source is
 	// canonical, so a lexical root would miss a sibling reached through

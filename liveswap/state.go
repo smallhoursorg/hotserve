@@ -36,8 +36,8 @@ type stateStore interface {
 
 // fileStateStore keeps state.json next to the app's releases, written
 // and read by the functions the deploy records are (ownfile.go), so a
-// link at state.json, or at the temp name an earlier hotserve wrote
-// through, is not followed, whoever made it. The app dir itself is not
+// link at state.json, or at a name of save's temp pattern, is not
+// followed, whoever made it. The app dir itself is not
 // checked here (ownfile.go says why). A state.json that is a
 // link, a FIFO or anything but a regular file, or larger than any
 // state hotserve writes, is an error like a corrupt one, which
@@ -87,17 +87,14 @@ func (s *fileStateStore) save(st appState) error {
 }
 
 // removeLeftovers removes the temp files an interrupted save leaves
-// behind: save's own, and state.json.tmp, the fixed name an earlier
-// hotserve wrote through — on a box upgraded from one it may still be
-// there, or be a link planted where it was. os.Remove unlinks the
-// name, never what a link points at. Only these names: the app dir
+// behind, by save's own pattern. os.Remove unlinks the name, never
+// what a link points at. Only these names: the app dir
 // holds temp names that are not save's (persistState's current.tmp).
 // Saves are serialized per app — every caller of persistState holds
 // deployMu — so no save is in flight to lose its temp file here. Best
 // effort: a leftover that cannot be removed costs a little disk, never
 // a save.
 func (s *fileStateStore) removeLeftovers() {
-	_ = os.Remove(s.path + ".tmp") // absent is the usual case; best effort, as above
 	dir := filepath.Dir(s.path)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
