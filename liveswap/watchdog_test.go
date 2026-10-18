@@ -618,6 +618,11 @@ func TestWatchdogWaitsForADeployOverADeadInstance(t *testing.T) {
 		// The throttle is the budget's and stands; the backoff step after
 		// it (2 s by now) is not waited out.
 		rig.clock.Advance(rig.ma.wd.untilBudgetFrees(rig.clock.Now(), rig.spec.wdWindow))
+		// The loop may have read the clock before the advance and armed
+		// its timer after it, from the advanced time: a poke makes it
+		// look at the budget again, without moving the clock through the
+		// backoff step this row is about.
+		rig.ma.pokeWatchdog()
 		waitUntil(t, "the restart as the budget frees", func() bool { return rig.runner.startCount() == 3 })
 	})
 	t.Run("a config nudge ends no step", func(t *testing.T) {
