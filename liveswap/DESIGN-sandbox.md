@@ -141,11 +141,12 @@ below as a contract the sandbox path must keep.
   the instance's `run/<nonce>/` — MUST resolve to the directories they name, and a launch whose bind
   source resolves anywhere else MUST be refused. The only permitted
   difference is one an alias on the liveswap root itself explains.
-  Resolution to a path outside the root is unsound: the app's own
-  directory is writable by the app, so a symlink placed there cannot
-  be distinguished from one the operator meant, and a sibling's
-  legitimate external data (`shop/shared -> /mnt/shop-data`) would be
-  an acceptable target for `blog` to aim at. **The supported way to
+  Resolution to a path outside the root is unsound: a symlink in the
+  app's own directory cannot be distinguished from one the operator
+  meant (no app can plant one from inside its sandbox, but nothing on
+  disk says who did), and a sibling's legitimate external data
+  (`shop/shared -> /mnt/shop-data`) would be an acceptable target for
+  `blog` to aim at. **The supported way to
   put an app's data on another disk is a bind mount at the same
   path**: a mount resolves to itself, so it never reaches the check,
   and an app cannot forge one.

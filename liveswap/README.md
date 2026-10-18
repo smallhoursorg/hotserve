@@ -585,18 +585,19 @@ Practical consequences worth planning around:
 An app's own `releases/<version>`, `shared/` and `run/<nonce>/` must
 **be** the directories they name. hotserve resolves them immediately
 before the unit is created and refuses to launch if any points
-somewhere else,
-because the app dir is writable by the app: a symlink placed there
-cannot be told from one you meant. To put an app's data on another
-disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
-/var/lib/liveswap/blog/shared`, or the equivalent fstab entry) — a
-mount resolves to itself, so it is invisible to that check, and an app
-cannot forge one. Being invisible, its source is not checked either:
-mount only this app's own data there. A source that is, contains or
-sits inside one another app uses (another app's directory, one disk
-path mounted for two apps, a whole app dir mounted at another's) gives
-both apps the same files, writable, and hotserve does not refuse it
-(#308).
+somewhere else, because a symlink there cannot be told from one you
+meant. No app can plant one: inside its unit it writes only those
+three. A link in the app dir was put there from outside every
+sandbox, and hotserve refuses it rather than guess. To put an app's
+data on another disk, bind-mount it at the same path (`mount --bind
+/mnt/blog-data /var/lib/liveswap/blog/shared`, or the equivalent
+fstab entry) — a mount resolves to itself, so it is invisible to that
+check, and an app cannot forge one. Being invisible, its source is not
+checked either: mount only this app's own data there. A source that
+is, contains or sits inside one another app uses (another app's
+directory, one disk path mounted for two apps, a whole app dir mounted
+at another's) gives both apps the same files, writable, and hotserve
+does not refuse it (#308).
 
 **Workloads the sandbox cannot host are not supported.** Anything
 that creates its own namespaces (Chromium's sandbox under Puppeteer,

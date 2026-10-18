@@ -423,11 +423,11 @@ reason they were found at all was somebody building this map by hand.
 | Layer | Files |
 |---|---|
 | 0 | `clock.go`, `names.go` |
-| 1 | `appdirs.go`, `ownfile.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `allowlist.go`, `health.go` |
+| 1 | `appdirs.go`, `ownfile.go`, `socket.go` (+`_linux`/`_other`), `extract.go`, `elf.go`, `allowlist.go`, `health.go`, `journal.go` |
 | 2 | `runner.go`, `sandbox.go`, `download.go`, `state.go` |
 | 3 | `runner_systemd.go`, `systemd_dbus.go` |
-| 4 | `app.go`, `watchdog.go`, `sweep.go` |
-| 5 | `liveswap.go`, `handler.go`, `upstreams.go`, `caddyfile.go`, `deploytoken_cmd.go` |
+| 4 | `app.go`, `deploys.go`, `redact.go`, `watchdog.go`, `sweep.go` |
+| 5 | `liveswap.go`, `handler.go`, `upstreams.go`, `caddyfile.go`, `trustwarn.go`, `deploytoken_cmd.go` |
 
 A file may use a lower layer or its own. Sideways is fine: a layer is a
 concern, and a concern is sometimes split across files — `appdirs.go`
@@ -466,6 +466,7 @@ backwards edges reappearing *despite* this table.
 | `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed at the name, no FIFO held, size-bounded — shared by the deploy records and `state.json` |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them, reading a zero field as unset, so a value below an option's minimum (0 included) is refused here, named; `soak` and `deploy_log_lines`, whose 0 is a setting, are pointers |
 | `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
+| `redact.go` | the response filter (`Redactor`) that `RespondJSON` applies: known `env_file` values in their encoded forms, a safe list, shape rules, entropy; the four rules every writer of a body holds head the file |
 | `deploytrust/` | leaf package: deploy auth — the `deploy_trust` grammar (`Parse`), its sources and verifiers (OIDC + local-key JWT verification), the webhook preamble (`Limiter.Authenticate`) and what a failed attempt costs the journal (`Limiter`, on an injected clock). Imports nothing of liveswap's; the box webhook authenticates through it too. `trusttest/` beside it mints tokens and runs an issuer for tests |
 | `internal/dispenser/` | leaf package: the one Caddyfile rule the parsers here and `deploytrust.Parse` apply alike — a repeated subdirective is refused — in one place so the two cannot drift |
 | `upstreams.go` | dynamic upstream source (the cutover read side) |
@@ -477,9 +478,13 @@ backwards edges reappearing *despite* this table.
 | `allowlist.go` | `artifact_allowlist` parsing, canonicalisation and URL pinning |
 | `download.go` | capped, redacted artifact download; `releaseFetcher` (download+extract orchestration) |
 | `extract.go` | validate-then-extract hardened tar handling |
+| `elf.go` | the pre-flight's ELF check: a release's command built for another machine, or 32-bit, is refused before any unit exists. It also declares `preflightError`, the type every pre-flight refusal shares, reported as a 422 |
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
+| `journal.go` | the journal tail a failed deploy's response carries: `journalctl` run with argument lists built here, its output bounded |
 | `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff, the wait for a deploy holding the lock |
 | `state.go` | `state.json` atomic persistence, keep-N GC |
+| `deploys.go` | the deploy record store, `<app>/deploys/<version>.json`: written once through the filter, served back only through it, pruned with the releases; its four rules head the file |
+| `trustwarn.go` | the load-time pass that asks `deploytrust.WarnUnboundSource` about each `deploy_trust` block once, the global ones only when some app inherits them |
 | `deploytoken_cmd.go` | the `hotserve deploy-keygen` / `deploy-token` subcommands |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
 

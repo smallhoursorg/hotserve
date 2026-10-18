@@ -112,9 +112,10 @@ In order:
 - **Flag what the scores cannot see.** A fix or an owed fix gets a
   note on its line, for the person who merges, when either holds:
   - **One-way:** the way back does not undo it (the `.deb` a box
-    upgraded from, `docs/upgrading.md`; an app's rollback to one of its
-    newest five releases), or nothing does: it deletes what nothing
-    else holds, or publishes.
+    upgraded from, `docs/upgrading.md`; an app's rollback to a release
+    still on disk: the newest `keep`, five by default, and the running
+    one), or nothing does: it deletes what nothing else holds, or
+    publishes.
   - **Wide:** it changes code every app's requests or deploys run
     through, or reaches past the box (off-site backups, a workflow
     users copy).

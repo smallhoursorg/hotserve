@@ -170,21 +170,20 @@ type sandboxSpec struct {
 //
 // The mandatory binds need this, and are the easier target: `shared`
 // and the release dirs live under the shared hotserve UID, and
-// appDirs.ensure's MkdirAll succeeds on a symlink. Nothing runs bare
-// any more, but the app dir is writable by the app it belongs to, and
-// what a sandboxed app writes there it writes as the hotserve uid: it
-// could replace its own `shared` with a link to /run/user/<uid> and
-// have BindPaths= mount the user manager's private socket inside its
-// sandbox on the next launch.
+// appDirs.ensure's MkdirAll succeeds on a symlink. A `shared` that is
+// a link to /run/user/<uid> would have BindPaths= mount the user
+// manager's private socket inside the app's sandbox on the next
+// launch. No app can plant that link from inside its sandbox (see the
+// end of this comment), but nothing on disk says who did.
 //
 // A mandatory bind must therefore resolve to the directory it NAMES.
 // The only difference permitted is one an alias on the liveswap root
 // itself explains; anything else is refused, including targets that
 // look innocent. That is not conservatism, it is the only line that
-// can be drawn: the app's own directory is writable by the app, so a
-// symlink placed there cannot be distinguished from one the operator
-// meant. `shop/shared -> /mnt/shop-data` being a legitimate layout is
-// exactly what would make /mnt/shop-data an acceptable target for a
+// can be drawn: a symlink in the app's own directory cannot be
+// distinguished from one the operator meant. `shop/shared ->
+// /mnt/shop-data` being a legitimate layout is exactly what would
+// make /mnt/shop-data an acceptable target for a
 // `blog` to aim at, and no list of other apps' data and env_file
 // locations can close that — it would be incomplete by construction
 // and would go stale, which is the derived set this model deletes.
