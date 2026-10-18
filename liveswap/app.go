@@ -280,8 +280,15 @@ type managedApp struct {
 	logger    *zap.Logger
 
 	// deployMu serializes deploys per app. TryLock (not a queue): a
-	// concurrent webhook gets an immediate 409 and CI can retry.
+	// concurrent webhook gets an immediate 409 and CI can retry. The
+	// one blocking Lock is Destruct's, on the app's removal, and it is
+	// never released. Every other holder but the watchdog lets go
+	// through unlockDeploy or endDeploy, which wake the watchdog.
 	deployMu sync.Mutex
+	// deploysEnded counts deploys that have let go of deployMu
+	// (endDeploy): what tells a restart waiting out its backoff that a
+	// deploy over its instance ended, from any other wake-up.
+	deploysEnded atomic.Uint64
 
 	// mu guards current, phase, phases and lastDeploy.
 	mu         sync.Mutex
@@ -641,14 +648,33 @@ func (ma *managedApp) Deploy(ctx context.Context, req deployRequest) error {
 	if !ma.deployMu.TryLock() {
 		return errDeployInProgress
 	}
-	defer ma.deployMu.Unlock()
+	defer ma.endDeploy()
 	c := ma.snapshot()
 	c.onPhase = req.onPhase
 	return ma.deployLocked(ctx, req, c)
 }
 
+// unlockDeploy lets go of deployMu for any holder but the watchdog, and
+// wakes the watchdog: a restart that found the lock held waits for
+// this, not for a timer (handleFailure). A poke where nothing changed
+// reads as a re-read, so one more is harmless.
+func (ma *managedApp) unlockDeploy() {
+	ma.deployMu.Unlock()
+	ma.pokeWatchdog()
+}
+
+// endDeploy is unlockDeploy at a deploy's end, whatever it came to,
+// counted first: a restart waiting out its backoff over an instance a
+// failed deploy left dead goes now rather than at the end of its step.
+// A promoted deploy has already woken the watchdog with its instance.
+func (ma *managedApp) endDeploy() {
+	ma.deploysEnded.Add(1)
+	ma.unlockDeploy()
+}
+
 // deployLocked runs the blue/green pipeline. The caller MUST already
-// hold deployMu: URL/rollback go through Deploy, while the push handler
+// hold deployMu, and let go of it with endDeploy: URL/rollback go
+// through Deploy, while the push handler
 // acquires the lock BEFORE staging the upload, so a concurrent push gets
 // an immediate 409 rather than streaming a whole tarball to disk only to
 // lose the lock (which would also make aggregate staging unbounded).
@@ -730,6 +756,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		}
 	}()
 
+	// Before anything is read or written through the app's dirs: one
+	// that is not the directory it names would have this deploy write
+	// into whatever it points at (writeRefusal).
+	if err := spec.dirs.writeRefusal(); err != nil {
+		return err
+	}
 	old := ma.currentInstance()
 	if old != nil && old.version == req.version && c.runner.Alive(old.handle) {
 		// The version that is running, asked for again: relaunched from
@@ -1047,7 +1079,7 @@ func (ma *managedApp) ensureRunning() error {
 		// before publishing anything, so recovery must look again.
 		return &transientRecoveryError{errors.New("a deploy is in progress")}
 	}
-	defer ma.deployMu.Unlock()
+	defer ma.unlockDeploy()
 	// Recovery pins and adopts, or relaunches into, this app's socket
 	// dirs; the start-time sweep of unconfigured apps prunes such dirs.
 	// Holding the app's ownerLock across recovery is what keeps the two
@@ -1077,6 +1109,7 @@ func (ma *managedApp) ensureRunning() error {
 		if !ma.sweep(c, nil, "") {
 			return &transientRecoveryError{errSweepUnconfirmed}
 		}
+		ma.wd.setLastFailure("") // nothing to recover is nothing failing: an earlier reason is over
 		return nil
 	}
 	// state.json is ours, but it is a file: the version it names
@@ -1159,6 +1192,7 @@ func (ma *managedApp) ensureRunning() error {
 		ma.current = inst
 		ma.mu.Unlock()
 		ma.activeSocket.Store(inst.sock)
+		ma.wd.setLastFailure("") // a recovery that gave up, or a refusal, is over
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
 		ma.pokeWatchdog()
 		if !ma.sweep(c, inst, "") {
@@ -1173,10 +1207,10 @@ func (ma *managedApp) ensureRunning() error {
 	if err != nil {
 		// A preflight refusal is the release as shipped or the command
 		// as configured — a binary that is not there, not executable,
-		// or outside the sandbox view (the launch runs resolveInView;
-		// the architecture check is the deploy's Preflight, not run
-		// here). None of that appears by retrying; everything else
-		// here (sweep, manager, unit reconcile) can.
+		// outside the sandbox view, or built for another machine (the
+		// launch runs the deploy's Preflight). None of that appears by
+		// retrying; everything else here (sweep, manager, unit
+		// reconcile) can.
 		var pe *preflightError
 		if errors.As(err, &pe) {
 			return &permanentRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
@@ -1186,6 +1220,7 @@ func (ma *managedApp) ensureRunning() error {
 	if err := ma.publishInstance(c, inst); err != nil {
 		c.logger.Warn("persisting recovered state", zap.Error(err))
 	}
+	ma.wd.setLastFailure("") // a recovery that gave up, or a refusal, is over
 	c.logger.Info("relaunched current version after restart",
 		zap.String("version", st.CurrentVersion), zap.String("socket", inst.socket))
 	ma.pokeWatchdog()
@@ -1241,6 +1276,9 @@ func (ma *managedApp) recover(ctx context.Context, logger *zap.Logger) {
 		}
 		if !transientRecovery(err) {
 			logger.Error("recovery failed", zap.Error(err))
+			// Nothing runs, and nothing will retry: status says why
+			// (watchdog.last_failure) until a launch replaces it.
+			ma.wd.setLastFailure(err.Error())
 			return
 		}
 		// Loud once, then a heartbeat: a manager that is down for an
@@ -1314,7 +1352,18 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 		l.sock.retire()
 		return nil, fmt.Errorf("%w; not launching", errSweepUnconfirmed)
 	}
-	h, err := c.runner.Start(l.startSpec(spec, spec.command))
+	// The deploy's pre-flight, on the spec about to start: a release
+	// that cannot run on this box — built for another machine, its
+	// command gone from the view — is refused here as a preflightError,
+	// which every caller treats as permanent, rather than started to die
+	// 203/EXEC and be restarted for ever. After the sweep, so a refusal
+	// still leaves the ledger settled.
+	ss := l.startSpec(spec, spec.command)
+	if err := c.runner.Preflight(ss); err != nil {
+		l.sock.retire()
+		return nil, err
+	}
+	h, err := c.runner.Start(ss)
 	if err != nil {
 		if !unitUnconfirmed(err) { // an ambiguous start may be live: the next confirmed sweep prunes
 			l.sock.retire()
@@ -1415,6 +1464,21 @@ func (ma *managedApp) unrouteIf(inst *instance) {
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
 	if ma.current == inst {
+		ma.activeSocket.Store(nil)
+		inst.sock.retire()
+	}
+}
+
+// dropIf is unrouteIf that also forgets inst as the current instance:
+// a relaunch of it was refused for good (the watchdog), so nothing
+// runs, and nothing is supervised, until a deploy or a reload's
+// recovery launches the app again. state.json keeps the version, so a
+// restart's recovery meets the same refusal.
+func (ma *managedApp) dropIf(inst *instance) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
+	if ma.current == inst {
+		ma.current = nil
 		ma.activeSocket.Store(nil)
 		inst.sock.retire()
 	}
@@ -1559,7 +1623,6 @@ func (ma *managedApp) rollbackConfig(owner any) bool {
 func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
-	inst := ma.currentInstance()
 	if c.runner == nil {
 		return nil // pooled but never configured (a Start that failed before ours ran)
 	}
@@ -1569,14 +1632,30 @@ func (ma *managedApp) Destruct() error {
 		// units belong to whoever is or will be serving them. Leave
 		// them; the next start's sweep settles any that are truly
 		// orphaned.
-		if inst != nil {
+		if inst := ma.currentInstance(); inst != nil {
 			c.logger.Info("app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
 		}
 		return nil
 	}
 	// Removed by a reload that is now serving: no unit may outlive
-	// the definition. (The removing config's Cleanup has already
-	// joined its recovery, so nothing can launch after this sweep.)
+	// the definition. A deploy of the app may still be in flight — a
+	// reload stops the old config's servers without waiting for their
+	// requests — and past the sweep below it would start a unit nothing
+	// supervises, routes or stops. So the lock is taken, blocking: the
+	// deploy ends first, within its own bounds (DESIGN-liveswap.md,
+	// "Concurrency model"), and the reload's cleanup waits for it. It
+	// is never released: a removed app takes no further deploy, and a
+	// request the old config still serves gets a 409. The watchdog is
+	// stopped above and the removing config's Cleanup has joined its
+	// recovery, so nothing else can launch after this sweep either.
+	// A wait is named: it holds the reload, and every config change
+	// after it, for as long as the deploy runs.
+	if !ma.deployMu.TryLock() {
+		c.logger.Warn("app removed while a deploy of it is in flight; waiting for the deploy to end before stopping its units, and the reload completes then")
+		ma.deployMu.Lock()
+	}
+	// Read under the lock: a deploy that just promoted left its own.
+	inst := ma.currentInstance()
 	// Stop what we track (if anything), then everything else the
 	// manager holds for this app: a removed app must leave no unit
 	// behind, tracked or not — an ambiguous start may have left one

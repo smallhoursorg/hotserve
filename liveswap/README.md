@@ -325,7 +325,7 @@ only after the app has been continuously healthy for
 `max(30s, watchdog_grace)`. Every restart re-arms `watchdog_grace`, so
 a slow-booting app is not probed into a kill loop.
 
-The watchdog **never gives up**. The restart budget is a rate
+The watchdog **never gives up** on a failure a retry can fix. The restart budget is a rate
 limiter, not a give-up point: after `watchdog_restarts` restarts
 inside `watchdog_window` it *throttles* — logs an error, reports
 `"state":"throttled"` in the status JSON, unroutes a dead instance so
@@ -340,16 +340,36 @@ also the bound on anyone who can make your health endpoint fail. A
 successful deploy is the fast path out of a throttle wait: it resets
 the budget and backoff immediately. A long-running throttle loop means
 the release itself is broken — watch `restarts_in_window` in the
-status JSON (loop alerting is on the roadmap). Health probes never
+status JSON (loop alerting is on the roadmap). A deploy running over
+a dead instance holds the restart until it ends (the state stays
+`backoff` meanwhile): one that promotes replaces the instance, and
+after one that fails the restart goes within about a second, without
+waiting out the rest of its backoff — though a throttle still waits
+for its budget.
+Health probes never
 follow redirects: a 3xx answer is simply "not 2xx".
+
+A relaunch runs the deploy's pre-flight first, and a release it
+refuses is not retried: one built for another machine (a backup
+restored onto a box of the other architecture), or whose command is
+no longer there or outside the sandbox view, would only die as
+`203/EXEC` on every attempt. The watchdog then drops the instance —
+nothing current, the proxy answers 5xx — logs the refusal once, parks
+in `idle`, and status names it in `last_failure`; boot recovery
+refuses such a release the same way, in the same field. A deploy of
+another version (or a rollback to one), or a reload once the cause is
+fixed, launches the app again; the refused version itself is still
+on disk, so deploying it again is refused as already existing.
 
 The status JSON's `watchdog` object reports `state`
 (`grace|watching|backoff|throttled|disabled|idle`),
 `consecutive_failures`, `restarts_in_window`, `last_restart_at`,
-`last_restart_cause` (`crash|health`) and `last_failure`.
+`last_restart_cause` (`crash|health`) and `last_failure` (the last
+failed probe, or why nothing runs: a relaunch refused, a boot
+recovery that gave up).
 `restarts_in_window` is what the budget counts: it includes a restart
-still waiting out its `backoff` (dropped again if that restart is
-called off), and a relaunch that failed to start, while
+still waiting out its `backoff` or a deploy's end (dropped again if
+that restart is called off), and a relaunch that failed to start, while
 `last_restart_at` and `last_restart_cause` describe the last restart
 that started an instance.
 
@@ -445,7 +465,10 @@ to live, rather than failing as a bare `203/EXEC`. The same pre-flight
 refuses an executable built for another machine (an x86-64 tarball
 pushed to an arm64 box) naming the `runs-on` to build on, and a 32-bit
 executable, which a unit cannot run: units allow the box's native
-system-call ABI only (`SystemCallArchitectures=native`).
+system-call ABI only (`SystemCallArchitectures=native`). Every
+relaunch — boot recovery, a watchdog restart, a rollback — runs it
+too, and stops at a refusal rather than retrying it (see
+[Watchdog](#watchdog)).
 
 **The host is measured at start.** Capability is probed by running a
 throwaway unit and checking the namespaces from inside
@@ -568,7 +591,12 @@ cannot be told from one you meant. To put an app's data on another
 disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
 /var/lib/liveswap/blog/shared`, or the equivalent fstab entry) — a
 mount resolves to itself, so it is invisible to that check, and an app
-cannot forge one.
+cannot forge one. Being invisible, its source is not checked either:
+mount only this app's own data there. A source that is, contains or
+sits inside one another app uses (another app's directory, one disk
+path mounted for two apps, a whole app dir mounted at another's) gives
+both apps the same files, writable, and hotserve does not refuse it
+(#308).
 
 **Workloads the sandbox cannot host are not supported.** Anything
 that creates its own namespaces (Chromium's sandbox under Puppeteer,
@@ -1418,7 +1446,8 @@ its socket (see [Sandbox](#sandbox)).
   that crashes is started again by systemd a second later and
   reattaches the same way (a start it refuses is not retried); removing
   the package stops them. Removing an app (or the whole `liveswap` block)
-  via a **reload** stops its units; if you instead edit the file and
+  via a **reload** stops its units, once any deploy of it already in
+  flight has finished (the reload waits for it); if you instead edit the file and
   *restart* hotserve with the whole block gone, nothing is left to
   judge the old units and they keep running — decommission them
   explicitly: `sudo -u hotserve XDG_RUNTIME_DIR=/run/user/$(id -u

@@ -84,6 +84,16 @@ Concept map from the Nomad-era stack:
   whose shape is the issuer's.
 - The deploy MUST be rejected (409) if one is already running for that
   app; other apps' deploys proceed independently.
+- A deploy, push or rollback MUST be refused (500) before it reads or
+  writes anything through the app's dirs when the app dir, or a dir
+  it makes (`releases/`, `shared/`, `tmp/`, `run/`, `proxy/`), is a
+  link, is not a directory, or cannot be checked for a link
+  (`writeRefusal`): through `<root>/blog -> shop` it would stage in
+  shop's `tmp/` and extract into shop's `releases/`. The refusal's error
+  names the path as the app spells it, never what a link resolves to;
+  the status the response carries still reads through the link
+  (Accepted residuals). An alias on the liveswap root itself is no
+  refusal.
 - A deploy or rollback naming the version that is running MUST
   relaunch it from its release on disk through the deploy pipeline
   minus fetch and extract (`preparing` runs no `pre_start`): a second
@@ -187,9 +197,21 @@ Concept map from the Nomad-era stack:
 - Config reloads MUST NOT restart running apps. Changed app definitions
   apply at the app's next launch: a deploy, a rollback, or a relaunch
   after a crash, a sustained health failure, or a reboot.
+- A reload that removes an app MUST leave none of its units running:
+  a deploy of it in flight is waited for, then everything the manager
+  holds for the app is stopped, and the removed app takes no deploy
+  after.
 - On Caddy start, each app with recorded state MUST be relaunched (or
   reattached, if the runner supports it) and published as soon as the
   process is up — the health gate is a deploy gate, not a boot gate.
+- Every relaunch — a restart's recovery, a watchdog restart, a
+  rollback — MUST run the deploy's pre-flight on the spec it starts,
+  and a refusal (a release built for another machine; a command not
+  there, or outside the sandbox view) MUST end it once, red and
+  named, never in a loop: a rollback is refused as a deploy is (422),
+  recovery gives up, and the watchdog drops the instance — nothing
+  current, nothing routed — and parks. The journal says so once, and
+  the status (`watchdog.last_failure`) until a launch replaces it.
 - Deploy secrets, `auth_header` values, and artifact URL query strings
   MUST NOT be logged.
 
@@ -236,6 +258,22 @@ there would defeat the pool.
   (re-wired each reload); deploys take a `snapshot()` once at start, so
   a mid-deploy reload never tears the config.
 - `deployMu.TryLock` serializes deploys per app; 409 instead of queue.
+  `Destruct`, removing the app, takes it with a blocking `Lock` and
+  keeps it: a reload stops the old config's servers without waiting
+  for their requests, so a deploy of the removed app can still be in
+  flight, and past Destruct's sweep it would start a unit nothing
+  supervises, routes or stops. The wait is the deploy's remaining
+  run. Once the artifact is on the box the app's own settings bound
+  it — `deadline` for a `pre_start` and again for the health gate
+  (plus one `health_interval` and two `health_timeout`s), `drain`,
+  and each stop's `grace` — with the runner's fixed allowances (30 s
+  for the start job, 30 s past a stop's grace); a download's or a
+  push upload's transfer has no bound of hotserve's own, only the
+  artifact host's or the client's pace and the server's read
+  timeouts. The removing reload's cleanup, and so its response, waits
+  that long, and says so in the journal when it has to wait. Kept, the
+  lock leaves the removed app no further deploy: a request the old
+  config still serves gets a 409.
 - `mu` guards current instance/phase/last-deploy.
 - `activeSocket` is the single atomic the proxy hot path reads: the
   current instance's pinned socket, or nil while nothing serves.
@@ -278,8 +316,10 @@ to build on, and a 32-bit ELF naming the architecture to build for,
 since units allow the native system-call ABI only (`elf.go`, twenty
 bytes of header, no dependency). The
 deploy runs it for the command and the `pre_start` in phase
-`preparing` and reports a refusal as a 422; `unitFor` still resolves
-at launch, as the last word before the manager acts.
+`preparing` and reports a refusal as a 422; every relaunch
+(`launchVersion`: recovery and the watchdog) runs it for the command
+after its sweep, and a refusal there is permanent; `unitFor` still
+resolves at launch, as the last word before the manager acts.
 
 `Exit` is how the instance's main process ended ("exit status 3",
 "killed by signal 9 (killed)"), "" while it runs, and non-empty
@@ -365,9 +405,10 @@ on the pooled app, and a candidate Caddy rejects after our Start
 (another app's Start failing) has its definition rolled back by its
 own Cleanup — last-writer semantics, so a config replaced by a
 successful reload is untouched. Destruct stops a removed app's units
-only when another *started* config is live; a rejected candidate,
+only when another *started* config is live, and only once a deploy of
+the app in flight has ended (Concurrency model); a rejected candidate,
 `validate`, and process exit leave them to whoever is or will be
-serving them. Boot recovery is owned by the config that started it,
+serving them, and wait for nothing. Boot recovery is owned by the config that started it,
 retried with backoff for anything not explicitly permanent, and
 cancelled/joined by that config's Cleanup.
 
@@ -437,7 +478,7 @@ backwards edges reappearing *despite* this table.
 | `download.go` | capped, redacted artifact download; `releaseFetcher` (download+extract orchestration) |
 | `extract.go` | validate-then-extract hardened tar handling |
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
-| `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff |
+| `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff, the wait for a deploy holding the lock |
 | `state.go` | `state.json` atomic persistence, keep-N GC |
 | `deploytoken_cmd.go` | the `hotserve deploy-keygen` / `deploy-token` subcommands |
 | `clock.go` | `Now()`/`Sleep()` clock seam |
@@ -464,8 +505,10 @@ backwards edges reappearing *despite* this table.
   prober dial that from then on; retiring an instance unlinks it. So
   bind once per instance. The unit removes its own
   socket when it stops (`ExecStopPost=`); a confirmed sweep prunes any
-  left behind. The health probe is `GET <health_path>` with
-  `Host: localhost`.
+  left behind, but never through a link: if the app dir, `run/` or
+  `proxy/` is one (`<root>/blog -> shop`), is not a directory, or
+  cannot be checked for a link, the sweep logs it and prunes nothing.
+  The health probe is `GET <health_path>` with `Host: localhost`.
 - `Authorization` (`auth_header`) follows a redirect only while the
   hop's host is the first hop's or a subdomain of it, and is dropped
   for good at the first hop outside that domain (Go's
@@ -497,13 +540,21 @@ author's beliefs about systemd, and only the real thing corrects them.
    instance serving; GC gated on a confirmed sweep); recovery
    (reattach, relaunch, no-state sweep, transient vs permanent
    classification, retry loop on the fake clock, refusal of a foreign
-   unit name in state.json, Cleanup joining recovery); Destruct's
-   live-config gate and rollback of a rejected candidate's definition;
+   unit name in state.json, Cleanup joining recovery); the pre-flight
+   on every relaunch path, on the spec it starts, and a refusal ending
+   each once; Destruct's
+   live-config gate, its wait for a deploy in flight (nothing left
+   running whatever the deploy came to, no wait on exit), and rollback
+   of a rejected candidate's definition;
    the runner over a scripted manager (unit properties and naming,
    watcher terminal states and transport-error immunity, PID backfill,
    Stop/RunOnce outcomes, reconcile of an ambiguous start, concurrent
    guarded sweeps, unknown-app sweep judged against the live pool);
-   watchdog crash/health/throttle/unconfirmed-stop paths; env
+   watchdog crash/health/throttle/unconfirmed-stop paths, and the
+   ledger of a restart meeting a deploy over a dead instance (one
+   crash Warn however long the deploy, the instance back on the fake
+   clock's same instant after a failed deploy, a nudge ending no
+   step), with every lock holder waking the watchdog as it lets go; env
    precedence, placeholders and key validation; malicious-tar table;
    download caps/allowlist/redaction; prober soak/flap/deadline;
    parser and Validate tables.
@@ -517,7 +568,10 @@ author's beliefs about systemd, and only the real thing corrects them.
 3. Integration (`make test-integration`, caddytest under a real user
    manager): webhook deploy v1 → proxied body; v2 cutover; broken v3 →
    500 and v2 still serving; reload keeps the app PID; keep-N; OIDC,
-   push and rollback deploys; watchdog restart and throttle recovery.
+   push and rollback deploys; watchdog restart and throttle recovery;
+   a relaunch of a release built for another machine refused once by
+   the watchdog and by recovery, with no unit started; a reload that
+   removes an app mid-deploy leaves no unit of it running.
    The runner's own suite: a leader+worker tree is gone after Stop and
    after a leader crash; SIGKILL lands after grace, not before; exit
    statuses as systemd reports them; a second runner adopts a live
@@ -563,9 +617,20 @@ Design summary (full operator docs in README.md "Watchdog"):
   an instance that is dead by restart time is recorded as a crash —
   which signal noticed first is only probe interval vs. unit poll. `watchdog_grace` re-arms after every start; crashes count
   even during grace.
-- Restarts take `deployMu` (TryLock, yielding to deploys) and re-check
-  instance identity — promote swaps `current` before stopping the old
-  handle, so a deploy-stopped handle never reads as a crash. The
+- Restarts take `deployMu` and re-check instance identity — promote
+  swaps `current` before stopping the old handle, so a deploy-stopped
+  handle never reads as a crash. A restart that finds the lock held
+  waits for its holder to let go rather than re-entering supervision
+  per backoff step: every holder but the watchdog lets go through
+  `unlockDeploy`, which pokes `wdNotify`. A promoted deploy has
+  installed its own instance; after any other end the restart goes at
+  once. A deploy that ends after the failure was found and leaves the
+  instance current (`endDeploy`, counted in `deploysEnded`) also ends
+  the backoff step, so a dead instance is back about a second after a
+  failed deploy rather than at the end of a step of up to 72 s; a
+  throttle, the budget's, still stands, a config nudge ends no step,
+  and the step is never refunded (refunding it made a 0.8 s loop,
+  #150). While it waits for the lock the state stays `backoff`. The
   relaunch path is `launchVersion`, shared with boot recovery: the
   record pins the **version**, and command, env and sandbox render
   from the spec as it is now, so an app definition edited since the
@@ -592,6 +657,14 @@ Design summary (full operator docs in README.md "Watchdog"):
   budget immediately. The rate bound is also the DoS bound on induced
   health failures. Alerting on a sustained restart loop is deferred
   to the events/metrics milestone.
+- Never giving up is for failures a retry can fix. A relaunch its
+  pre-flight refuses (the release is for another machine; its command
+  is not there or not in the view) is not one: the watchdog drops the
+  instance (`dropIf`: nothing current, nothing routed), records the
+  refusal as `last_failure`, logs it once and parks, as recovery gives
+  up on the same refusal. A deploy, or a reload's recovery once the
+  cause is fixed, launches the app again; `state.json` keeps the
+  version, so a restart meets the same refusal.
 - The watchdog is the **single restart authority**: the systemd
   runner creates every unit with `Restart=no`, or systemd and
   liveswap would fight over the same failure.
@@ -607,9 +680,24 @@ severity × occurrence × detection, then the fix's size and risk.
 | A relaunch of the running version starts a second instance of the same release in the same release dir, bound read-write (`sandbox.go`), for the overlap — `soak`, then `drain` and the old instance's stop. An app that keeps mutable state in its release dir rather than under `HOME` (its shared dir) may see its two instances contend there. | `deployLocked`, relaunch | 3 | 5 | 3 | 45 | size 3, risk 2 (a copy per instance, or a stop-then-start branch) | Scores to fix; accepted by decision (#234, 2026-10-16). Both fixes cost what the feature exists to avoid: stop-then-start drops every request for the launch time, which the watchdog's restart already does and a deploy never does; a copy per instance doubles the disk of each relaunch and makes two paths to one release (`{release_dir}`, status, GC). The shared dir is already shared by both versions in every deploy, so an app's state there meets the same overlap today; the release dir is the app's code, and nothing of hotserve's writes under it during a relaunch. An app that conflicts fails the health gate or crashes in the watchdog's view, red and named; the silent case needs state the app chose to keep where every deploy already discards it. |
 | A relaunch matches the request's digest against the version's record, not the release's bytes (`recordedPin`'s known limit: a version release GC pruned, deployed again, whose record write then failed). A request carrying the old digest then relaunches the bytes on disk. | `relaunchRefusal` | 3 | 1 | 3 | 9 | size 3 (a pin kept with the release) | The relaunch introduces no bytes: whatever the match decides, what runs is the release that was already serving. Closing it is the same fix the known limit names for rollbacks. |
 | A request cancelled before or during `pre_start` does not stop it: the migration runs to its end, then the deploy starts the new instance and the health gate fails it on the cancelled request (phase `soaking`, `deploy canceled while waiting for health`). The new instance runs its startup for that moment, the release is removed, and a retry runs `pre_start` again, as it does after any gate failure that follows a `pre_start`. | `deployLocked`, after `pre_start` | 3 | 3 | 1 | 9 | size 2, risk 1 (a request check before the start); size 3, risk 3 (run the rest of the deploy detached) | Rule 2 holds (it ends red, the cause named); under rule 3 the product is under 20 and neither fix is size 1, risk 1. The shape is the owner's decision (#295, 2026-10-17): the gate aborts the deploy as it does for any client that left. The old instance serves throughout, and a migration that cannot run twice already meets the same retry after any gate failure. |
+| A watchdog restart whose command cannot be looked up at that moment for a reason a retry would fix — its runtime under `/usr` (`/usr/bin/node`) missing while its package is removed and reinstalled, or the lookup failing with an I/O error or a passing `EACCES` (`resolveInView` reports every `exec.LookPath` error as a refusal) — is refused at the pre-flight as permanent: the app stays down, unrouted, until a deploy or a reload launches it. | `handleFailure`, a pre-flight refusal | 4 | 3 | 1 | 12 | size 2, risk 2 (retry a lookup refusal under the budget, a branch on the refusal's kind) | Rule 2 holds (it ends red and named: the journal and status carry the lookup's error); under rule 3 the product is under 20 and the fix is not size 1, risk 1. An upgrade never opens the missing-runtime window (dpkg replaces a file by renaming over it), and restart recovery has always given up on the same refusal. |
+| A health-failure restart stops the instance — unhealthy, but serving — before its relaunch's pre-flight runs, so a release made unrunnable meanwhile (a reload's edited `command`, an executable the app rewrote) is refused only once nothing serves: the app is down until a deploy or a reload launches it. | `handleFailure`, the stop before `launchVersion` | 4 | 4 | 1 | 16 | size 3, risk 2 (prepare the launch and run its pre-flight before the stop) | Rule 2 holds (it ends red and named: the refusal in the journal and in `last_failure`); under rule 3 the product is under 20 and the fix is not size 1, risk 1. The order predates the pre-flight on relaunch: before it, the same stop was followed by a relaunch that failed at every step. |
+| A reload that removes an app waits for a deploy of it in flight (`Destruct`), and every config change after it waits too: a caller with a deadline of its own (`systemctl reload`, the box applier) can give up first though the reload then completes, and a push upload from a client that stalls without closing holds it until the connection ends, since no bound of hotserve's covers a transfer. | `Destruct`, the blocking `Lock` | 4 | 3 | 1 | 12 | size 3 (`Destruct` cancels the deploy's transfer; or a time bound on uploads, a new limit) | The shape is the owner's decision (#297): the wait is what keeps a removed app's deploy from starting a unit nothing stops. It is named in the journal; under rule 3 the product is under 20. A bound on uploads could fail a legitimate deploy and wants its own sizing. |
+| A recovery that gives up records its reason (`recover`) after `ensureRunning` has let go of `deployMu`: a deploy that succeeds in that moment can be followed by the stale reason in `last_failure`, beside a running instance, until the watchdog's first healthy probe of it or the next launch. | `recover`, `setLastFailure` | 2 | 2 | 3 | 12 | size 2 (record the reason at each permanent return, under the lock) | Under rule 3 the product is under 20. It takes a deploy landing within the microseconds between the two, and status shows the instance running beside the reason. |
+| A deploy request the old config was still serving when a reload removed its app, reaching the deploy lock after `Destruct` took it, gets a 409 ("a deploy is already in progress") rather than the answer for an app that is gone. | `Destruct`, the lock kept | 2 | 2 | 3 | 12 | size 2 (a removed flag with its own refusal) | Under rule 3 the product is under 20. Only a request already inside the old server as it shut down can meet it (a slow authentication, an HTTP/2 stream opened before the GOAWAY), and the retry the 409 invites reaches the new config, which answers for the app truthfully. |
+| A watchdog restart that waits for a deploy holding the lock keeps the budget slot it claimed before the wait: a wait longer than `watchdog_window` lets the slot slide out before the restart happens, so that restart goes uncounted and a crash loop right after gets one restart more than the budget. | `handleFailure`, the wait for the lock | 2 | 2 | 3 | 12 | size 2 (re-stamp the slot once the lock is taken) | Under rule 3 the product is under 20. It takes a deploy longer than the window (ten minutes by default) over a dead instance, and costs one restart per such deploy. |
 | A `pre_start` that exits within milliseconds of `deadline` can still read as timed out: `jobResult` prefers a job result already received when the context ends, but not one whose signal is still in flight. The deploy fails red naming the deadline, and the release of a migration that ran is removed. | `jobResult` | 2 | 3 | 1 | 6 | size 3 (a second completion source: a oneshot's transient unit is unloaded on success, so no `Result` is left to ask for) | Rule 2 holds (red, named); under rule 3 the product is under 20. A migration that ends on its deadline has used its whole budget; raising `deadline` is the remedy. |
 | A Debian 13 host that passes the tutorial's step 2 (apt's `systemd (>= 257)` floor, `systemd-detect-virt --container`) but whose kernel or container refuses the sandbox's namespaces installs and serves the starter config, and first fails at step 3: `hotserve init`'s reload is liveswap's first start. That reload is refused, the probe's error names the cause, and the starter keeps serving; the box's repository, signer and workflow carry over to a fixed or new host. | `probeSandboxCapability`, from `App.Start` | 2 | 5 | 1 | 10 | size 3, risk 1 (a sandbox-check subcommand that step 2 runs as the hotserve user) | Rule 2 holds (it ends red and named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#274, 2026-10-17; #225 scored the same case at occurrence 3, but a host is the operator's choice, so it scores as input). The probe needs the hotserve user and its lingering manager, which the package's postinst creates, so the earliest any check could run is the end of `apt install`, minutes before step 3, with the same refusal and the same fix. A check in postinst could only warn, since a failed postinst leaves the package half-configured: one line in apt's output, after up to two 30-second probe budgets inside dpkg. And liveswap with no apps runs no probe (`len(a.managed) > 0` in `App.Start`), so the starter config cannot carry one. |
 | `max_token_ttl {env.NAME}` in a `deploy_trust local` block is refused at config load (`invalid max_token_ttl "{env.NAME}"`), though the README says `{env.*}` placeholders are resolved at config load: the duration is parsed when the Caddyfile is, before placeholders are. | `deploytrust.Parse` | 2 | 5 | 1 | 10 | size 2, risk 2 (a string field, resolved in `ResolvePlaceholders` and parsed in `Build`) | Rule 2 holds (refused and named, before anything runs); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#296, 2026-10-17). Every liveswap duration directive (`health_interval`, `deadline`, …) parses the same way, so this one matches them; the Caddyfile's own `{$NAME}`, substituted when the file is read, works for all of them. |
+| An app dir, or a dir it makes, that is a link to a sibling's (`<root>/blog -> shop`, `blog/proxy -> ../shop/proxy`) is still followed outside a deploy. blog's status lists shop's releases as its own available versions, and so does the status a refused deploy's response carries. blog's recovery reads shop's `state.json`; it and the watchdog's relaunch make and remove a run dir in shop's `run/` and are refused at launch for a linked app dir, `releases/`, `shared/` or `run/`, recovery retrying, backing off to once a minute. A linked `proxy/` launches: blog's pins land in shop's `proxy/`, where shop's sweep removes them, so blog, not shop, goes unreachable. | `status`, `ensureRunning`, `launchVersion` | 3 | 5 | 3 | 45 | size 2, risk 1 (`writeRefusal` in status and before a relaunch, #300) | Scores to fix (rule 3); held by decision (#300, 2026-10-18: the deploy side is fixed, the rest held) until a box runs a link under the root, or renaming or aliasing an app becomes a feature. No box does. Nothing here writes into the sibling's releases or data: a deploy, push or rollback through such a dir is refused before it writes (`writeRefusal`), so a rollback to a listed version is refused and named; a relaunch through a linked app dir, `releases/`, `shared/` or `run/` is refused at launch (`resolveBindSources`), red and named; and the socket prune never follows a link (`linkAt`), so no sibling loses its socket and pin that way. |
+| A push refused before its upload is staged (a dir that is not the directory it names, like a 413 or a staging failure) leaves `last_deploy` as it was, where a URL deploy or rollback refused the same way replaces it. | `deployPush` | 2 | 5 | 1 | 10 | size 2, risk 2 (a push refusal through the pipeline's bookkeeping) | Under 20, and not a size-1, risk-1 fix (rule 3). The push's own response is the refusal, a 500 naming the path, the reason and the remedy, and the journal says it with who asked (`deploy failed`, `via`, `remote`). Every refusal of a push before staging already leaves `last_deploy` alone, so a status read after a push tells the same story for each. |
+
+**Owed** (over the bar, not yet fixed):
+
+| Finding | S | O | D | Where the fix lands |
+|---|---|---|---|---|
+| A refused token's timing names configured apps: a forged token under an unknown kid for a configured app waits on its issuer's key fetch (at most once a minute per app), where one for a name that does not exist is refused at once when the global sources hold no OIDC source (Behavior specification, the webhook's timing). | 3 | 5 | 5 | #306 |
+| A bind mount can give two apps one directory, or put one app's data inside another's: an fstab source another app also uses, or a whole app dir mounted at another's. A mount resolves to itself, so the launch check (`resolveBindSources`) passes it: blog launches on shop's data, writable, and nothing says so. | 5 | 5 | 5 | #308, to design: equal `(st_dev, st_ino)` alone misses a source nested in another's; when to check, what to refuse and what to say are open there. Until then, the README's bind-mount advice says the source must be the app's own |
 
 ## Non-goals
 

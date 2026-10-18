@@ -176,10 +176,11 @@ below as a contract the sandbox path must keep.
   runtime installed outside `/usr` (`/opt/node/bin/node`, an nvm or
   asdf shim under a home directory) resolves for the supervisor and
   then does not exist inside the unit
-  (`TestUnitForRefusesCommandOutsideTheView`). The deploy asks the
-  same question first, at its pre-flight, and reports the refusal as
-  a 422 (`TestSystemdRunnerPreflight`); the launch's own check stays
-  as the last word.
+  (`TestUnitForRefusesCommandOutsideTheView`). A deploy and every
+  relaunch ask the same question first, at the pre-flight — a deploy
+  reports the refusal as a 422, a relaunch gives up on it
+  (`TestSystemdRunnerPreflight`); the launch's own check stays as the
+  last word.
 - `/run/systemd/resolve` MUST stay reachable (read-only) when it
   exists: on systemd-resolved hosts `/etc/resolv.conf` is a symlink
   into that directory, and since nothing else under `/run` is in the
@@ -250,8 +251,9 @@ below as a contract the sandbox path must keep.
   reached through `socketcall()` and systemd applies no address-family
   filter at all, so `SystemCallArchitectures=native` takes that ABI
   away. A 32-bit executable would die at its first system call, so the
-  deploy's pre-flight refuses one as a 422 naming the setting
-  (`checkMachine`, liveswap/elf.go). One route is open: `socketpair(2)`,
+  pre-flight refuses one naming the setting (`checkMachine`,
+  liveswap/elf.go): a deploy as a 422, a relaunch for good. One route
+  is open: `socketpair(2)`,
   which the filter does not cover, makes a connected pair in any family
   that supports it, and `AF_TIPC`, a module Debian 13 builds and a call
   can autoload, supports it on every socket type (owed: #315; denying

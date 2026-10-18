@@ -981,7 +981,7 @@ it binds nothing of an app's and has no socket.
   it are closed: an io_uring ring's `IORING_OP_SOCKET` (kernel 5.19+)
   opens a socket of any family without that call, so no unit can set
   up a ring; and on amd64 the x86-32 ABI's `socketcall()` is not
-  filtered at all, so no unit runs that ABI (the deploy refuses a
+  filtered at all, so no unit runs that ABI (the pre-flight refuses a
   32-bit executable). One is open: `socketpair(2)`, which the list does
   not filter, in a module-backed family that supports it, such as
   `AF_TIPC` (owed: #315).

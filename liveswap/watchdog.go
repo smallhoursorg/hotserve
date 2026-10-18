@@ -19,7 +19,8 @@ import (
 // the same version when the process exits or when the health endpoint
 // fails wdFailures consecutive probes — with a per-restart grace
 // period, exponential backoff, and a restart budget. The watchdog
-// never gives up: when the budget for the current window is spent it
+// never gives up on a failure a retry can fix (a relaunch its
+// pre-flight refuses is not one): when the budget for the current window is spent it
 // throttles — waits for the oldest restart to slide out of the window,
 // then tries again — so an app that died during a transient incident
 // (a DDoS, a dependency outage) comes back on its own once the
@@ -131,6 +132,17 @@ func (w *watchdogState) recordFailure(desc string) int {
 	return w.failures
 }
 
+// setLastFailure records why the app is not running when no probe
+// will say it: a relaunch refused for good, or a recovery that gave
+// up. The next launch clears it — recovery's (with ""), a deploy's
+// (reset), or a healthy probe of a later instance — and so does a
+// recovery that finds nothing recorded.
+func (w *watchdogState) setLastFailure(desc string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastFailure = desc
+}
+
 // noteFlap breaks the continuous-health streak without counting toward
 // the failure threshold. Used for probe failures during grace: they
 // must not trigger a restart, but they also must not let a pre-flap
@@ -183,10 +195,10 @@ func (w *watchdogState) takeSkipGrace(h handle) bool {
 
 // refundBudget returns the most recently claimed slot. Called when a
 // claimed restart is abandoned without a Start ever happening (a
-// deploy owns the lifecycle, or replaced the instance): those cycles
-// must not drain the budget, or a long deploy over a dead instance
-// exhausts it with zero restarts performed. No-op if a deploy's reset
-// already cleared the window.
+// deploy or recovery replaced the instance, the watchdog was turned
+// off, the app is being destructed): an abandoned restart must not
+// count against the budget. No-op if a deploy's reset already cleared
+// the window.
 func (w *watchdogState) refundBudget() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -412,6 +424,9 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 // "a deploy already replaced it" and the watchdog stands down.
 func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *instance, kind failureKind) bool {
 	var spec *appSpec // (re)read from the live snapshot in the loop below
+	// Deploys that end from here on, leaving inst current, ended over
+	// it: the backoff below is not waited out after one.
+	deploys := ma.deploysEnded.Load()
 	if !c.runner.Alive(inst.handle) {
 		// Never route to a dead port while pacing the restart: a fast
 		// clean 5xx beats dialing it, and the freed port could be
@@ -461,7 +476,12 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	d := ma.wd.nextBackoff()
 	ma.wd.setState(wdStateBackoff)
 	deadline := c.clock.Now().Add(d)
-	for {
+	// Once a deploy has ended since the failure was found and left this
+	// instance current — it failed, or was refused before it began —
+	// the dead instance has waited through it, the throttle included:
+	// restart now rather than at the end of the step. The step is not
+	// refunded: the next failure waits longer, as after any restart.
+	for ma.deploysEnded.Load() == deploys {
 		wait := deadline.Sub(c.clock.Now())
 		if wait <= 0 {
 			break
@@ -484,18 +504,29 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 				ma.wd.refundBudget()
 				return true // reload turned the watchdog off mid-wait
 			}
-			continue // config nudge: keep waiting out the backoff
+			continue // a deploy's end is read above; anything else is a config nudge: keep waiting out the backoff
 		case <-c.clock.After(wait):
 		}
 	}
 
-	if !ma.deployMu.TryLock() {
-		// A running deploy owns the lifecycle and will poke wdNotify.
-		// Give the claimed slot back: no restart happened, and without
-		// the refund a long deploy over a dead instance would drain
-		// the whole budget with zero restarts performed.
-		ma.wd.refundBudget()
-		return true
+	// A deploy (or recovery) holding the lock owns the lifecycle: wait
+	// for it to let go, which wakes the loop (unlockDeploy), rather than
+	// re-entering supervision per backoff step — that logged the same
+	// dead instance once a step for as long as the deploy ran. A
+	// promoted deploy installs its own instance; after any other end
+	// the restart goes at once. The claimed slot is kept for it, and
+	// given back if it never happens.
+	for !ma.deployMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			ma.wd.refundBudget()
+			return false
+		case <-ma.wdNotify:
+			if ma.currentInstance() != inst || ma.watchdogDisabled() {
+				ma.wd.refundBudget()
+				return true
+			}
+		}
 	}
 	defer ma.deployMu.Unlock()
 	if ctx.Err() != nil {
@@ -559,6 +590,21 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		}
 	}
 	newInst, err := ma.launchVersion(c, inst.version)
+	var refused *preflightError
+	if errors.As(err, &refused) {
+		// Refused at its pre-flight: the release cannot run on this box
+		// (built for another machine) or its command is not there to
+		// run. No restart changes that, so the never-give-up loop is
+		// not for it: the instance is dropped — nothing current,
+		// nothing routed — the loop parks, and status names the
+		// refusal, until a deploy, or a reload's recovery once the
+		// cause is fixed, launches the app again.
+		ma.dropIf(inst)
+		ma.wd.setLastFailure(err.Error())
+		c.logger.Error("watchdog: relaunch refused; the app stays down until a deploy of another version (or a rollback to one), or a reload once the cause is fixed, launches it",
+			zap.String("version", inst.version), zap.Error(err))
+		return true
+	}
 	if err != nil {
 		// The budget slot stays consumed, so a launch that fails
 		// instantly is bounded exactly like any other restart storm;
