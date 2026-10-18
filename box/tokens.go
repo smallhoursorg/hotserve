@@ -68,8 +68,9 @@ func (r *Refusal) Error() string { return "the Caddyfile " + r.Reason }
 func refuse(reason string) error { return &Refusal{Reason: reason} }
 
 // reasonNoSigner is the walk's refusal of a box block with no signer
-// line, which the applier tells apart for the installed file: there it
-// is a refusal of its own, "lists no signer" (check.go).
+// line, which check and `GET /` tell apart for the installed file:
+// there it is a refusal of its own, "lists no signer" (runningRefused,
+// check.go).
 const reasonNoSigner = "has no signer"
 
 // Walk reads a Caddyfile the way the box reads one (DESIGN-box.md,

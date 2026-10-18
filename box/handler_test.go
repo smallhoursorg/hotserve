@@ -315,6 +315,8 @@ func TestHandlerStatusRunsARefusedFile(t *testing.T) {
 		"an import": {strings.Replace(good, "\tbox_webhook\n", "\tbox_webhook\n\timport /root/backup.caddy\n", 1),
 			"the Caddyfile this box runs imports /root/backup.caddy; inline the snippet"},
 		"not a box's": {"{\n}\nx.com {\n}\n", "the Caddyfile this box runs has no box block"},
+		"no signer": {strings.Replace(good, "\t\tsigner alice@example.com ssh-ed25519 K1\n\t\tsigner bob ssh-ed25519 K2\n", "", 1),
+			"the Caddyfile this box runs lists no signer; hotserve init is the way back"},
 		"with input": {strings.Replace(good, "deploy.example.com {", strings.Repeat("a", 2000)+".com {", 1),
 			"has a box_webhook site whose address is not one bare hostname"},
 		"the address filtered": {strings.Replace(good, "deploy.example.com {", "https://"+jwt+" {", 1), "[redacted:jwt]"},

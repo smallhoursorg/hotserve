@@ -26,6 +26,16 @@ func refused(format string, args ...any) error {
 	return &refusal{msg: fmt.Sprintf(format, args...)}
 }
 
+// runningRefused is a walk refusal of the file the box runs, as check
+// (step 10) and `GET /` both answer it: an empty signer list refuses by
+// name, with the way back; any other reason is named as the box's.
+func runningRefused(ref *Refusal) error {
+	if ref.Reason == reasonNoSigner {
+		return refused("%s", msgNoSigner)
+	}
+	return fmt.Errorf("the Caddyfile this box runs %s", ref.Reason)
+}
+
 // verdict is what steps 10 to 15 established about a bundle.
 type verdict struct {
 	// signer is the installed principal whose key verified HEAD.
@@ -67,11 +77,8 @@ func check(ctx context.Context, v *proof.Verifier, b *proof.Bundle, installed []
 	cur, err := Walk(installed)
 	if err != nil {
 		var ref *Refusal
-		if errors.As(err, &ref) && ref.Reason == reasonNoSigner {
-			return nil, refused("%s", msgNoSigner)
-		}
-		if ref != nil {
-			return nil, fmt.Errorf("the Caddyfile this box runs %s", ref.Reason)
+		if errors.As(err, &ref) {
+			return nil, runningRefused(ref)
 		}
 		return nil, err
 	}
