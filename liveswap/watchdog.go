@@ -131,6 +131,15 @@ func (w *watchdogState) recordFailure(desc string) int {
 	return w.failures
 }
 
+// setLastFailure records why the app is not running when no probe
+// will say it: a relaunch refused for good, or a recovery that gave
+// up. A healthy probe of a later instance, or a deploy, clears it.
+func (w *watchdogState) setLastFailure(desc string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastFailure = desc
+}
+
 // noteFlap breaks the continuous-health streak without counting toward
 // the failure threshold. Used for probe failures during grace: they
 // must not trigger a restart, but they also must not let a pre-flap
@@ -559,6 +568,21 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		}
 	}
 	newInst, err := ma.launchVersion(c, inst.version)
+	var refused *preflightError
+	if errors.As(err, &refused) {
+		// Refused at its pre-flight: the release cannot run on this box
+		// (built for another machine) or its command is not there to
+		// run. No restart changes that, so the never-give-up loop is
+		// not for it: the instance is dropped — nothing current,
+		// nothing routed — the loop parks, and status names the
+		// refusal, until a deploy, or a reload's recovery once the
+		// cause is fixed, launches the app again.
+		ma.dropIf(inst)
+		ma.wd.setLastFailure(err.Error())
+		c.logger.Error("watchdog: relaunch refused; the app stays down until a deploy, or a reload once the cause is fixed, launches it",
+			zap.String("version", inst.version), zap.Error(err))
+		return true
+	}
 	if err != nil {
 		// The budget slot stays consumed, so a launch that fails
 		// instantly is bounded exactly like any other restart storm;

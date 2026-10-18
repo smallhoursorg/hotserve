@@ -1173,10 +1173,10 @@ func (ma *managedApp) ensureRunning() error {
 	if err != nil {
 		// A preflight refusal is the release as shipped or the command
 		// as configured — a binary that is not there, not executable,
-		// or outside the sandbox view (the launch runs resolveInView;
-		// the architecture check is the deploy's Preflight, not run
-		// here). None of that appears by retrying; everything else
-		// here (sweep, manager, unit reconcile) can.
+		// outside the sandbox view, or built for another machine (the
+		// launch runs the deploy's Preflight). None of that appears by
+		// retrying; everything else here (sweep, manager, unit
+		// reconcile) can.
 		var pe *preflightError
 		if errors.As(err, &pe) {
 			return &permanentRecoveryError{fmt.Errorf("relaunching %s: %w", st.CurrentVersion, err)}
@@ -1241,6 +1241,9 @@ func (ma *managedApp) recover(ctx context.Context, logger *zap.Logger) {
 		}
 		if !transientRecovery(err) {
 			logger.Error("recovery failed", zap.Error(err))
+			// Nothing runs, and nothing will retry: status says why
+			// (watchdog.last_failure) until a launch replaces it.
+			ma.wd.setLastFailure(err.Error())
 			return
 		}
 		// Loud once, then a heartbeat: a manager that is down for an
@@ -1314,7 +1317,18 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 		l.sock.retire()
 		return nil, fmt.Errorf("%w; not launching", errSweepUnconfirmed)
 	}
-	h, err := c.runner.Start(l.startSpec(spec, spec.command))
+	// The deploy's pre-flight, on the spec about to start: a release
+	// that cannot run on this box — built for another machine, its
+	// command gone from the view — is refused here as a preflightError,
+	// which every caller treats as permanent, rather than started to die
+	// 203/EXEC and be restarted for ever. After the sweep, so a refusal
+	// still leaves the ledger settled.
+	ss := l.startSpec(spec, spec.command)
+	if err := c.runner.Preflight(ss); err != nil {
+		l.sock.retire()
+		return nil, err
+	}
+	h, err := c.runner.Start(ss)
 	if err != nil {
 		if !unitUnconfirmed(err) { // an ambiguous start may be live: the next confirmed sweep prunes
 			l.sock.retire()
@@ -1415,6 +1429,21 @@ func (ma *managedApp) unrouteIf(inst *instance) {
 	ma.mu.Lock()
 	defer ma.mu.Unlock()
 	if ma.current == inst {
+		ma.activeSocket.Store(nil)
+		inst.sock.retire()
+	}
+}
+
+// dropIf is unrouteIf that also forgets inst as the current instance:
+// a relaunch of it was refused for good (the watchdog), so nothing
+// runs, and nothing is supervised, until a deploy or a reload's
+// recovery launches the app again. state.json keeps the version, so a
+// restart's recovery meets the same refusal.
+func (ma *managedApp) dropIf(inst *instance) {
+	ma.mu.Lock()
+	defer ma.mu.Unlock()
+	if ma.current == inst {
+		ma.current = nil
 		ma.activeSocket.Store(nil)
 		inst.sock.retire()
 	}

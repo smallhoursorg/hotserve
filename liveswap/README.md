@@ -343,10 +343,22 @@ the release itself is broken — watch `restarts_in_window` in the
 status JSON (loop alerting is on the roadmap). Health probes never
 follow redirects: a 3xx answer is simply "not 2xx".
 
+A relaunch runs the deploy's pre-flight first, and a release it
+refuses is not retried: one built for another machine (a backup
+restored onto a box of the other architecture), or whose command is
+no longer there or outside the sandbox view, would only die as
+`203/EXEC` on every attempt. The watchdog then drops the instance —
+nothing current, the proxy answers 5xx — logs the refusal once, parks
+in `idle`, and status names it in `last_failure`; boot recovery
+refuses such a release the same way, in the same field. A deploy, or
+a reload once the cause is fixed, launches the app again.
+
 The status JSON's `watchdog` object reports `state`
 (`grace|watching|backoff|throttled|disabled|idle`),
 `consecutive_failures`, `restarts_in_window`, `last_restart_at`,
-`last_restart_cause` (`crash|health`) and `last_failure`.
+`last_restart_cause` (`crash|health`) and `last_failure` (the last
+failed probe, or why nothing runs: a relaunch refused, a boot
+recovery that gave up).
 `restarts_in_window` is what the budget counts: it includes a restart
 still waiting out its `backoff` (dropped again if that restart is
 called off), and a relaunch that failed to start, while
@@ -443,7 +455,10 @@ view is refused before the unit is even created — at the deploy's
 pre-flight, as a 422 — with a message that says where the runtime has
 to live, rather than failing as a bare `203/EXEC`. The same pre-flight
 refuses an executable built for another machine (an x86-64 tarball
-pushed to an arm64 box) naming the `runs-on` to build on.
+pushed to an arm64 box) naming the `runs-on` to build on. Every
+relaunch — boot recovery, a watchdog restart, a rollback — runs it
+too, and stops at a refusal rather than retrying it (see
+[Watchdog](#watchdog)).
 
 **The host is measured at start.** Capability is probed by running a
 throwaway unit and checking the namespaces from inside

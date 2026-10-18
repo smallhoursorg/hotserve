@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -925,4 +926,104 @@ func TestIntegrationRollback(t *testing.T) {
 			t.Fatalf("rollback to missing version: got %d, want 422", code)
 		}
 	})
+}
+
+// appUnits is every unit the manager holds for app, in any state.
+func appUnits(t *testing.T, app string) string {
+	t.Helper()
+	return strings.TrimSpace(run(t, "systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "hotserve-"+app+".*"))
+}
+
+// A release that cannot run on this box is refused at the relaunch's
+// pre-flight, once, on the real runner: the watchdog's restart of a
+// crashed instance whose executable became one for another machine,
+// and then a reload's recovery of the same release. No unit is started
+// to die 203/EXEC, nothing loops, status names the architecture, and a
+// deploy of a release that can run brings the app back.
+func TestIntegrationRelaunchRefusedAtPreflight(t *testing.T) {
+	var other uint16 // a machine that is not this box's
+	switch runtime.GOARCH {
+	case "amd64":
+		other = 183 // AArch64
+	case "arm64":
+		other = 62 // x86-64
+	default:
+		t.Skipf("no hosted box is %s", runtime.GOARCH)
+	}
+	bin := buildTestApp(t)
+	root := t.TempDir()
+	artifactSrv := serveArtifacts(t, map[string][]byte{
+		"/demo-v1.tar.gz": packRelease(t, bin, "v1", false),
+		"/demo-v2.tar.gz": packRelease(t, bin, "v2", false),
+	})
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const app = "archdemo"
+	config := watchdogConfig(root, artifactURL.Port(), app, 50, "10m")
+	tester := caddytest.NewTester(t)
+	tester.InitServer(config, "caddyfile")
+	if resp, body := postDeployApp(t, app, artifactSrv.URL+"/demo-v1.tar.gz", "v1"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("deploy v1: %d %s", resp.StatusCode, body)
+	}
+	pid := currentPIDApp(t, app)
+
+	// The executable becomes one for another machine under the running
+	// instance (a new inode: the running one is busy), and the instance
+	// dies.
+	server := filepath.Join(root, app, "releases", "v1", "server")
+	if err := os.Remove(server); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(server, elfHeader(2, false, other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	const named = "build on a runner of the box's architecture"
+	var status string
+	pollUntil(t, 15*time.Second, "the watchdog's relaunch refused", func() bool {
+		_, status = getStatusApp(t, app)
+		return strings.Contains(status, named)
+	})
+	// Refused once: a loop would claim a budget slot every backoff step.
+	time.Sleep(4 * time.Second)
+	_, status = getStatusApp(t, app)
+	for _, want := range []string{`"state":"idle"`, `"restarts_in_window":1`, named} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status after the refusal lacks %s: %s", want, status)
+		}
+	}
+	for _, unwanted := range []string{`"current_version"`, `"last_restart_cause"`} {
+		if strings.Contains(status, unwanted) {
+			t.Fatalf("a refused relaunch is no restart and leaves nothing current (%s): %s", unwanted, status)
+		}
+	}
+	pollUntil(t, 5*time.Second, "no unit of the app left", func() bool { return appUnits(t, app) == "" })
+	if code, _ := tryBody(); code < 500 {
+		t.Fatalf("nothing serves after the refusal, got %d", code)
+	}
+
+	// A reload's recovery meets the same refusal, once, by name. (A
+	// changed config: Caddy skips loading one identical to the running.)
+	tester.InitServer(watchdogConfig(root, artifactURL.Port(), app, 49, "10m"), "caddyfile")
+	pollUntil(t, 10*time.Second, "recovery's relaunch refused", func() bool {
+		_, status = getStatusApp(t, app)
+		return strings.Contains(status, `relaunching v1: this box is `+runtime.GOARCH)
+	})
+	if units := appUnits(t, app); units != "" {
+		t.Fatalf("recovery's refusal started a unit:\n%s", units)
+	}
+
+	if resp, body := postDeployApp(t, app, artifactSrv.URL+"/demo-v2.tar.gz", "v2"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("deploy v2: %d %s", resp.StatusCode, body)
+	}
+	if code, page := getBody(t); code != http.StatusOK || !strings.HasPrefix(page, "hello v2") {
+		t.Fatalf("v2 must serve: %d %q", code, page)
+	}
+	if _, status = getStatusApp(t, app); strings.Contains(status, named) {
+		t.Fatalf("a deploy clears the refusal: %s", status)
+	}
 }

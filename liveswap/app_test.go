@@ -297,6 +297,23 @@ func (r *fakeRunner) startCount() int {
 	return len(r.started)
 }
 
+func (r *fakeRunner) setPreflightErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preflightErr = err
+}
+
+// lastPreflightAndStart is the spec the last pre-flight checked and the
+// one the last Start (or RunOnce) launched.
+func (r *fakeRunner) lastPreflightAndStart() (preflight, started startSpec, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.preflights) == 0 || len(r.started) == 0 {
+		return startSpec{}, startSpec{}, len(r.preflights)
+	}
+	return r.preflights[len(r.preflights)-1], r.started[len(r.started)-1], len(r.preflights)
+}
+
 func (r *fakeRunner) handleAt(i int) *fakeHandle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
