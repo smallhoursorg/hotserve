@@ -129,8 +129,12 @@ var _ stateStore = (*fileStateStore)(nil)
 // record (readOwnFile) in a directory no app's view holds, and only
 // from a record that proves itself one. Three refinements:
 //
-//   - The version the deploy running GC promoted is newest: it was
-//     deployed now, and its record is written as the deploy returns.
+//   - In GC, the version the deploy promoted is newest — it was
+//     deployed now, and its record is written as the deploy returns —
+//     and the version it replaced, the way back, comes next, whatever
+//     its record says: a rollback whose record write was lost (a
+//     crash after the cutover, a full disk) leaves that version's
+//     record at an older deploy, and it must not be pruned for that.
 //   - A release whose latest deploy failed — a rollback to it that
 //     failed, or a failed deploy whose release was left on disk —
 //     comes after every release whose latest deploy succeeded: that
@@ -152,24 +156,35 @@ type release struct {
 
 // placeRelease is e's place in the order, from its record in records
 // (the records dir, or "" for none), else from its dir's mtime; false
-// when neither can be read.
-func placeRelease(records string, e os.DirEntry) (release, bool) {
-	if at, failed, ok := recordedDeploy(records, e.Name()); ok {
-		return release{name: e.Name(), at: at, failed: failed}, true
+// when the dir itself cannot be read. err is a record that is there
+// and cannot be read (recordedDeploy): the release is placed by mtime
+// like one with none, for the status to name, and GC prunes nothing.
+func placeRelease(records string, e os.DirEntry) (release, bool, error) {
+	at, failed, ok, err := recordedDeploy(records, e.Name())
+	if ok {
+		return release{name: e.Name(), at: at, failed: failed}, true, nil
 	}
-	info, err := e.Info()
-	if err != nil {
-		return release{}, false
+	info, ierr := e.Info()
+	if ierr != nil {
+		return release{}, false, err
 	}
-	return release{name: e.Name(), at: info.ModTime(), byMtime: true}, true
+	return release{name: e.Name(), at: info.ModTime(), byMtime: true}, true, err
 }
 
-// newestFirst sorts rels into the order above, first (when not "")
-// ahead of every other.
-func newestFirst(rels []release, first string) {
+// newestFirst sorts rels into the order above, the names in first
+// (those not "") ahead of every other, in the order given.
+func newestFirst(rels []release, first ...string) {
+	rank := func(name string) int {
+		for i, f := range first {
+			if f != "" && name == f {
+				return i
+			}
+		}
+		return len(first)
+	}
 	sort.Slice(rels, func(i, j int) bool {
-		if (rels[i].name == first) != (rels[j].name == first) {
-			return rels[i].name == first
+		if ri, rj := rank(rels[i].name), rank(rels[j].name); ri != rj {
+			return ri < rj
 		}
 		if rels[i].failed != rels[j].failed {
 			return !rels[i].failed
@@ -205,7 +220,7 @@ func listReleases(d appDirs) (versions, byMtime []string) {
 	if err != nil {
 		return nil, nil
 	}
-	// Records that cannot be read place every release by mtime, and
+	// Records that cannot be read place their releases by mtime, and
 	// the status names each so; only GC must refuse to act on that.
 	records, _ := orderRecords(d)
 	var rels []release
@@ -217,11 +232,11 @@ func listReleases(d appDirs) (versions, byMtime []string) {
 		if !e.IsDir() || !validVersion(e.Name()) {
 			continue
 		}
-		if r, ok := placeRelease(records, e); ok {
+		if r, ok, _ := placeRelease(records, e); ok { // unreadable: by mtime, named
 			rels = append(rels, r)
 		}
 	}
-	newestFirst(rels, "")
+	newestFirst(rels)
 	versions = make([]string, len(rels))
 	for i, r := range rels {
 		versions[i] = r.name
@@ -235,20 +250,22 @@ func listReleases(d appDirs) (versions, byMtime []string) {
 // gcReleases prunes the releases directory down to the newest keep
 // releases in the order above: protect — the version this deploy
 // promoted, now serving — first, so it is never deleted and holds one
-// of the keep places. It prunes nothing, and says why, when the
-// releases dir is not the directory it names (ownDir: through a link
-// it would delete another app's releases) or the records cannot be
-// read (the order would then be the app's to set). Failures are
-// logged, not fatal: GC must never break a deploy that already
-// succeeded.
-func gcReleases(d appDirs, keep int, protect string, logger *zap.Logger) {
+// of the keep places, then previous — the version it replaced, the
+// way back; "" when none, or protect itself on a relaunch. It deletes
+// nothing, and says why, when the releases dir is not the directory it
+// names (ownDir: through a link it would delete another app's
+// releases) or a deploy record is there and cannot be read (the order
+// would then be one the app can set). Failures are logged, not fatal:
+// GC must never break a deploy that already succeeded.
+func gcReleases(d appDirs, keep int, protect, previous string, logger *zap.Logger) {
 	if err := d.ownDir(d.releases); err != nil {
 		logger.Error("release GC: not pruning", zap.Error(err))
 		return
 	}
+	const unreadable = "release GC: not pruning: a deploy record cannot be read, and without it the order is one the app can set"
 	records, err := orderRecords(d)
 	if err != nil {
-		logger.Error("release GC: not pruning: the deploy records cannot be read, and without them the order is one the app can set", zap.Error(err))
+		logger.Error(unreadable, zap.Error(err))
 		return
 	}
 	entries, err := os.ReadDir(d.releases)
@@ -256,7 +273,10 @@ func gcReleases(d appDirs, keep int, protect string, logger *zap.Logger) {
 		logger.Warn("release GC: cannot list releases", zap.Error(err))
 		return
 	}
-	var rels []release
+	var (
+		rels    []release
+		staging []string
+	)
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), ".extract-") {
 			// A staging dir still present here is a crash orphan:
@@ -264,23 +284,31 @@ func gcReleases(d appDirs, keep int, protect string, logger *zap.Logger) {
 			// running this GC renamed its own staging away before the
 			// call. Left alone they accumulate forever, invisible —
 			// hidden by the same dot-prefix that exempts them below.
-			if err := os.RemoveAll(filepath.Join(d.releases, e.Name())); err != nil {
-				logger.Warn("release GC: cannot remove orphaned staging dir",
-					zap.String("dir", e.Name()), zap.Error(err))
-			} else {
-				logger.Info("release GC: removed orphaned staging dir",
-					zap.String("dir", e.Name()))
-			}
+			staging = append(staging, e.Name())
 			continue
 		}
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue // dotfile strays are not ours to manage
 		}
-		if r, ok := placeRelease(records, e); ok {
+		r, ok, err := placeRelease(records, e)
+		if err != nil {
+			logger.Error(unreadable, zap.String("version", e.Name()), zap.Error(err))
+			return
+		}
+		if ok {
 			rels = append(rels, r)
 		}
 	}
-	newestFirst(rels, protect)
+	for _, name := range staging {
+		if err := os.RemoveAll(filepath.Join(d.releases, name)); err != nil {
+			logger.Warn("release GC: cannot remove orphaned staging dir",
+				zap.String("dir", name), zap.Error(err))
+		} else {
+			logger.Info("release GC: removed orphaned staging dir",
+				zap.String("dir", name))
+		}
+	}
+	newestFirst(rels, protect, previous)
 	for i, r := range rels {
 		if i < keep || r.name == protect {
 			continue

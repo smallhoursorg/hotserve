@@ -350,7 +350,8 @@ func TestReleaseOrderLedger(t *testing.T) {
 	type rel struct {
 		name string
 		// record is the outcome its deploy record holds: "" for none,
-		// "forged" for a file under its name that names another version.
+		// "forged" for a file under its name that names another version,
+		// "unreadable" for something there that cannot be read as one.
 		record string
 		rec    time.Time // when hotserve wrote the record
 		dir    time.Time // the release dir's mtime: the app's to set
@@ -361,6 +362,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 		linkRecords bool // deploys/ is a planted link: no record is read through it
 		keep        int
 		protect     string // the version the deploy running GC promoted
+		previous    string // the version it replaced
 		available   string // listReleases, newest first
 		byMtime     string // the entries it names as placed by mtime
 		kept        string // on disk after GC, by name
@@ -416,6 +418,26 @@ func TestReleaseOrderLedger(t *testing.T) {
 			},
 			keep: 2, protect: "v3",
 			available: "v3 v2 v1", byMtime: "v3", kept: "v2 v3",
+		},
+		{
+			name: "a rollback whose record write was lost: the version it put in service is kept next to the new one",
+			rels: []rel{
+				{"v1", "succeeded", at(1), at(1)}, // rolled back to after v2; that record never landed
+				{"v2", "succeeded", at(2), at(2)},
+				{"v3", "", time.Time{}, at(4)}, // this deploy's, replacing v1
+			},
+			keep: 2, protect: "v3", previous: "v1",
+			available: "v3 v2 v1", byMtime: "v3", kept: "v1 v3",
+		},
+		{
+			name: "a record that is there but cannot be read: listed by mtime and named, and GC deletes nothing",
+			rels: []rel{
+				{"v1", "succeeded", at(1), at(1)},
+				{"v2", "unreadable", at(5), at(2)},
+				{"v3", "succeeded", at(3), at(3)},
+			},
+			keep: 1, protect: "v3", previous: "v2",
+			available: "v3 v2 v1", byMtime: "v2", kept: "v1 v2 v3",
 		},
 		{
 			name: "a release with no record (deployed before records existed) is placed by its dir's mtime, and named",
@@ -478,6 +500,10 @@ func TestReleaseOrderLedger(t *testing.T) {
 				case "":
 				case "forged":
 					must(t, writeDeployRecord(d, r.name, []byte(`{"version":"other","status":"succeeded"}`)))
+				case "unreadable": // a directory at the record's name: open, stat, not a regular file
+					_, err := recordsDir(d, true)
+					must(t, err)
+					must(t, os.Mkdir(deployRecordPath(d.deploys, r.name), 0o750))
 				default:
 					must(t, writeDeployRecord(d, r.name, []byte(`{"version":"`+r.name+`","status":"`+r.record+`"}`)))
 				}
@@ -502,7 +528,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 				t.Errorf("ordered_by_mtime = %q, want %q", got, tc.byMtime)
 			}
 
-			gcReleases(d, tc.keep, tc.protect, zap.NewNop())
+			gcReleases(d, tc.keep, tc.protect, tc.previous, zap.NewNop())
 			onDisk, err := releaseNames(d.releases)
 			must(t, err)
 			sort.Strings(onDisk)
@@ -549,7 +575,7 @@ func TestGCReleasesDoesNotPruneThroughALink(t *testing.T) {
 			}
 			tc.plant(t, demo, shop)
 			core, logs := observer.New(zap.ErrorLevel)
-			gcReleases(demo, 1, "v3", zap.New(core))
+			gcReleases(demo, 1, "v3", "", zap.New(core))
 			onDisk, err := releaseNames(shop.releases)
 			must(t, err)
 			sort.Strings(onDisk)
@@ -560,6 +586,31 @@ func TestGCReleasesDoesNotPruneThroughALink(t *testing.T) {
 				t.Fatalf("the refusal must be logged once: %v", logs.All())
 			}
 		})
+	}
+}
+
+// A deploy record that is there but cannot be read is not a missing
+// one: GC deletes nothing — not even a crash's staging dir — and names
+// the record.
+func TestGCReleasesStopsOnAnUnreadableRecord(t *testing.T) {
+	d := newAppDirs(t.TempDir(), "demo")
+	for _, v := range []string{"v1", "v2", "v3"} {
+		must(t, os.MkdirAll(d.release(v), 0o750))
+		must(t, writeDeployRecord(d, v, []byte(`{"version":"`+v+`","status":"succeeded"}`)))
+	}
+	must(t, os.Remove(deployRecordPath(d.deploys, "v1")))
+	must(t, os.Mkdir(deployRecordPath(d.deploys, "v1"), 0o750))
+	must(t, os.Mkdir(filepath.Join(d.releases, ".extract-x"), 0o750))
+	core, logs := observer.New(zap.ErrorLevel)
+	gcReleases(d, 1, "v3", "v2", zap.New(core))
+	entries, err := os.ReadDir(d.releases)
+	must(t, err)
+	if len(entries) != 4 {
+		t.Fatalf("GC deleted through an unreadable record: %v", entries)
+	}
+	got := logs.FilterMessageSnippet("a deploy record cannot be read").All()
+	if len(got) != 1 || got[0].ContextMap()["version"] != "v1" {
+		t.Fatalf("want one refusal naming v1: %v", logs.All())
 	}
 }
 
@@ -581,7 +632,7 @@ func TestGCReleases(t *testing.T) {
 
 	// keep 2, protect the OLDEST (a rollback to v1): v1 is this
 	// deploy's, so newest, and holds one of the two places.
-	gcReleases(d, 2, "v1", zap.NewNop())
+	gcReleases(d, 2, "v1", "", zap.NewNop())
 
 	for _, v := range []string{"v1", "v4"} {
 		if _, err := os.Stat(filepath.Join(dir, v)); err != nil {

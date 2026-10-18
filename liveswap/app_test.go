@@ -946,6 +946,27 @@ func TestAFailedRollbackDoesNotPushOutTheVersionThatServed(t *testing.T) {
 	}
 }
 
+// A rollback whose record write is lost (a crash after the cutover, a
+// full disk) leaves its version's record at the deploy before: the
+// next deploy's GC still keeps that version, since it is the one the
+// new deploy replaced. keep 2: v1, v2, a rollback to v1 whose record
+// keeps v1's first time, then v3 — v1 and v3 stay.
+func TestALostRollbackRecordDoesNotPruneTheVersionThatServed(t *testing.T) {
+	rig := newTestRig(t)
+	base := time.Now().Add(-time.Hour)
+	deployAt(t, rig, "v1", base, 0)
+	deployAt(t, rig, "v2", base, 1)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}))
+	must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, "v1"), base, base)) // the rollback's record never landed
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v3", version: "v3"}))
+	onDisk, err := releaseNames(rig.spec.dirs.releases)
+	must(t, err)
+	slices.Sort(onDisk)
+	if !slices.Equal(onDisk, []string{"v1", "v3"}) {
+		t.Fatalf("GC left %v, want v1 v3: v1 is the way back from v3", onDisk)
+	}
+}
+
 // A link at the app dir is refused once per prune, naming the app dir,
 // not once for each of run/ and proxy/.
 func TestPruneRefusesALinkOnce(t *testing.T) {

@@ -368,22 +368,28 @@ func recordedPin(d appDirs, version string) string {
 // records (a directory recordsDir vouched for; "" for none) — the
 // version's deploy time, which orders the releases (state.go) — and
 // whether that deploy failed. ok is false when there is no record that
-// proves itself one (rule 1): the name is not a version, the file is a
-// link or not a record of it.
-func recordedDeploy(records, version string) (written time.Time, failed, ok bool) {
+// proves itself one (rule 1): none under the name, the name is not a
+// version, or the object is not a record of it. err is a record that
+// is there and cannot be read — permissions, I/O, a link or anything
+// but a regular file at its name — which is not the same as none: GC
+// must not act on an order it could not read.
+func recordedDeploy(records, version string) (written time.Time, failed, ok bool, err error) {
 	if records == "" || !validVersion(version) {
-		return time.Time{}, false, false
+		return time.Time{}, false, false, nil
 	}
 	name := versionPathComponent(version) + ".json"
 	b, written, err := openRecord(filepath.Join(records, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, false, false, nil
+	}
 	if err != nil {
-		return time.Time{}, false, false
+		return time.Time{}, false, false, err
 	}
 	s, ok := recordHead(b, name)
 	if !ok {
-		return time.Time{}, false, false
+		return time.Time{}, false, false, nil
 	}
-	return written, s.Status == "failed", true
+	return written, s.Status == "failed", true, nil
 }
 
 // errNoDeployRecord is a version no deploy has been recorded for.

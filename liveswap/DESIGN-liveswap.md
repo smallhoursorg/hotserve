@@ -176,7 +176,9 @@ Concept map from the Nomad-era stack:
 - Release GC MUST run only after successful deploys and keep the
   `keep` most recently deployed releases, the one the deploy promoted
   first — so the serving version is never deleted and counts toward
-  `keep`. A release's deploy time MUST be one no app can write: its
+  `keep` — and the one it replaced next, the way back, by what served
+  rather than by its record (a rollback whose record write was lost
+  leaves that version's record at an older deploy). A release's deploy time MUST be one no app can write: its
   deploy record's write time (`deploys/`, outside every view; the
   version's latest deploy or rollback), never the release dir's own
   mtime, which the app running from that dir can set to anything. A
@@ -190,8 +192,10 @@ Concept map from the Nomad-era stack:
   rollback targets an operator sees are the ones GC keeps. GC MUST
   prune nothing, and log why, when the releases dir is not the
   directory it names (`appDirs.ownDir`: through a link it would delete
-  another app's releases) or the records cannot be read (a planted
-  link at `deploys/`: the order would be the app's to set). A failed URL or push deploy's freshly extracted release dir is
+  another app's releases) or a record cannot be read — the records
+  dir refused as a planted link, or a record that is there but
+  unreadable (permissions, I/O, not a regular file), which is not the
+  same as none: the order would be the app's to set. A failed URL or push deploy's freshly extracted release dir is
   removed (a rollback, or a relaunch of the running version, launches
   an existing release and never deletes it), so its version stays
   retriable — unless the failed instance

@@ -977,7 +977,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		logger.Warn("skipping release GC for this deploy")
 		return nil
 	}
-	gcReleases(spec.dirs, spec.keep, req.version, logger)
+	// The version old ran is the way back from this one: GC keeps it
+	// next to the new one, by what served rather than by its record,
+	// which a lost write could have left at an older deploy.
+	previous := ""
+	if old != nil {
+		previous = old.version
+	}
+	gcReleases(spec.dirs, spec.keep, req.version, previous, logger)
 	return nil
 }
 

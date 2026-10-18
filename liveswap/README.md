@@ -284,7 +284,7 @@ resolved at config load.
 | `watchdog_grace` | `30s` | After every (re)start, probe failures don't count until this elapses; a crash always counts |
 | `watchdog_restarts` | `5` | Restart budget within `watchdog_window`; crash and health restarts share it |
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
-| `keep` | `5` | Release dirs retained (GC after success): the `keep` most recently deployed, a rollback counting as a deploy of its version. The version the deploy promoted is always one of them |
+| `keep` | `5` | Release dirs retained (GC after success): the `keep` most recently deployed, a rollback counting as a deploy of its version. The version the deploy promoted is always one of them, and the version it replaced is the next |
 | `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
