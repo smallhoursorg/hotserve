@@ -84,14 +84,26 @@ func TestTheShippedUnitsSayWhatTheDesignLists(t *testing.T) {
 	if _, ok := svc["Install"]; ok {
 		t.Error("the service has an [Install] section: the path unit is its only start")
 	}
-	// RestrictAddressFamilies= holds only with both routes around it
-	// closed, as for app units (#298): an io_uring ring's socket op, and
-	// on amd64 the x86-32 ABI's socketcall().
-	if got := svc["Service"]["SystemCallFilter"]; !slices.Equal(got, []string{"@system-service", "~io_uring_setup"}) {
-		t.Errorf("SystemCallFilter %q: want @system-service, then ~io_uring_setup on a line of its own", got)
-	}
+	// Two routes around RestrictAddressFamilies= closed, as for app units
+	// (#298): an io_uring ring's socket op, and on amd64 the x86-32 ABI's
+	// socketcall().
 	if got := svc["Service"]["SystemCallArchitectures"]; !slices.Equal(got, []string{"native"}) {
-		t.Errorf("SystemCallArchitectures %q: want native", got)
+		t.Errorf("SystemCallArchitectures %q: on amd64 the x86-32 ABI's socketcall() opens any family", got)
+	}
+	filters := svc["Service"]["SystemCallFilter"]
+	if len(filters) == 0 || strings.HasPrefix(filters[0], "~") || !slices.Contains(strings.Fields(filters[0]), "@system-service") {
+		t.Errorf("SystemCallFilter %q: the first line must be the @system-service allow list, or the manager builds a deny list", filters)
+	}
+	denied := false
+	for _, f := range filters[min(1, len(filters)):] {
+		rest, ok := strings.CutPrefix(f, "~")
+		if !ok {
+			t.Errorf("SystemCallFilter=%s after the first line adds back what a deny line took out", f)
+		}
+		denied = denied || slices.Contains(strings.Fields(rest), "io_uring_setup")
+	}
+	if !denied {
+		t.Errorf("SystemCallFilter %q still allows io_uring_setup: a ring opens sockets RestrictAddressFamilies= never sees", filters)
 	}
 	for key, want := range map[string][]string{
 		"DirectoryNotEmpty": {exchangeTree + "/in", exchangeTree + "/work"},
