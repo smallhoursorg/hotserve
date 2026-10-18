@@ -38,8 +38,14 @@ files/env/releases, TLS keys, admin socket, sibling `/proc`, signals).
 What this does NOT stop, stated honestly: theft of the compromised
 app's own secrets (its env is its env), network exfiltration (netns is
 shared by design), resource exhaustion (caps are unset until an app
-needs them — #71), and install-time supply-chain attacks (those run in
-CI, not on the box).
+needs them — #71), install-time supply-chain attacks (those run in
+CI, not on the box), and IPC between siblings: every app shares the
+user manager's SysV IPC and POSIX message queues, and the host's
+`/dev/shm`, where POSIX shared memory and named semaphores live, which
+`PrivateDevices=` binds into every unit. `PrivateIPC=` would cover the
+first two, but on systemd 257's user manager it fails every unit's
+`ExecStopPost=` with 226/NAMESPACE, and it does not cover `/dev/shm`
+(#311, owed: S3 × O3 × D5 = 45).
 
 The mount namespace alone does not close the threat model: the
 attacker just described dumps `process.env` first, and a stolen ACME
@@ -225,10 +231,40 @@ below as a contract the sandbox path must keep.
   `ProtectKernelModules=`, `ProtectKernelLogs=`,
   `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK`
   (netlink read-only for `getifaddrs()`, which runtimes call at
-  startup), and `SystemCallFilter=@system-service` with
-  `SystemCallErrorNumber=EPERM` — systemd's curated allowlist, adopted
-  wholesale, which is the bar the non-goals below set for any seccomp
-  filter. Pinned by `TestSandboxPropertiesEveryUnit`.
+  startup), `SystemCallFilter=@system-service` less `io_uring_setup`,
+  with `SystemCallErrorNumber=EPERM` — systemd's curated allowlist,
+  adopted wholesale, which is the bar the non-goals below set for any
+  seccomp filter, with one call taken out — and
+  `SystemCallArchitectures=native`. Pinned by
+  `TestSandboxPropertiesEveryUnit`.
+- An app's sockets MUST be of the families `RestrictAddressFamilies=`
+  names, however they are created. That filter acts on `socket(2)`
+  alone, and two other routes reach a socket. `@aio`, inside
+  `@system-service`, admits `io_uring_setup`: a ring's
+  `IORING_OP_SOCKET` (kernel 5.19+; Debian 13 ships 6.12) opens a
+  socket of any family without that call, which would leave `AF_ALG`
+  and `AF_VSOCK` one ring away. So the filter takes `io_uring_setup`
+  back out (`SystemCallFilter=~io_uring_setup`, after the allow list:
+  the first entry sets the filter's mode), and with no ring
+  `io_uring_enter` and `io_uring_register` have nothing to act on. And
+  on amd64 the kernel also runs the x86-32 ABI, where `socket(2)` is
+  reached through `socketcall()` and systemd applies no address-family
+  filter at all, so `SystemCallArchitectures=native` takes that ABI
+  away. A 32-bit executable would die at its first system call, so the
+  deploy's pre-flight refuses one as a 422 naming the setting
+  (`checkMachine`, liveswap/elf.go). Pinned by
+  `TestNoSocketBypassesTheAddressFamilyFilter` and
+  `TestCheckMachineRefusesA32BitExecutable`; the integration, e2e and
+  install-test lanes read the built filter and the architecture back
+  off a live unit. What it costs the runtimes, checked 2026-10-18:
+  Node's libuv sets up a ring for batching `epoll_ctl` at every loop
+  start and, refused, uses plain `epoll_ctl` (`uv__iou_init`, libuv
+  1.51), and the Node example starts in the e2e lane; Deno's event
+  loop is tokio's epoll, and the Deno example starts in the same lane;
+  Bun has no lane, and its event loop is usockets' epoll backend
+  (`packages/bun-usockets/src/eventing/` holds `epoll_kqueue.c` and,
+  for Windows, `libuv.c`), with no `io_uring` call in its runtime
+  (oven-sh/bun `ed58ba2`).
 - The network namespace MUST be shared: apps make outbound calls and
   reach a same-box database over loopback. The app itself listens on
   a per-instance unix socket in its own `run/<nonce>/` (`SOCKET`); nothing
@@ -484,7 +520,8 @@ testing that `/etc/ssl/private` stays out of the view.
   file/process isolation without them.
 - Hand-rolled seccomp filtering — exactly the "looks configured,
   quietly weaker" trap. systemd's curated `@system-service` set is a
-  vetted filter adopted wholesale.
+  vetted filter adopted wholesale. Taking a call out of it, as
+  `io_uring_setup` above, narrows that set; it does not write a list.
 - Protecting an app from itself — its own env and its own database
   are legitimately reachable by definition.
 - macOS/Windows sandboxing — servers are Linux; elsewhere the probe
@@ -563,3 +600,9 @@ Dated one-liners; the full text of each is in git.
   the box's first config, so an older release installed and failed
   there. The probe still decides; the floor moves the commonest refusal
   to install.
+- 2026-10-18 (#298) — `io_uring_setup` taken out of `@system-service`
+  and `SystemCallArchitectures=native` added: an io_uring ring, and on
+  amd64 the x86-32 ABI's `socketcall()`, opened sockets of families
+  `RestrictAddressFamilies=` leaves out. 32-bit executables are refused
+  at the deploy's pre-flight. `PrivateIPC=` was measured breaking
+  `ExecStopPost=` on systemd 257's user manager and moved to #311.

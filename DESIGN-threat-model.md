@@ -937,7 +937,8 @@ it binds nothing of an app's and has no socket.
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
   `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app
-  cannot create further namespaces).
+  cannot create further namespaces). No `PrivateIPC=`: see "Sibling
+  IPC" under "Residual risks".
 - View: `TemporaryFileSystem=/:ro` replaces the whole filesystem with
   an empty read-only tmpfs; `BindReadOnlyPaths=` puts back a named OS
   base view and `BindPaths=` the release being started, the app's
@@ -953,12 +954,17 @@ it binds nothing of an app's and has no socket.
   `ProtectKernelTunables=`, `ProtectKernelModules=`,
   `ProtectKernelLogs=`, `RestrictRealtime=`, `RestrictSUIDSGID=`,
   `LockPersonality=`, `NoNewPrivileges=`, `CapabilityBoundingSet=`
-  (empty), `SystemCallFilter=@system-service` with
-  `SystemCallErrorNumber=EPERM`, `RestrictAddressFamilies=AF_INET
-  AF_INET6 AF_UNIX AF_NETLINK` (netlink for `getifaddrs()`, which Node
-  and Go frameworks call at startup; the socket itself is not
-  read-only, but changing a link, an address or a route needs
-  `CAP_NET_ADMIN`, which nothing in the unit holds).
+  (empty), `SystemCallFilter=@system-service` less `io_uring_setup`,
+  with `SystemCallErrorNumber=EPERM`, `SystemCallArchitectures=native`,
+  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK`
+  (netlink for `getifaddrs()`, which Node and Go frameworks call at
+  startup; the socket itself is not read-only, but changing a link, an
+  address or a route needs `CAP_NET_ADMIN`, which nothing in the unit
+  holds). The family list filters `socket(2)` alone: an io_uring
+  ring's `IORING_OP_SOCKET` (kernel 5.19+) opens a socket of any family
+  without it, so no unit can set up a ring, and on amd64 the x86-32
+  ABI's `socketcall()` is not filtered at all, so no unit runs that
+  ABI (the deploy refuses a 32-bit executable).
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
   restarter of apps; hotserve.service itself is restarted by systemd
   after a crash, never after a refused start), `KillMode=control-group`,
@@ -1104,6 +1110,15 @@ does not isolate the runtime.
   outside the view like the rest of the sibling.
   What remains is an app that opens a loopback listener of its own
   accord: that port is reachable by siblings, by the app's own choice.
+- **Sibling IPC** — open, owed (#311; S3 × O3 × D5 = 45). Every app
+  shares the user manager's SysV IPC objects and POSIX message queues,
+  and the host's `/dev/shm`, which `PrivateDevices=` binds into every
+  unit and where POSIX shared memory and named semaphores live; one
+  uid means their permission bits stop no sibling. `PrivateIPC=` would
+  close the first two, but on systemd 257's user manager each process
+  of a unit gets its own user namespace, so the unit's `ExecStopPost=`
+  cannot join the IPC namespace its main process made and fails
+  226/NAMESPACE (measured), and it would leave `/dev/shm` shared.
 - **The socket name is app-writable, and `connect(2)` follows
   symlinks.** The instance's `run/<nonce>/` is bound writable, so an
   app can replace its socket with a symlink to a socket outside its
@@ -1280,3 +1295,7 @@ Dated one-liners; the full text of each is in git.
   under a file `core_pattern` (Debian's default), by the collector's
   own limit check under a piped one. No app can write a core dump for
   debugging.
+- 2026-10-18 (#298) — The syscall filter takes `io_uring_setup` out of
+  `@system-service` and app units run the native ABI only: no app
+  opens a socket of a family `RestrictAddressFamilies=` leaves out.
+  Sibling IPC joined the residual risks (#311).
