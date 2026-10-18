@@ -2284,11 +2284,11 @@ func treeOf(t *testing.T, dir string) []string {
 
 // A deploy or rollback into an app dir that is not the directory it
 // names is refused before it reads or writes anything through it
-// (#300): through `<root>/demo -> shop`, or a linked releases/, tmp/
-// or proxy/, nothing lands in shop's dirs, nothing is fetched or
-// launched, and the refusal names demo's own path, never shop's.
+// (#300): through `<root>/demo -> shop`, or any of the dirs it makes
+// linked to shop's, nothing lands in shop's dirs, nothing is fetched
+// or launched, and the refusal names demo's own path, never shop's.
 func TestDeployRefusesAnAppDirThatIsALink(t *testing.T) {
-	for _, link := range []string{"", "releases", "tmp", "proxy"} {
+	for _, link := range []string{"", "releases", "shared", "tmp", "run", "proxy"} {
 		for _, req := range []deployRequest{
 			{url: "https://x/a.tgz", version: "v9"},
 			{version: "v1", rollback: true}, // a version shop has
