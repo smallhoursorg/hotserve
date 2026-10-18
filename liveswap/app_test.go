@@ -923,6 +923,44 @@ func TestStatusNamesReleasesPlacedByMtime(t *testing.T) {
 	}
 }
 
+// A rollback that fails writes its version's record, and that deploy
+// never served: the next deploy's GC keeps the version that served
+// through it, not the one that failed. keep 2, v2 serving, a failed
+// rollback to v1, then v3: v2 and v3 stay.
+func TestAFailedRollbackDoesNotPushOutTheVersionThatServed(t *testing.T) {
+	rig := newTestRig(t)
+	base := time.Now().Add(-time.Hour)
+	deployAt(t, rig, "v1", base, 0)
+	deployAt(t, rig, "v2", base, 1)
+	rig.prober.err = errors.New("never became healthy")
+	if err := rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}); err == nil {
+		t.Fatal("the rollback to v1 should have failed its health gate")
+	}
+	rig.prober.err = nil
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v3", version: "v3"}))
+	onDisk, err := releaseNames(rig.spec.dirs.releases)
+	must(t, err)
+	slices.Sort(onDisk)
+	if !slices.Equal(onDisk, []string{"v2", "v3"}) {
+		t.Fatalf("GC left %v, want v2 v3: v2 is the way back from v3", onDisk)
+	}
+}
+
+// A link at the app dir is refused once per prune, naming the app dir,
+// not once for each of run/ and proxy/.
+func TestPruneRefusesALinkOnce(t *testing.T) {
+	root := shortTempDir(t)
+	shop := newAppDirs(root, "shop")
+	must(t, shop.ensure())
+	demo := newAppDirs(root, "demo")
+	must(t, os.Symlink("shop", demo.app))
+	core, logs := observer.New(zap.ErrorLevel)
+	pruneSockets(demo, nil, zap.New(core))
+	if got := logs.FilterMessage("not pruning instance sockets").All(); len(got) != 1 || !strings.Contains(fmt.Sprint(got[0].ContextMap()["error"]), demo.app) {
+		t.Fatalf("want one refusal naming %s: %v", demo.app, logs.All())
+	}
+}
+
 func TestEnsureRunningRelaunchesFromState(t *testing.T) {
 	rig := newTestRig(t)
 	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}

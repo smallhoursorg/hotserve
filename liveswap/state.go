@@ -125,32 +125,37 @@ var _ stateStore = (*fileStateStore)(nil)
 // bound read-write into its sandbox (sandbox.go), so its pre_start and
 // its instance can set that dir's mtime to anything, future included.
 // The key is the release's deploy record's write time — when hotserve
-// last deployed or rolled back to that version, a failed attempt
-// included — read off the open record (readOwnFile) in a directory no
-// app's view holds, and only from a record that proves itself one.
-// Two exceptions:
+// last deployed or rolled back to that version — read off the open
+// record (readOwnFile) in a directory no app's view holds, and only
+// from a record that proves itself one. Three refinements:
 //
 //   - The version the deploy running GC promoted is newest: it was
 //     deployed now, and its record is written as the deploy returns.
+//   - A release whose latest deploy failed — a rollback to it that
+//     failed, or a failed deploy whose release was left on disk —
+//     comes after every release whose latest deploy succeeded: that
+//     deploy never served, and a failed rollback must not push the
+//     version that served before it out of keep.
 //   - A release with no such record — deployed before records
 //     existed, or its record could not be written — is placed by its
-//     dir's mtime, and the status names it (ordered_by_mtime): that
-//     one key is the app's to move.
+//     dir's mtime, among those that succeeded, and the status names it
+//     (ordered_by_mtime): that one key is the app's to move.
 //
 // Deploy times that tie order by name, so the order is the same on
 // every read.
 type release struct {
 	name    string
 	at      time.Time
+	failed  bool // its latest deploy failed
 	byMtime bool // no record: at is the dir's mtime
 }
 
 // placeRelease is e's place in the order, from its record in records
-// (the records dir, or "" when it is absent or refused), else from its
-// dir's mtime; false when neither can be read.
+// (the records dir, or "" for none), else from its dir's mtime; false
+// when neither can be read.
 func placeRelease(records string, e os.DirEntry) (release, bool) {
-	if at, ok := recordWriteTime(records, e.Name()); ok {
-		return release{name: e.Name(), at: at}, true
+	if at, failed, ok := recordedDeploy(records, e.Name()); ok {
+		return release{name: e.Name(), at: at, failed: failed}, true
 	}
 	info, err := e.Info()
 	if err != nil {
@@ -159,12 +164,15 @@ func placeRelease(records string, e os.DirEntry) (release, bool) {
 	return release{name: e.Name(), at: info.ModTime(), byMtime: true}, true
 }
 
-// newestFirst sorts rels by deploy time, first (when not "") ahead of
-// every other.
+// newestFirst sorts rels into the order above, first (when not "")
+// ahead of every other.
 func newestFirst(rels []release, first string) {
 	sort.Slice(rels, func(i, j int) bool {
 		if (rels[i].name == first) != (rels[j].name == first) {
 			return rels[i].name == first
+		}
+		if rels[i].failed != rels[j].failed {
+			return !rels[i].failed
 		}
 		if !rels[i].at.Equal(rels[j].at) {
 			return rels[i].at.After(rels[j].at)
@@ -173,16 +181,16 @@ func newestFirst(rels []release, first string) {
 	})
 }
 
-// readableRecordsDir is the records dir for placing releases, or ""
-// when there is none to read: absent before the first record, or
-// refused as a planted link (recordsDir). Every release is then placed
-// by its dir's mtime, and named so.
-func readableRecordsDir(d appDirs) string {
+// orderRecords is the records dir the order reads: "" when there is
+// none yet (no record was ever written, so every release is placed by
+// its dir's mtime), or why it cannot be read — refused as a planted
+// link (recordsDir), or unreadable.
+func orderRecords(d appDirs) (string, error) {
 	dir, err := recordsDir(d, false)
-	if err != nil {
-		return ""
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
 	}
-	return dir
+	return dir, err
 }
 
 // listReleases returns the on-disk release versions newest first (the
@@ -197,7 +205,9 @@ func listReleases(d appDirs) (versions, byMtime []string) {
 	if err != nil {
 		return nil, nil
 	}
-	records := readableRecordsDir(d)
+	// Records that cannot be read place every release by mtime, and
+	// the status names each so; only GC must refuse to act on that.
+	records, _ := orderRecords(d)
 	var rels []release
 	for _, e := range entries {
 		// A directory whose name is not a version is not a release:
@@ -225,15 +235,27 @@ func listReleases(d appDirs) (versions, byMtime []string) {
 // gcReleases prunes the releases directory down to the newest keep
 // releases in the order above: protect — the version this deploy
 // promoted, now serving — first, so it is never deleted and holds one
-// of the keep places. Failures are logged, not fatal: GC must never
-// break a deploy that already succeeded.
+// of the keep places. It prunes nothing, and says why, when the
+// releases dir is not the directory it names (ownDir: through a link
+// it would delete another app's releases) or the records cannot be
+// read (the order would then be the app's to set). Failures are
+// logged, not fatal: GC must never break a deploy that already
+// succeeded.
 func gcReleases(d appDirs, keep int, protect string, logger *zap.Logger) {
+	if err := d.ownDir(d.releases); err != nil {
+		logger.Error("release GC: not pruning", zap.Error(err))
+		return
+	}
+	records, err := orderRecords(d)
+	if err != nil {
+		logger.Error("release GC: not pruning: the deploy records cannot be read, and without them the order is one the app can set", zap.Error(err))
+		return
+	}
 	entries, err := os.ReadDir(d.releases)
 	if err != nil {
 		logger.Warn("release GC: cannot list releases", zap.Error(err))
 		return
 	}
-	records := readableRecordsDir(d)
 	var rels []release
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), ".extract-") {

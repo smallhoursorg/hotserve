@@ -147,7 +147,7 @@ var ownerLocks sync.Map // app name → *sync.Mutex; one per name ever seen
 // through a link at the app dir or at run/ or proxy/, the entries are
 // another directory's — a sibling's live socket and pin — and the
 // sweep that licensed the prune vouched for this app's units alone.
-// Such a directory is refused, named, and left as it is.
+// Such a link is refused and named once, and the prune stops there.
 func pruneSockets(d appDirs, keep []string, logger *zap.Logger) {
 	kept := map[string]bool{}
 	for _, n := range keep {
@@ -156,7 +156,7 @@ func pruneSockets(d appDirs, keep []string, logger *zap.Logger) {
 	for _, dir := range []string{d.run, d.proxy} {
 		if err := d.ownDir(dir); err != nil {
 			logger.Error("not pruning instance sockets", zap.Error(err))
-			continue
+			return
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {

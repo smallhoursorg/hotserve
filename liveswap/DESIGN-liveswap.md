@@ -178,14 +178,20 @@ Concept map from the Nomad-era stack:
   first — so the serving version is never deleted and counts toward
   `keep`. A release's deploy time MUST be one no app can write: its
   deploy record's write time (`deploys/`, outside every view; the
-  version's latest deploy or rollback, failed ones included), never
-  the release dir's own mtime, which the app running from that dir can
-  set to anything. A release with no record that proves itself one
-  (deployed before records existed, or its record write failed) is
-  placed by its dir's mtime, and the status MUST name it in
-  `ordered_by_mtime`. `available_versions` lists the releases in the
-  same order, so the rollback targets an operator sees are the ones
-  GC keeps. A failed URL or push deploy's freshly extracted release dir is
+  version's latest deploy or rollback), never the release dir's own
+  mtime, which the app running from that dir can set to anything. A
+  release whose latest deploy failed (a failed rollback to it) comes
+  after every release whose latest deploy succeeded, so a failed
+  rollback never pushes the version that served through it out of
+  `keep`. A release with no record that proves itself one (deployed
+  before records existed, or its record write failed) is placed by its
+  dir's mtime, and the status MUST name it in `ordered_by_mtime`.
+  `available_versions` lists the releases in the same order, so the
+  rollback targets an operator sees are the ones GC keeps. GC MUST
+  prune nothing, and log why, when the releases dir is not the
+  directory it names (`appDirs.ownDir`: through a link it would delete
+  another app's releases) or the records cannot be read (a planted
+  link at `deploys/`: the order would be the app's to set). A failed URL or push deploy's freshly extracted release dir is
   removed (a rollback, or a relaunch of the running version, launches
   an existing release and never deletes it), so its version stays
   retriable — unless the failed instance

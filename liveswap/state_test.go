@@ -397,15 +397,25 @@ func TestReleaseOrderLedger(t *testing.T) {
 			available: "v3 v2 v1", kept: "v1 v3",
 		},
 		{
-			name: "a failed rollback's record is that version's latest deploy",
+			name: "a release whose latest deploy failed comes after every one whose latest succeeded",
 			rels: []rel{
-				{"v1", "failed", at(5), epoch}, // rolled back to after v3, and failed
+				{"v1", "failed", at(5), future}, // rolled back to after v3, and failed
 				{"v2", "succeeded", at(2), at(2)},
 				{"v3", "succeeded", at(3), at(3)}, // served until v4
 				{"v4", "", time.Time{}, at(6)},    // this deploy's
 			},
 			keep: 2, protect: "v4",
-			available: "v4 v1 v3 v2", byMtime: "v4", kept: "v1 v4",
+			available: "v4 v3 v2 v1", byMtime: "v4", kept: "v3 v4",
+		},
+		{
+			name: "a failed rollback does not push the version that served out of keep",
+			rels: []rel{
+				{"v1", "failed", at(3), at(1)},    // the rollback to it failed
+				{"v2", "succeeded", at(2), at(2)}, // served throughout
+				{"v3", "", time.Time{}, at(4)},    // this deploy's
+			},
+			keep: 2, protect: "v3",
+			available: "v3 v2 v1", byMtime: "v3", kept: "v2 v3",
 		},
 		{
 			name: "a release with no record (deployed before records existed) is placed by its dir's mtime, and named",
@@ -438,7 +448,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 			available: "v2 v1", byMtime: "v1", kept: "v1 v2",
 		},
 		{
-			name: "a planted link at deploys/: nothing is read through it, so every release is placed by mtime",
+			name: "a planted link at deploys/: nothing is read through it, every release is listed by mtime, and GC prunes nothing",
 			rels: []rel{
 				{"v1", "succeeded", at(2), at(1)},
 				{"v2", "succeeded", at(1), at(2)},
@@ -446,7 +456,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 			},
 			linkRecords: true,
 			keep:        2, protect: "v3",
-			available: "v3 v2 v1", byMtime: "v3 v2 v1", kept: "v2 v3",
+			available: "v3 v2 v1", byMtime: "v3 v2 v1", kept: "v1 v2 v3",
 		},
 		{
 			name: "deploy times that tie order by name, the same on every read",
@@ -510,6 +520,44 @@ func TestReleaseOrderLedger(t *testing.T) {
 			}
 			if !slices.Equal(after, want) {
 				t.Fatalf("available_versions after GC = %v, want %v", after, want)
+			}
+		})
+	}
+}
+
+// Release GC deletes only in the directory it names: with a link at
+// the app dir (`demo -> shop`) or at releases/, demo's GC would remove
+// shop's releases, so it prunes nothing and says why.
+func TestGCReleasesDoesNotPruneThroughALink(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, demo, shop appDirs)
+	}{
+		{"app dir", func(t *testing.T, demo, shop appDirs) {
+			must(t, os.Symlink("shop", demo.app))
+		}},
+		{"releases", func(t *testing.T, demo, shop appDirs) {
+			must(t, os.MkdirAll(demo.app, 0o750))
+			must(t, os.Symlink(shop.releases, demo.releases))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			shop, demo := newAppDirs(root, "shop"), newAppDirs(root, "demo")
+			for _, v := range []string{"v1", "v2", "v3"} {
+				must(t, os.MkdirAll(shop.release(v), 0o750))
+			}
+			tc.plant(t, demo, shop)
+			core, logs := observer.New(zap.ErrorLevel)
+			gcReleases(demo, 1, "v3", zap.New(core))
+			onDisk, err := releaseNames(shop.releases)
+			must(t, err)
+			sort.Strings(onDisk)
+			if got := strings.Join(onDisk, " "); got != "v1 v2 v3" {
+				t.Fatalf("shop's releases after demo's GC: %s", got)
+			}
+			if logs.FilterMessage("release GC: not pruning").Len() != 1 {
+				t.Fatalf("the refusal must be logged once: %v", logs.All())
 			}
 		})
 	}

@@ -930,7 +930,9 @@ deployed first, in the order release GC keeps them (`keep` of them
 after a successful deploy) — and `deploys`, what each recorded
 version's latest deploy came to (see [Deploy records](#deploy-records)).
 A version's deploy time is its record's: the latest deploy or rollback
-of it, a failed one included. A release with no record — deployed by
+of it. One whose latest deploy failed (a rollback to it that failed)
+comes after every one whose latest succeeded, so a failed rollback
+never pushes out the version that kept serving. A release with no record — deployed by
 a hotserve older than records, or its record could not be written —
 is placed by its directory's modification time instead, which the app
 running from it can change, and `ordered_by_mtime` names it.
