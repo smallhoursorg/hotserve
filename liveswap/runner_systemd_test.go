@@ -348,8 +348,8 @@ func TestUnitPropertiesApplyHardening(t *testing.T) {
 	if _, ok := got["Environment"].([]string); !ok {
 		t.Errorf("Environment must be a string array even when empty, got %T", got["Environment"])
 	}
-	if _, ok := got["ExecStart"]; !ok {
-		t.Error("ExecStart missing")
+	if _, ok := got["ExecStartEx"]; !ok {
+		t.Error("ExecStartEx missing")
 	}
 	for _, p := range unitProperties(unitSpec{ExecStart: []string{"/bin/true"}, StopTimeout: 500 * time.Nanosecond, Sandbox: probeSandboxSpec()}) {
 		if p.Name == "TimeoutStopUSec" && p.Value.Value() != uint64(1) {
@@ -357,6 +357,47 @@ func TestUnitPropertiesApplyHardening(t *testing.T) {
 		}
 	}
 	_ = godbus.MakeVariant // keep the import honest: properties are godbus variants
+}
+
+// Promise: the argv a unit execs is the argv hotserve handed the
+// manager, byte for byte. The plain ExecStart property carries no
+// flags, and through it systemd substitutes the unit's environment
+// (env_file values included) into every word at exec time: "$VAR"
+// word-splits, "${VAR}" substitutes, "$$" becomes "$", and a word
+// that names an unset variable leaves argv. So the command is set
+// through ExecStartEx with no-env-expand and never through ExecStart.
+// The words are what an operator's command line can carry: an inline
+// script, a regex anchor, a literal dollar.
+func TestUnitExecStartIsByteExact(t *testing.T) {
+	argv := []string{"/usr/bin/node", "-e", `console.log("$HOME", "${HOME}")`, "$HOME", "${HOME}", "$$", "$HOTSERVE_UNSET_IN_EVERY_UNIT", "^a.*$", "a$b"}
+	want := slices.Clone(argv)
+	var ex []any
+	for _, p := range unitProperties(unitSpec{Name: "x.service", ExecStart: argv, StopTimeout: time.Second, Sandbox: probeSandboxSpec()}) {
+		switch p.Name {
+		case "ExecStart":
+			t.Fatalf("the command must not be set through the plain ExecStart, which carries no no-env-expand flag: %v", p.Value)
+		case "ExecStartEx":
+			// The wire shape systemd's ExecStartEx takes: the binary,
+			// its argv, and the flag names.
+			if sig := p.Value.Signature().String(); sig != "a(sasas)" {
+				t.Fatalf("ExecStartEx signature = %s, want a(sasas)", sig)
+			}
+			ex = append(ex, p.Value.Value())
+		}
+	}
+	if len(ex) != 1 {
+		t.Fatalf("want exactly one ExecStartEx property, got %d", len(ex))
+	}
+	cmds, ok := ex[0].([]execCommandEx)
+	if !ok || len(cmds) != 1 {
+		t.Fatalf("ExecStartEx = %#v, want one command", ex[0])
+	}
+	if cmds[0].Path != want[0] || !slices.Equal(cmds[0].Args, want) {
+		t.Fatalf("ExecStartEx argv = %q %q, want %q %q byte for byte", cmds[0].Path, cmds[0].Args, want[0], want)
+	}
+	if !slices.Equal(cmds[0].Flags, []string{"no-env-expand"}) {
+		t.Fatalf("ExecStartEx flags = %q, want exactly no-env-expand (and no ignore-failure: a failed command fails the unit)", cmds[0].Flags)
+	}
 }
 
 func TestSystemdRunnerWatcherClosesDoneWhenUnitGone(t *testing.T) {

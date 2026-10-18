@@ -217,11 +217,13 @@ func TestDownloadArtifactCapBeatsThePin(t *testing.T) {
 	}
 }
 
-// Go's client drops Authorization when a redirect changes the host —
-// the GitHub -> S3 pattern depends on the credential NOT following the
-// redirect. That stdlib behavior is load-bearing for credential scope,
-// so pin it: 127.0.0.1 and localhost are the same server here but
-// different hostnames, which is exactly what a cross-host hop is.
+// Go's client drops Authorization when a redirect leaves the first
+// host's domain (a subdomain of it keeps the header:
+// shouldCopyHeaderOnRedirect) — the GitHub -> S3 pattern depends on the
+// credential NOT following the redirect. That stdlib behavior is
+// load-bearing for credential scope, so pin it: 127.0.0.1 and localhost
+// are the same server here but neither is the other or a subdomain of
+// it, which is exactly what a cross-host hop is.
 func TestDownloadDropsAuthHeaderOnCrossHostRedirect(t *testing.T) {
 	authByPath := map[string]string{}
 	var srvURL string

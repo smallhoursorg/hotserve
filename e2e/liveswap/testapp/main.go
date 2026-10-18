@@ -3,7 +3,9 @@
 // and pid; /health goes 500 while a "broken" marker file exists in the
 // release dir (shipped in the artifact for the broken-deploy scenario,
 // or created live via /break for the watchdog scenario). /boom exits
-// the process — the crash the watchdog must recover from.
+// the process — the crash the watchdog must recover from. /argv
+// reports the arguments it was started with, Go-quoted, so the suite
+// can see that a `command` word reaches the app as written.
 package main
 
 import (
@@ -49,6 +51,10 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+	})
+	http.HandleFunc("/argv", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = fmt.Fprintf(w, "%q", os.Args[1:]) //nolint:gosec // the test app's own argv, Go-quoted, as plain text: no markup reaches a browser
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintf(w, "hello %s pid %d", version, os.Getpid())

@@ -160,8 +160,8 @@ rests on:
   memory on disk.
 - **Every app is sandboxed, with no opt-out.** Apps share the
   `hotserve` user, so each runs in its own systemd sandbox: it sees
-  its own release, its `shared/` data, a private `/tmp`, and the parts
-  of the OS it needs. Nothing else on the host exists in its view —
+  its own release, its `shared/` data, its instance's socket directory
+  (`run/<nonce>/`), a private `/tmp`, and the parts of the OS it needs. Nothing else on the host exists in its view —
   hotserve's keys and every sibling app are *absent* from its
   filesystem and invisible in its process table, not merely
   unreadable. A host that cannot deliver that refuses to start rather

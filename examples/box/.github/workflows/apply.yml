@@ -12,10 +12,11 @@ permissions:
 
 env:
   # Empty: the latest stable release (bin/install-hotserve). The
-  # repository variable pins one instead (0.3.0, 0.3.0-rc1), for every
-  # box at once; a box on a release of its own has a HOTSERVE_VERSION
-  # file beside its Caddyfile instead (README.md, "A box on another
-  # release"), and the file wins for that box.
+  # repository variable pins one instead, for every box at once (its
+  # form: 0.3.0, or 0.3.0-rc1 for a candidate; examples of the format,
+  # not releases to pin); a box on a release of its own has a
+  # HOTSERVE_VERSION file beside its Caddyfile instead (README.md, "A
+  # box on another release"), and the file wins for that box.
   HOTSERVE_VERSION: ${{ vars.HOTSERVE_VERSION }}
 
 jobs:

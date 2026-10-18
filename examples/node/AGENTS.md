@@ -26,8 +26,8 @@ which runs it under rules that do not show up when you run it locally.
   binary it was built with; the workflow's runner (the variable
   `HOTSERVE_RUNS_ON`, arm64 when unset) must match the box.
 - **Only its own dirs exist in production.** The app's sandbox holds
-  its release dir, `$DATA_DIR`, a private `/tmp` and the OS runtime
-  under `/usr`. `/opt`, `/srv`, `/home` and host unix sockets (a local
+  its release dir, `$DATA_DIR`, the directory `$SOCKET` is in, a
+  private `/tmp` and the OS runtime under `/usr`. `/opt`, `/srv`, `/home` and host unix sockets (a local
   Postgres's, say) are absent, not merely unreadable.
 - **Env vars come from the box**, not this repo: `hotserve.caddy` here
   documents what the code reads. A new variable is a change to the

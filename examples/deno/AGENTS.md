@@ -21,8 +21,8 @@ which runs it under rules that do not show up when you run it locally.
   module cache in the tarball and the app runs with `--cached-only`:
   every import must resolve at build time.
 - **Only its own dirs exist in production.** The app's sandbox holds
-  its release dir, `$DATA_DIR`, a private `/tmp` and the OS runtime
-  under `/usr`. `/opt`, `/srv`, `/home` and host unix sockets (a local
+  its release dir, `$DATA_DIR`, the directory `$SOCKET` is in, a
+  private `/tmp` and the OS runtime under `/usr`. `/opt`, `/srv`, `/home` and host unix sockets (a local
   Postgres's, say) are absent, not merely unreadable.
 - **Permissions are granted on the box, not in this repo.** The app
   runs with the Deno flags in the box's Caddyfile; `hotserve.caddy`
