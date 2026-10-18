@@ -1697,14 +1697,14 @@ func TestDestructWaitsForADeployInFlight(t *testing.T) {
 			held()
 			destructed := make(chan error, 1)
 			go func() { destructed <- rig.ma.Destruct() }()
+			// The wait is named: a reload that hangs on it says why.
+			waitUntil(t, "Destruct to name its wait", func() bool {
+				return logs.FilterMessageSnippet("waiting for the deploy to end").Len() == 1
+			})
 			select {
 			case err := <-destructed:
 				t.Fatalf("Destruct returned (%v) while a deploy of the app was in flight", err)
-			case <-time.After(50 * time.Millisecond):
-			}
-			// The wait is named: a reload that hangs on it says why.
-			if n := logs.FilterMessageSnippet("waiting for the deploy to end").Len(); n != 1 {
-				t.Fatalf("Destruct's wait must be named in the journal once, got %d: %v", n, logs.All())
+			default:
 			}
 			release(tc.fetchErr)
 			for _, ch := range []chan error{deployed, destructed} {
@@ -1921,6 +1921,28 @@ func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("recover must return on a permanent error, not retry forever")
+	}
+}
+
+// A recovery that gave up says why in status until the cause is gone:
+// with state.json removed there is nothing to recover and nothing
+// failing, so the next recovery clears the reason.
+func TestRecoveryWithNothingRecordedClearsAGivenUpReason(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
+	rig.store.ok = true // the release dir missing: recovery gives up
+	rig.startWatchdogT(t)
+	rig.ma.recover(context.Background(), zap.NewNop())
+	waitUntil(t, "status to name why recovery gave up", func() bool {
+		wd := rig.ma.status().Watchdog
+		return wd != nil && strings.Contains(wd.LastFailure, "release dir is missing")
+	})
+	rig.store.mu.Lock()
+	rig.store.state, rig.store.ok = appState{}, false
+	rig.store.mu.Unlock()
+	must(t, rig.ma.ensureRunning())
+	if wd := rig.ma.status().Watchdog; wd.LastFailure != "" {
+		t.Fatalf("nothing recorded is nothing failing: %+v", wd)
 	}
 }
 

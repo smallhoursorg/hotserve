@@ -989,12 +989,31 @@ func TestIntegrationRemovingAnAppMidDeployLeavesNoUnit(t *testing.T) {
 	if units := appUnits(t, app); units != "" {
 		t.Fatalf("a unit of the removed app runs on:\n%s", units)
 	}
+	for _, d := range []string{"run", "proxy"} {
+		if left := leftIn(t, filepath.Join(root, app, d)); len(left) != 0 {
+			t.Fatalf("the removed app leaves nothing in %s/: %v", d, left)
+		}
+	}
 }
 
 // appUnits is every unit the manager holds for app, in any state.
 func appUnits(t *testing.T, app string) string {
 	t.Helper()
 	return strings.TrimSpace(run(t, "systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "hotserve-"+app+".*"))
+}
+
+// leftIn lists what dir still holds; nothing when it is gone.
+func leftIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // A release that cannot run on this box is refused at the relaunch's
@@ -1067,6 +1086,14 @@ func TestIntegrationRelaunchRefusedAtPreflight(t *testing.T) {
 	pollUntil(t, 5*time.Second, "no unit of the app left", func() bool { return appUnits(t, app) == "" })
 	if code, _ := tryBody(); code < 500 {
 		t.Fatalf("nothing serves after the refusal, got %d", code)
+	}
+	for _, d := range []string{"run", "proxy"} {
+		if left := leftIn(t, filepath.Join(root, app, d)); len(left) != 0 {
+			t.Fatalf("a refused relaunch leaves nothing in %s/: %v", d, left)
+		}
+	}
+	if st, err := os.ReadFile(filepath.Join(root, app, "state.json")); err != nil || !strings.Contains(string(st), `"current_version": "v1"`) {
+		t.Fatalf("state.json keeps the version, so a restart meets the same refusal: %s %v", st, err)
 	}
 
 	// A reload's recovery meets the same refusal, once, by name. (A

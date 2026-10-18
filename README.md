@@ -16,7 +16,7 @@ Built in:
 
 | Module | What it does |
 |---|---|
-| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that can listen on a unix socket — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (a restart budget and backoff bound the rate; it throttles rather than giving up). |
+| **[liveswap](liveswap/)** | Zero-downtime app deploys: webhook from CI, artifact download, migrations, health-gated start, atomic traffic cutover, graceful stop, versioned releases with rollback. Your apps run as systemd units under the hotserve user's own service manager — Node.js, Go, anything that can listen on a unix socket — surviving hotserve restarts and upgrades, with a continuous watchdog that restarts them on crash or sustained health failure (a restart budget and backoff bound the rate; it throttles rather than giving up on anything a retry can fix). |
 | **[penaltybox](penaltybox/)** | Rate limiting driven by your app's `X-Rate-Limit-Level` hint headers — weighted sliding-window budgets, tiers, and a penalty box for clients that cross them. |
 | **[box](examples/box/)** | Config from git: the box's Caddyfile lives in a repository of its own, and each signed push to `main` reaches the box, which checks the commit's signature, validates the file, installs it as root, and rolls back a reload that fails. The apps' secrets ride along, encrypted to the box's own key. CI holds no SSH key. |
 | **cache** | HTTP page caching via [Souin](https://github.com/darkweak/souin) with in-memory [Otter](https://github.com/darkweak/storages) storage. |
@@ -200,8 +200,9 @@ each one is there. What is still ahead:
 Not committed to, but worth naming: a metrics/alerts module alongside
 liveswap and penaltybox. The first thing it would earn its keep on is
 alerting when the watchdog is stuck in a restart loop — the watchdog
-retries forever by design, so the loop itself is the signal that a
-release is broken.
+retries a crash or a health failure forever by design (only a release
+that cannot run at all is refused once), so the loop itself is the
+signal that a release is broken.
 
 ## Development
 

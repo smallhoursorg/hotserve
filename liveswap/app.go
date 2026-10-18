@@ -1103,6 +1103,7 @@ func (ma *managedApp) ensureRunning() error {
 		if !ma.sweep(c, nil, "") {
 			return &transientRecoveryError{errSweepUnconfirmed}
 		}
+		ma.wd.setLastFailure("") // nothing to recover is nothing failing: an earlier reason is over
 		return nil
 	}
 	// state.json is ours, but it is a file: the version it names

@@ -19,7 +19,8 @@ import (
 // the same version when the process exits or when the health endpoint
 // fails wdFailures consecutive probes — with a per-restart grace
 // period, exponential backoff, and a restart budget. The watchdog
-// never gives up: when the budget for the current window is spent it
+// never gives up on a failure a retry can fix (a relaunch its
+// pre-flight refuses is not one): when the budget for the current window is spent it
 // throttles — waits for the oldest restart to slide out of the window,
 // then tries again — so an app that died during a transient incident
 // (a DDoS, a dependency outage) comes back on its own once the
@@ -133,8 +134,9 @@ func (w *watchdogState) recordFailure(desc string) int {
 
 // setLastFailure records why the app is not running when no probe
 // will say it: a relaunch refused for good, or a recovery that gave
-// up. The next launch clears it: recovery's (with ""), a deploy's
-// (reset), or a healthy probe of a later instance.
+// up. The next launch clears it — recovery's (with ""), a deploy's
+// (reset), or a healthy probe of a later instance — and so does a
+// recovery that finds nothing recorded.
 func (w *watchdogState) setLastFailure(desc string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -599,7 +601,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		// cause is fixed, launches the app again.
 		ma.dropIf(inst)
 		ma.wd.setLastFailure(err.Error())
-		c.logger.Error("watchdog: relaunch refused; the app stays down until a deploy, or a reload once the cause is fixed, launches it",
+		c.logger.Error("watchdog: relaunch refused; the app stays down until a deploy of another version (or a rollback to one), or a reload once the cause is fixed, launches it",
 			zap.String("version", inst.version), zap.Error(err))
 		return true
 	}

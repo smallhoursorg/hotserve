@@ -325,7 +325,7 @@ only after the app has been continuously healthy for
 `max(30s, watchdog_grace)`. Every restart re-arms `watchdog_grace`, so
 a slow-booting app is not probed into a kill loop.
 
-The watchdog **never gives up**. The restart budget is a rate
+The watchdog **never gives up** on a failure a retry can fix. The restart budget is a rate
 limiter, not a give-up point: after `watchdog_restarts` restarts
 inside `watchdog_window` it *throttles* — logs an error, reports
 `"state":"throttled"` in the status JSON, unroutes a dead instance so
@@ -356,8 +356,10 @@ no longer there or outside the sandbox view, would only die as
 `203/EXEC` on every attempt. The watchdog then drops the instance —
 nothing current, the proxy answers 5xx — logs the refusal once, parks
 in `idle`, and status names it in `last_failure`; boot recovery
-refuses such a release the same way, in the same field. A deploy, or
-a reload once the cause is fixed, launches the app again.
+refuses such a release the same way, in the same field. A deploy of
+another version (or a rollback to one), or a reload once the cause is
+fixed, launches the app again; the refused version itself is still
+on disk, so deploying it again is refused as already existing.
 
 The status JSON's `watchdog` object reports `state`
 (`grace|watching|backoff|throttled|disabled|idle`),
