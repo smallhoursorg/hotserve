@@ -621,3 +621,30 @@ func TestBound(t *testing.T) {
 		t.Fatalf("%d %q", len(got), got)
 	}
 }
+
+func TestBoundTail(t *testing.T) {
+	if got := BoundTail("box1/Caddyfile"); got != "box1/Caddyfile" {
+		t.Fatal(got)
+	}
+	// Quoted first, as Bound: the cut is of the quoted text.
+	if got := BoundTail("a\nb"); got != `"a\nb"` {
+		t.Fatal(got)
+	}
+	got := BoundTail(strings.Repeat("x", 1000) + "the reason")
+	if got != "..."+strings.Repeat("x", 300-len("the reason"))+"the reason" {
+		t.Fatalf("%d %q", len(got), got)
+	}
+	got = BoundTail(strings.Repeat("y", 1000) + "\n")
+	if !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, `y\n"`) || len(got) != 3+300 {
+		t.Fatalf("%d %q", len(got), got)
+	}
+	// A cut never leaves a partial rune: before the trailing `a`, every
+	// é straddles an odd offset from the end, so the cut keeps 299.
+	got = BoundTail(strings.Repeat("é", 200) + "a")
+	if !strings.HasPrefix(got, "...") || len(got) != 3+299 || !utf8.ValidString(got) {
+		t.Fatalf("%d %q", len(got), got)
+	}
+	if got := BoundTail(strings.Repeat("é", 150)); len(got) != 300 || strings.HasPrefix(got, "...") {
+		t.Fatalf("%d %q", len(got), got)
+	}
+}

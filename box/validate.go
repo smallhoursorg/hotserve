@@ -12,6 +12,7 @@ package box
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -114,7 +115,7 @@ func (c *childValidator) validate(ctx context.Context, id string, caddyfile []by
 		return "", fmt.Errorf("staging the Caddyfile for validate: %w", err)
 	}
 	defer os.Remove(staged) //nolint:errcheck // a leftover is swept at the next admission
-	if msg, err := c.run(ctx, "hotserve validate", c.hotserve, "validate", "--adapter", "caddyfile", "--config", staged); msg != "" || err != nil {
+	if msg, err := c.run(ctx, "hotserve validate", validateBound, c.hotserve, "validate", "--adapter", "caddyfile", "--config", staged); msg != "" || err != nil {
 		return msg, err
 	}
 	if msg, err := c.adapt(ctx, staged, host, door); msg != "" || err != nil {
@@ -128,16 +129,16 @@ func (c *childValidator) validate(ctx context.Context, id string, caddyfile []by
 	case err != nil:
 		return "", fmt.Errorf("could not ask whether backups are installed: %w", err)
 	}
-	return c.run(ctx, "hotserve-backup validate", c.backup, "validate", staged)
+	return c.run(ctx, "hotserve-backup validate", proof.Bound, c.backup, "validate", staged)
 }
 
 // run runs one validate child. A non-zero exit is a refusal quoting its
-// error line; a child that did not finish in time is one too, since a
+// error line, bounded by bound; a child that did not finish in time is one too, since a
 // configuration whose provisioning hangs is the push's; a child that
 // could not start, or that a signal other than the deadline's killed
 // (the OOM killer, an operator), is the box's. A child that exited 0 and
 // left a grandchild holding the output passed.
-func (c *childValidator) run(ctx context.Context, what, program string, args ...string) (string, error) {
+func (c *childValidator) run(ctx context.Context, what string, bound func(string) string, program string, args ...string) (string, error) {
 	var out tailBuffer
 	// One writer for both: os/exec then uses one pipe, and WaitDelay
 	// ends the wait on it should a grandchild hold it.
@@ -154,7 +155,24 @@ func (c *childValidator) run(ctx context.Context, what, program string, args ...
 	if line == "" {
 		line = exit.String()
 	}
-	return what + ": " + proof.Bound(line), nil
+	return what + ": " + bound(line), nil
+}
+
+// validateBound bounds `hotserve validate`'s error line by the end that
+// says why. The adapter says why first and where after (`adapting
+// config using caddyfile: <why>, at <file>:<line>`, then an import
+// chain of staged paths that can outrun the bound): its head. A load
+// error walks the module path first and says why last (`loading http
+// app module: provision http: server srv1: ...: provision liveswap: app
+// <name>: <why>`), and the path alone outruns the bound (#324): its
+// tail. Should Caddy reword the adapter's prefix, an adapter error is
+// bounded by its tail, which loses the why only behind a long import
+// chain.
+func validateBound(line string) string {
+	if strings.HasPrefix(line, "adapting config using ") {
+		return proof.Bound(line)
+	}
+	return proof.BoundTail(line)
 }
 
 // adapt runs the adapt child on the staged file and asks reachability
@@ -232,13 +250,19 @@ func (c *childValidator) exec(ctx context.Context, program string, stdout, stder
 	return exit, false, nil
 }
 
-// errorLine is the line of a validate's output that says why: Caddy's
-// last `Error: ` line, else the last line that is not empty.
+// errorLine is the line of a validate's output that says why: the last
+// that is the command's error — an `Error: ` line, or, as Caddy logs it
+// when its output is not a terminal (v2.11.6 on), its root logger's
+// JSON line of level "error", whose msg it is — else the last line
+// that is not empty.
 func errorLine(out []byte) string {
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		if rest, ok := strings.CutPrefix(lines[i], "Error: "); ok {
 			return strings.TrimSpace(rest)
+		}
+		if msg, ok := commandError(lines[i]); ok {
+			return msg
 		}
 	}
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -247,6 +271,21 @@ func errorLine(out []byte) string {
 		}
 	}
 	return ""
+}
+
+// commandError is the msg of Caddy's log line for a command's error:
+// level "error" from the root logger (caddycmd's
+// WrapCommandFuncForCobra). A module's error lines name their logger,
+// and carry the why in a field of their own.
+func commandError(line string) (string, bool) {
+	if !strings.HasPrefix(line, "{") {
+		return "", false
+	}
+	var l struct{ Level, Logger, Msg string }
+	if json.Unmarshal([]byte(line), &l) != nil || l.Level != "error" || l.Logger != "" || l.Msg == "" {
+		return "", false
+	}
+	return l.Msg, true
 }
 
 // tailBuffer keeps the last maxValidateOutput bytes written to it: a

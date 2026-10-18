@@ -104,11 +104,28 @@ const maxBound = 300
 // boundary, so the cut can neither leave a partial rune nor grow the
 // string it bounds. A cut-then-quote is not a bound.
 func Bound(s string) string {
-	if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) && r != ' ' }) {
-		s = strconv.QuoteToASCII(s)
-	}
-	if len(s) > maxBound {
+	if s = printable(s); len(s) > maxBound {
 		s = cutRunes(s, maxBound) + "..."
+	}
+	return s
+}
+
+// BoundTail is Bound keeping the end of s, not its start: for an error
+// that wraps its cause last, as Caddy's module chain does (`loading
+// http app module: provision http: server srv1: ...: provision
+// liveswap: app <name>: <why>`), whose path alone runs past the bound
+// (#324).
+func BoundTail(s string) string {
+	if s = printable(s); len(s) > maxBound {
+		s = "..." + tailRunes(s, maxBound)
+	}
+	return s
+}
+
+// printable is s Go-quoted to ASCII if it is not printable UTF-8.
+func printable(s string) string {
+	if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return !strconv.IsPrint(r) && r != ' ' }) {
+		return strconv.QuoteToASCII(s)
 	}
 	return s
 }
@@ -122,4 +139,16 @@ func cutRunes(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// tailRunes is the end of s, at most n bytes, from a rune boundary.
+func tailRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }

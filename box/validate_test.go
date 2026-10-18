@@ -94,6 +94,44 @@ func TestValidateChild(t *testing.T) {
 			t.Fatalf("msg %q err %v", msg, err)
 		}
 	})
+	t.Run("refuses with the reason in Caddy's JSON error line", func(t *testing.T) {
+		for name, line := range map[string]string{
+			"provision": caddyErrorLine,
+			"validate":  caddyLine(caddyChain + "loading module 'liveswap_webhook': http.handlers.liveswap_webhook: invalid configuration: " + caddyReason),
+		} {
+			out := filepath.Join(t.TempDir(), "out")
+			must(t, os.WriteFile(out, []byte(`{"level":"info","msg":"using config from file"}`+"\n"+line+"\n"), 0o600))
+			c, _ := stubValidator(t, "cat '"+out+"' >&2; exit 1", "")
+			msg, err := c.validate(context.Background(), randomID(t), file, stubHost, nil)
+			if err != nil || !strings.HasPrefix(msg, "hotserve validate: ...") || !strings.HasSuffix(msg, caddyReason) || len(msg) > len("hotserve validate: ...")+300 {
+				t.Fatalf("%s: msg %q err %v", name, msg, err)
+			}
+		}
+	})
+	t.Run("keeps the head of an adapter error", func(t *testing.T) {
+		// The adapter says why first and where after; an import chain of
+		// staged paths can outrun the bound.
+		staged := "/var/lib/hotserve-box/stage/." + strings.Repeat("a", 32) + ".Caddyfile"
+		why := "adapting config using caddyfile: parsing caddyfile tokens for 'reverse_proxy': wrong argument count or unexpected line ending after 'to'"
+		line := caddyLine(why + ", at " + staged + ":12 import chain ['" + staged + ":3 (import a)','" + staged + ":7 (import b)','" + staged + ":9 (import c)']")
+		out := filepath.Join(t.TempDir(), "out")
+		must(t, os.WriteFile(out, []byte(line+"\n"), 0o600))
+		c, _ := stubValidator(t, "cat '"+out+"' >&2; exit 1", "")
+		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, nil)
+		if err != nil || !strings.HasPrefix(msg, "hotserve validate: "+why) || !strings.HasSuffix(msg, "...") {
+			t.Fatalf("msg %q err %v", msg, err)
+		}
+	})
+	t.Run("redacts the environment's values in Caddy's JSON error line", func(t *testing.T) {
+		secret := "pg-pass-" + strings.Repeat("q7", 10)
+		out := filepath.Join(t.TempDir(), "out")
+		must(t, os.WriteFile(out, []byte(caddyLine("provision liveswap: app x: listen "+secret+" is not a number")+"\n"), 0o600))
+		c, _ := stubValidator(t, "cat '"+out+"'; exit 1", "", "DB_PASS="+secret)
+		msg, err := c.validate(context.Background(), randomID(t), file, stubHost, nil)
+		if err != nil || strings.Contains(msg, secret) || !strings.HasPrefix(msg, "hotserve validate: provision liveswap: app x: listen ") {
+			t.Fatalf("msg %q err %v", msg, err)
+		}
+	})
 	t.Run("redacts the environment's values", func(t *testing.T) {
 		secret := "pg-pass-" + strings.Repeat("q7", 10)
 		// Quoted bare, as an expanded placeholder is: only the layer
@@ -199,6 +237,14 @@ func TestValidateBackup(t *testing.T) {
 			t.Fatalf("args %q", args)
 		}
 	})
+	t.Run("keeps the head of its line", func(t *testing.T) {
+		// Its errors quote the adapter, which says why first.
+		c, _ := stubValidator(t, "exit 0", `printf 'Error: the why, at '; head -c 2000 /dev/zero | tr '\0' 'x'; echo; exit 1`)
+		msg, _ := c.validate(context.Background(), randomID(t), file, stubHost, nil)
+		if !strings.HasPrefix(msg, "hotserve-backup validate: the why, at x") || !strings.HasSuffix(msg, "...") {
+			t.Fatalf("msg %q", msg)
+		}
+	})
 	t.Run("installed and passing", func(t *testing.T) {
 		c, _ := stubValidator(t, "exit 0", "exit 0")
 		if msg, err := c.validate(context.Background(), randomID(t), file, stubHost, nil); msg != "" || err != nil {
@@ -236,6 +282,26 @@ func TestValidateBackup(t *testing.T) {
 	})
 }
 
+// caddyChain, caddyReason and caddyErrorLine are how Caddy (v2.11.6
+// on, #163) reports a validate that failed when its output is not a
+// terminal: one JSON log line from its root logger, the module chain
+// first and the reason last. The chain is the head recorded on #324
+// (box apply 3, a backup path into a sibling's shared/), cut there at
+// 300 bytes; the reason is the one that run had, as liveswap words it.
+const (
+	caddyChain  = "loading http app module: provision http: server srv1: setting up route handlers: route 0: loading handler modules: position 0: "
+	caddyReason = `app deno-example: backup files "../../deno-example/shared": the path reaches outside the app's shared dir`
+	caddyMsg    = caddyChain + "loading module 'liveswap_webhook': provision http.handlers.liveswap_webhook: loading liveswap app module: provision liveswap: " + caddyReason
+)
+
+var caddyErrorLine = caddyLine(caddyMsg)
+
+// caddyLine is msg as Caddy logs a command's error; the texts here
+// need only `"` escaped.
+func caddyLine(msg string) string {
+	return `{"level":"error","ts":1792333313.1590059,"msg":"` + strings.ReplaceAll(msg, `"`, `\"`) + `"}`
+}
+
 func TestErrorLine(t *testing.T) {
 	for out, want := range map[string]string{
 		"":                            "",
@@ -245,6 +311,19 @@ func TestErrorLine(t *testing.T) {
 		"Error: a\nError: b\n\n":      "b",
 		"  indented last  \n":         "indented last",
 		"x Error: not at the start\n": "x Error: not at the start",
+		caddyErrorLine + "\n":         caddyMsg,
+		// The last line that is an error, over noise after it.
+		caddyErrorLine + "\n" + `{"level":"info","msg":"shutting down"}` + "\n":                                  caddyMsg,
+		`{"level":"error","msg":"adapting config using caddyfile: Caddyfile:2: unrecognized directive: respnd"}`: "adapting config using caddyfile: Caddyfile:2: unrecognized directive: respnd",
+		// A module's own error line is not the command's error.
+		"Error: the reason\n" + `{"level":"error","logger":"tls","msg":"could not clean up","error":"x"}` + "\n": "the reason",
+		// Not an error line, or not one whole: the last line as it stands.
+		`{"level":"info","msg":"not an error"}` + "\n": `{"level":"info","msg":"not an error"}`,
+		`{"level":"error","msg":"tail cut"` + "\n":     `{"level":"error","msg":"tail cut"`,
+		`{"level":"error","msg":7}` + "\n":             `{"level":"error","msg":7}`,
+		// The last line that is an error, in either form.
+		"Error: earlier\n" + `{"level":"error","msg":"last"}` + "\n": "last",
+		`{"level":"error","msg":"earlier"}` + "\nError: last\n":      "last",
 	} {
 		if got := errorLine([]byte(out)); got != want {
 			t.Errorf("errorLine(%q) = %q, want %q", out, got, want)
