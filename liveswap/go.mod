@@ -10,7 +10,7 @@ require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/dustin/go-humanize v1.1.0
 	github.com/go-jose/go-jose/v4 v4.1.5
-	github.com/godbus/dbus/v5 v5.2.2
+	github.com/godbus/dbus/v5 v5.2.3
 	go.uber.org/goleak v1.3.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/net v0.61.0

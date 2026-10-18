@@ -2265,3 +2265,71 @@ func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
 		t.Fatalf("an unreconciled pre_start must keep the release: %v", err)
 	}
 }
+
+// treeOf lists every path under dir, relative to it, so a test can
+// tell whether anything was written there.
+func treeOf(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	must(t, filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		out = append(out, rel)
+		return err
+	}))
+	return out
+}
+
+// A deploy or rollback into an app dir that is not the directory it
+// names is refused before it reads or writes anything through it
+// (#300): through `<root>/demo -> shop`, or any of the dirs it makes
+// linked to shop's, nothing lands in shop's dirs, nothing is fetched
+// or launched, and the refusal names demo's own path, never shop's.
+func TestDeployRefusesAnAppDirThatIsALink(t *testing.T) {
+	for _, link := range []string{"", "releases", "shared", "tmp", "run", "proxy"} {
+		for _, req := range []deployRequest{
+			{url: "https://x/a.tgz", version: "v9"},
+			{version: "v1", rollback: true}, // a version shop has
+		} {
+			t.Run(link+"/"+req.source(), func(t *testing.T) {
+				rig := newTestRig(t)
+				demo := rig.spec.dirs
+				shop := newAppDirs(demo.root, "shop")
+				staleInstance(t, shop, linkTestNonce)
+				must(t, os.MkdirAll(shop.release("v1"), 0o750))
+				before := treeOf(t, shop.app)
+				want := demo.app
+				if link == "" {
+					must(t, os.Symlink("shop", demo.app))
+				} else {
+					must(t, demo.ensure())
+					want = filepath.Join(demo.app, link)
+					must(t, os.Remove(want))
+					must(t, os.Symlink(filepath.Join("..", "shop", link), want))
+				}
+				err := rig.ma.Deploy(context.Background(), req)
+				if err == nil || !strings.Contains(err.Error(), "refusing to deploy: "+want+" ") || strings.Contains(err.Error(), "shop") {
+					t.Fatalf("want a refusal naming %s and not shop, got %v", want, err)
+				}
+				if rig.fetch.lastReq.version != "" || rig.runner.startCount() != 0 {
+					t.Fatal("the deploy went on through the link")
+				}
+				if after := treeOf(t, shop.app); !slices.Equal(before, after) {
+					t.Fatalf("shop's dirs changed through demo's link:\n before %v\n after  %v", before, after)
+				}
+			})
+		}
+	}
+}
+
+// The one difference the refusal allows is an alias on the liveswap
+// root itself (/srv/liveswap -> /mnt/liveswap): a deploy goes on.
+func TestDeployThroughAnAliasedRoot(t *testing.T) {
+	rig := newTestRig(t)
+	alias := filepath.Join(shortTempDir(t), "alias")
+	must(t, os.Symlink(rig.spec.dirs.root, alias))
+	rig.spec.dirs = newAppDirs(alias, "demo")
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
+}

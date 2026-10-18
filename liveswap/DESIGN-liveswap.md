@@ -84,6 +84,16 @@ Concept map from the Nomad-era stack:
   whose shape is the issuer's.
 - The deploy MUST be rejected (409) if one is already running for that
   app; other apps' deploys proceed independently.
+- A deploy, push or rollback MUST be refused (500) before it reads or
+  writes anything through the app's dirs when the app dir, or a dir
+  it makes (`releases/`, `shared/`, `tmp/`, `run/`, `proxy/`), is a
+  link, is not a directory, or cannot be checked for a link
+  (`writeRefusal`): through `<root>/blog -> shop` it would stage in
+  shop's `tmp/` and extract into shop's `releases/`. The refusal's error
+  names the path as the app spells it, never what a link resolves to;
+  the status the response carries still reads through the link
+  (Accepted residuals). An alias on the liveswap root itself is no
+  refusal.
 - A deploy or rollback naming the version that is running MUST
   relaunch it from its release on disk through the deploy pipeline
   minus fetch and extract (`preparing` runs no `pre_start`): a second
@@ -462,8 +472,10 @@ backwards edges reappearing *despite* this table.
   prober dial that from then on; retiring an instance unlinks it. So
   bind once per instance. The unit removes its own
   socket when it stops (`ExecStopPost=`); a confirmed sweep prunes any
-  left behind. The health probe is `GET <health_path>` with
-  `Host: localhost`.
+  left behind, but never through a link: if the app dir, `run/` or
+  `proxy/` is one (`<root>/blog -> shop`), is not a directory, or
+  cannot be checked for a link, the sweep logs it and prunes nothing.
+  The health probe is `GET <health_path>` with `Host: localhost`.
 - `Authorization` (`auth_header`) follows a redirect only while the
   hop's host is the first hop's or a subdomain of it, and is dropped
   for good at the first hop outside that domain (Go's
@@ -608,6 +620,8 @@ severity × occurrence × detection, then the fix's size and risk.
 | A `pre_start` that exits within milliseconds of `deadline` can still read as timed out: `jobResult` prefers a job result already received when the context ends, but not one whose signal is still in flight. The deploy fails red naming the deadline, and the release of a migration that ran is removed. | `jobResult` | 2 | 3 | 1 | 6 | size 3 (a second completion source: a oneshot's transient unit is unloaded on success, so no `Result` is left to ask for) | Rule 2 holds (red, named); under rule 3 the product is under 20. A migration that ends on its deadline has used its whole budget; raising `deadline` is the remedy. |
 | A Debian 13 host that passes the tutorial's step 2 (apt's `systemd (>= 257)` floor, `systemd-detect-virt --container`) but whose kernel or container refuses the sandbox's namespaces installs and serves the starter config, and first fails at step 3: `hotserve init`'s reload is liveswap's first start. That reload is refused, the probe's error names the cause, and the starter keeps serving; the box's repository, signer and workflow carry over to a fixed or new host. | `probeSandboxCapability`, from `App.Start` | 2 | 5 | 1 | 10 | size 3, risk 1 (a sandbox-check subcommand that step 2 runs as the hotserve user) | Rule 2 holds (it ends red and named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#274, 2026-10-17; #225 scored the same case at occurrence 3, but a host is the operator's choice, so it scores as input). The probe needs the hotserve user and its lingering manager, which the package's postinst creates, so the earliest any check could run is the end of `apt install`, minutes before step 3, with the same refusal and the same fix. A check in postinst could only warn, since a failed postinst leaves the package half-configured: one line in apt's output, after up to two 30-second probe budgets inside dpkg. And liveswap with no apps runs no probe (`len(a.managed) > 0` in `App.Start`), so the starter config cannot carry one. |
 | `max_token_ttl {env.NAME}` in a `deploy_trust local` block is refused at config load (`invalid max_token_ttl "{env.NAME}"`), though the README says `{env.*}` placeholders are resolved at config load: the duration is parsed when the Caddyfile is, before placeholders are. | `deploytrust.Parse` | 2 | 5 | 1 | 10 | size 2, risk 2 (a string field, resolved in `ResolvePlaceholders` and parsed in `Build`) | Rule 2 holds (refused and named, before anything runs); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#296, 2026-10-17). Every liveswap duration directive (`health_interval`, `deadline`, …) parses the same way, so this one matches them; the Caddyfile's own `{$NAME}`, substituted when the file is read, works for all of them. |
+| An app dir, or a dir it makes, that is a link to a sibling's (`<root>/blog -> shop`, `blog/proxy -> ../shop/proxy`) is still followed outside a deploy. blog's status lists shop's releases as its own available versions, and so does the status a refused deploy's response carries. blog's recovery reads shop's `state.json`; it and the watchdog's relaunch make and remove a run dir in shop's `run/` and are refused at launch for a linked app dir, `releases/`, `shared/` or `run/`, recovery retrying, backing off to once a minute. A linked `proxy/` launches: blog's pins land in shop's `proxy/`, where shop's sweep removes them, so blog, not shop, goes unreachable. | `status`, `ensureRunning`, `launchVersion` | 3 | 5 | 3 | 45 | size 2, risk 1 (`writeRefusal` in status and before a relaunch, #300) | Scores to fix (rule 3); held by decision (#300, 2026-10-18: the deploy side is fixed, the rest held) until a box runs a link under the root, or renaming or aliasing an app becomes a feature. No box does. Nothing here writes into the sibling's releases or data: a deploy, push or rollback through such a dir is refused before it writes (`writeRefusal`), so a rollback to a listed version is refused and named; a relaunch through a linked app dir, `releases/`, `shared/` or `run/` is refused at launch (`resolveBindSources`), red and named; and the socket prune never follows a link (`linkAt`), so no sibling loses its socket and pin that way. |
+| A push refused before its upload is staged (a dir that is not the directory it names, like a 413 or a staging failure) leaves `last_deploy` as it was, where a URL deploy or rollback refused the same way replaces it. | `deployPush` | 2 | 5 | 1 | 10 | size 2, risk 2 (a push refusal through the pipeline's bookkeeping) | Under 20, and not a size-1, risk-1 fix (rule 3). The push's own response is the refusal, a 500 naming the path, the reason and the remedy, and the journal says it with who asked (`deploy failed`, `via`, `remote`). Every refusal of a push before staging already leaves `last_deploy` alone, so a status read after a push tells the same story for each. |
 
 **Owed** (over the bar, not yet fixed):
 
