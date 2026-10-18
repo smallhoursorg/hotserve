@@ -61,9 +61,11 @@ import (
 // bindPath is one of the app's own directories bound back into its
 // view: dest is where the app sees it (and what WorkingDirectory,
 // HOME and the {release_dir}/{shared_dir} placeholders name), source
-// is what is mounted there. They differ only when the operator has
-// pointed one of those directories somewhere else with a symlink —
-// binding the resolved path at the resolved path would put the
+// is what is mounted there. They differ only when the path to the
+// liveswap root goes through a link (/srv/liveswap -> /mnt/liveswap);
+// a link anywhere below the root is refused at launch
+// (resolveBindSources). Binding the resolved path at the resolved
+// path would put the
 // directory somewhere the app has no reason to look, and its own
 // spelling would be gone with the tmpfs that masks the root.
 type bindPath struct {
