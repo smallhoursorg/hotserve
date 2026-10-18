@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -119,7 +120,7 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 		writable: []bindPath{{dest: "/var/lib/liveswap/blog/shared"}}}
 	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec})
 	for _, name := range []string{
-		"PrivateNetwork", "NetworkNamespacePath", "PrivateIPC", "IPCNamespacePath",
+		"PrivateNetwork", "NetworkNamespacePath",
 	} {
 		if v, present := got[name]; present {
 			t.Errorf("%s=%v is set: the app must share the network namespace for its outbound calls", name, v)
@@ -139,6 +140,78 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 		if !found {
 			t.Errorf("%s missing, the app cannot bind its socket or call out: %v", want, fam.Names)
 		}
+	}
+}
+
+// Not a promise but a measured limit, pinned so that adding the
+// property does not look free: PrivateIPC= (or a named
+// IPCNamespacePath=) is not set. On systemd 257's user manager each
+// process of a unit gets a user namespace of its own, so only the
+// first one can make the unit's IPC namespace; every later one, such
+// as the ExecStopPost that removes the instance's socket, fails
+// 226/NAMESPACE on its /dev/mqueue mount, and
+// TestIntegrationSystemdUnitRemovesItsSocketWhenItStops fails with it
+// (measured 2026-10-18, #311). Siblings share SysV IPC and POSIX
+// message queues until that changes (DESIGN-sandbox.md).
+func TestNoIPCNamespaceWhileControlProcessesCannotJoinIt(t *testing.T) {
+	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: probeSandboxSpec(), Socket: "/var/lib/liveswap/blog/run/0a1b2c3d0a1b2c3d/app.sock"})
+	for _, name := range []string{"PrivateIPC", "IPCNamespacePath"} {
+		if v, present := got[name]; present {
+			t.Errorf("%s=%v is set: the unit's ExecStopPost cannot join the IPC namespace its main process made, and fails 226/NAMESPACE", name, v)
+		}
+	}
+}
+
+// Promise: "An app's sockets MUST be of the families
+// `RestrictAddressFamilies=` names, however they are created." That
+// filter acts on socket(2), and two other routes reach a socket:
+//
+//   - An io_uring ring's IORING_OP_SOCKET (kernel 5.19+; Debian 13
+//     ships 6.12) creates one without that call, so a family the list
+//     leaves out (AF_ALG, AF_VSOCK) would be one ring away.
+//     @system-service admits io_uring_setup through @aio, so a deny
+//     entry takes it back out, and with no ring the other two io_uring
+//     calls have nothing to act on.
+//   - On amd64 the kernel also runs the x86-32 ABI, where socket(2) is
+//     reached through socketcall(), and systemd applies no
+//     address-family filter to that ABI at all.
+//     SystemCallArchitectures=native takes the ABI away; a 32-bit
+//     executable is refused at the deploy's pre-flight instead
+//     (TestCheckMachineRefusesA32BitExecutable).
+//
+// The filter's order is half the promise. The manager builds a unit's
+// filter in the mode of the first SystemCallFilter= it reads: the
+// allow list first, then a deny entry that removes a name from it.
+// Reversed, the first entry would make a deny list, and the allow list
+// after it would take names out of that list rather than restrict
+// anything.
+func TestNoSocketBypassesTheAddressFamilyFilter(t *testing.T) {
+	u := unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: probeSandboxSpec()}
+	if a, _ := propMap(u)["SystemCallArchitectures"].([]string); !reflect.DeepEqual(a, []string{"native"}) {
+		t.Errorf("SystemCallArchitectures = %v, want [native]: on amd64 the x86-32 ABI's socketcall() opens any family", a)
+	}
+	var filters []allowList
+	for _, v := range propValues(u, "SystemCallFilter") {
+		f, ok := v.(allowList)
+		if !ok {
+			t.Fatalf("SystemCallFilter value is %T, want an allowList", v)
+		}
+		filters = append(filters, f)
+	}
+	if len(filters) == 0 || !filters[0].AllowList || !slices.Contains(filters[0].Names, "@system-service") {
+		t.Fatalf("the first SystemCallFilter must be the @system-service allow list, or the manager builds a deny list: %+v", filters)
+	}
+	denied := false
+	for _, f := range filters[1:] {
+		if f.AllowList {
+			t.Errorf("an allow list after the first adds back what a deny entry took out: %+v", filters)
+		}
+		if slices.Contains(f.Names, "io_uring_setup") {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Errorf("io_uring_setup is still allowed: an io_uring ring opens sockets RestrictAddressFamilies= never sees: %+v", filters)
 	}
 }
 

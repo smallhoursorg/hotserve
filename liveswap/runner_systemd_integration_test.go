@@ -879,11 +879,19 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		t.Errorf("nprocs = %q, want a handful (own PID namespace)", got["nprocs"])
 	}
 	unit := h.state().Unit
-	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths,LimitCORE,LimitCORESoft")
-	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectControlGroups=yes", "TemporaryFileSystem=/:ro", "LimitCORE=0", "LimitCORESoft=0"} {
+	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths,LimitCORE,LimitCORESoft,SystemCallArchitectures")
+	for _, want := range []string{"PrivatePIDs=yes", "PrivateUsers=yes", "ProtectControlGroups=yes", "TemporaryFileSystem=/:ro", "LimitCORE=0", "LimitCORESoft=0", "SystemCallArchitectures=native"} {
 		if !strings.Contains(props, want) {
 			t.Errorf("unit lacks %s:\n%s", want, props)
 		}
+	}
+	// The filter the manager built from the allow list and the deny
+	// entry after it: still an allow list (no leading ~), still holding
+	// the rest of @aio — so io_uring_setup's absence is the deny entry's
+	// doing, not a missing set — and without io_uring_setup.
+	filter := strings.Fields(strings.TrimPrefix(strings.TrimSpace(run(t, "systemctl", "--user", "show", unit, "-p", "SystemCallFilter")), "SystemCallFilter="))
+	if len(filter) == 0 || strings.HasPrefix(filter[0], "~") || !slices.Contains(filter, "io_uring_enter") || slices.Contains(filter, "io_uring_setup") {
+		t.Errorf("SystemCallFilter is not @system-service less io_uring_setup: %v", filter)
 	}
 	// The retired half of the old model, read back off the live unit.
 	for _, gone := range []string{"ProtectSystem=strict", "InaccessiblePaths=/"} {
