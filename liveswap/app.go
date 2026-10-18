@@ -1553,10 +1553,13 @@ type statusSnapshot struct {
 	// app with no releases reports []), so an empty set is
 	// distinguishable from a server that doesn't report the field.
 	AvailableVersions []string `json:"available_versions"`
-	// OrderedByMtime names the entries of AvailableVersions that have
-	// no deploy record: they come after every recorded release, ordered
-	// among themselves by their release dir's mtime, which the app can
-	// set; absent when there are none.
+	// OrderedByMtime names the entries of AvailableVersions placed by
+	// their release dir's mtime, which the app can set: those with no
+	// deploy record (deployed before records, a record write that
+	// failed, or a first deploy still in flight) and those whose record
+	// is there but cannot be read. Each comes after every recorded
+	// release unless it is the running version, which the list puts
+	// first; absent when there are none.
 	OrderedByMtime []string `json:"ordered_by_mtime,omitempty"`
 }
 

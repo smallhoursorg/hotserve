@@ -472,6 +472,17 @@ func TestReleaseOrderLedger(t *testing.T) {
 			available: "v2 vb va", byMtime: "vb va", kept: "v2 vb",
 		},
 		{
+			name: "a dir whose name is not a version holds no keep place, whatever its mtime: a listed version is never pruned for it",
+			rels: []rel{
+				{"v0", "", time.Time{}, at(0)}, // listed, by mtime
+				{"v1", "succeeded", at(1), at(1)},
+				{"v2", "succeeded", at(2), at(2)},
+				{"old copy", "", time.Time{}, future}, // not a version: never listed
+			},
+			keep: 3, protect: "v2", previous: "v1",
+			available: "v1 v2 v0", byMtime: "v0", kept: "v0 v1 v2",
+		},
+		{
 			name: "a record that does not prove itself one counts as none",
 			rels: []rel{
 				{"v1", "forged", future, at(1)},

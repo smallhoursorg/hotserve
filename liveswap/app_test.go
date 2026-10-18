@@ -1071,6 +1071,8 @@ func TestStatusListsTheRunningVersionFirstThroughCutovers(t *testing.T) {
 			}
 		}
 	}()
+	// Errorf and break, never Fatalf: the rollbacks go on until done,
+	// and a goroutine that logs after its test ended panics the binary.
 	for polling := true; polling; {
 		select {
 		case <-done:
@@ -1079,9 +1081,11 @@ func TestStatusListsTheRunningVersionFirstThroughCutovers(t *testing.T) {
 		}
 		s := rig.ma.status()
 		if s.CurrentVersion != "" && slices.Contains(s.AvailableVersions, s.CurrentVersion) && s.AvailableVersions[0] != s.CurrentVersion {
-			t.Fatalf("current_version %s, available_versions %v: the running version not first", s.CurrentVersion, s.AvailableVersions)
+			t.Errorf("current_version %s, available_versions %v: the running version not first", s.CurrentVersion, s.AvailableVersions)
+			break
 		}
 	}
+	<-done
 }
 
 // With only proxy/ a link, the prune removes nothing — not even the

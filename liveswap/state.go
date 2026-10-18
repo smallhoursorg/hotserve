@@ -158,6 +158,10 @@ type release struct {
 	at      time.Time
 	failed  bool // its latest deploy failed
 	byMtime bool // no record: at is the dir's mtime
+	// notRelease: a dir under releases/ whose name is not a version.
+	// Nothing could deploy it or roll back to it, and the status does
+	// not list it, so GC sorts it last and it holds no keep place.
+	notRelease bool
 }
 
 // placeRelease is e's place in the order, from its record in records
@@ -188,9 +192,12 @@ func newestFirst(rels []release, first ...string) {
 		}
 		return len(first)
 	}
-	// Recorded and succeeded, then recorded and failed, then no record.
+	// Recorded and succeeded, then recorded and failed, then no record,
+	// then (in GC) a dir whose name is not a version.
 	tier := func(r release) int {
 		switch {
+		case r.notRelease:
+			return 3
 		case r.byMtime:
 			return 2
 		case r.failed:
@@ -281,7 +288,9 @@ func runningFirst(list []string, running string) []string {
 // promoted, now serving — first, so it is never deleted and holds one
 // of the keep places, then previous — the version it replaced, the
 // way back; "" when none, or protect itself on a relaunch. Crash
-// orphans of extraction are always removed. No release is deleted, and
+// orphans of extraction are always removed, and so is a dir whose name
+// is not a version: it holds no keep place, so it never takes the
+// place of a version the status lists. No release is deleted, and
 // GC says why, when the app dir or releases/ is not the directory it
 // names (linkAt: through a link it would delete another app's
 // releases; the deploy's writeRefusal checked the same before it
@@ -331,6 +340,10 @@ func gcReleases(d appDirs, keep int, protect, previous string, logger *zap.Logge
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue // dotfile strays (and the staging dirs above) are not releases
 		}
+		if !validVersion(e.Name()) {
+			rels = append(rels, release{name: e.Name(), notRelease: true})
+			continue
+		}
 		r, ok, err := placeRelease(records, e)
 		if err != nil {
 			logger.Error("release GC: holding a release whose deploy record cannot be read", zap.String("version", e.Name()), zap.Error(err))
@@ -342,11 +355,14 @@ func gcReleases(d appDirs, keep int, protect, previous string, logger *zap.Logge
 	}
 	newestFirst(rels, protect, previous)
 	for i, r := range rels {
-		if i < keep || r.name == protect {
+		if (i < keep && !r.notRelease) || r.name == protect {
 			continue
 		}
 		placedBy := "deploy record"
-		if r.byMtime {
+		switch {
+		case r.notRelease:
+			placedBy = "not a version name"
+		case r.byMtime:
 			placedBy = "mtime"
 		}
 		if err := os.RemoveAll(filepath.Join(d.releases, r.name)); err != nil {

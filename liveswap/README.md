@@ -976,7 +976,9 @@ prunes after the running one and the one before it, and a rollback
 target while it is on disk. A release whose record is there but cannot be read is
 listed the same way, and release GC holds it (neither deletes it nor
 counts it toward `keep`) and says so in the journal until the record
-can be read.
+can be read. During a version's first deploy, the version being
+promoted has no record yet: until the deploy returns, the status lists
+it first, as the running version, and names it in `ordered_by_mtime`.
 
 **Versions are immutable.** A deploy (URL or push) never overwrites an
 existing on-disk release, so a version you can roll back to can't be
