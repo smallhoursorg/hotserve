@@ -201,7 +201,16 @@ stream() { # <curl args...>: runs the request, prints it, keeps it
 	# set -e before its status is written.
 	{
 		rc=0
-		curl --fail-with-body --silent --show-error --no-buffer --max-time 600 \
+		# --max-time: the deploy's worst case with the box's defaults and
+		# a pre_start, plus the artifact's transfer. The pre_start's
+		# deadline (5m), the health gate's deadline (5m) and its overrun
+		# of one health_interval and two health_timeouts (9s), drain (5s)
+		# and grace (10s) come to 10m24s; 900 leaves 4m36s for the
+		# transfer. Raise it with any of those settings. Giving up before
+		# the cutover fails the deploy with the old version still
+		# serving, and stops a running pre_start mid-migration; giving up
+		# after the cutover reports a deploy the box completed as failed.
+		curl --fail-with-body --silent --show-error --no-buffer --max-time 900 \
 			-H "Authorization: Bearer $token" -H "Accept: application/x-ndjson" \
 			-D "$hdrs" "$@" || rc=$?
 		echo "$rc" >"$rcfile"

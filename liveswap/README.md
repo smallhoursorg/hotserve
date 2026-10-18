@@ -226,9 +226,10 @@ Bun: `Bun.serve({ unix: process.env.SOCKET, fetch })`. Hono on Node:
 -b unix://{socket}`. Rust: axum/hyper on a `tokio::net::UnixListener`.
 Where the path goes on the command line, as in those three, write the
 `{socket}` placeholder (see [Placeholders](#placeholders)) in
-`command`, not `$SOCKET`: `command` runs without a shell, and systemd
-expands a bare `$SOCKET` only as a whole argument, never inside one
-like `unix:$SOCKET`.
+`command`, not `$SOCKET`: `command` and `pre_start` run without a
+shell and without systemd's `$VAR` substitution, so every word reaches
+the app as written and `$SOCKET` arrives as those seven characters. A
+command that needs a variable's value reads it from its environment.
 
 Framework CLIs that only bind TCP (`next start`, Astro's node adapter)
 need a small custom server that calls the framework's request handler
@@ -380,9 +381,9 @@ runs as the hotserve user, so one bare app could read every sibling's
 data and hotserve's own keys. That is why there is no per-app opt-out
 either.
 
-**An app sees its release dir, its `shared/`, a private `/tmp`, the OS
-runtime. Nothing else on the host
-exists in its view.**
+**An app sees its release dir, its `shared/`, its instance's
+`run/<nonce>/`, a private `/tmp`, the OS runtime. Nothing else on the
+host exists in its view.**
 
 That is the whole guarantee. The view is built deny-by-default
 (`TemporaryFileSystem=/:ro` plus explicit binds), so it is a policy
@@ -406,9 +407,10 @@ actually has — a dozen or so — and `ls /var/lib` shows exactly one,
 the liveswap root.
 
 The working directory is the release dir and `HOME` defaults to
-`shared/`; both are writable. `HOME` is applied before `env_file` and
-inline `env`, so you can point it elsewhere — inside the release dir,
-say. Point it somewhere the sandbox does not bind and
+`shared/`. Those two and the instance's `run/<nonce>/`, where it binds
+its socket, are the writable binds (`BindPaths=`). `HOME` is applied
+before `env_file` and inline `env`, so you can point it elsewhere —
+inside the release dir, say. Point it somewhere the sandbox does not bind and
 the app gets a `HOME` that does not exist inside its unit; liveswap
 warns at every launch rather than refusing, since you asked for it.
 The network namespace is shared by design — apps make outbound calls
@@ -525,8 +527,8 @@ already had.
 `ENOENT` for something that exists on the host: a database's unix
 socket, a data directory outside the app's own, a runtime under
 `/opt`. **There is no way to widen a view.** An app sees the OS base
-view, its own release dir and its own `shared/`. That is the whole
-list, and it is fixed.
+view, its own release dir, its own `shared/` and its instance's
+`run/<nonce>/`. That is the whole list, and it is fixed.
 
 That is a deliberate limit, not an oversight. The one mechanism that
 would widen a view is also the one that has to be correct against
@@ -550,9 +552,10 @@ Practical consequences worth planning around:
   every unit. A vendored runtime under `/opt`, or an `nvm`/`asdf` shim
   under a home directory, is not — ship it inside the release instead.
 
-An app's own `releases/<version>` and `shared/` must **be** the
-directories they name. hotserve resolves them immediately before the
-unit is created and refuses to launch if either points somewhere else,
+An app's own `releases/<version>`, `shared/` and `run/<nonce>/` must
+**be** the directories they name. hotserve resolves them immediately
+before the unit is created and refuses to launch if any points
+somewhere else,
 because the app dir is writable by the app: a symlink placed there
 cannot be told from one you meant. To put an app's data on another
 disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
@@ -844,8 +847,10 @@ release, all through the same endpoint and the same auth:
 ```
 
 `auth_header` is optional and is sent verbatim as `Authorization` on
-the artifact download (dropped automatically on cross-host redirects,
-so GitHub's S3 redirect works). The URL must pass `artifact_allowlist`.
+the artifact download. A redirect carries it only while each hop's
+host is the URL's host or a subdomain of it; the first hop outside
+that domain drops it for good, so GitHub's S3 redirect works. The URL
+must pass `artifact_allowlist`.
 
 `sha256` is optional too: the tarball's digest, 64 hex characters
 (`sha256sum blog.tar.gz`). The box hashes the download as it streams
@@ -1218,7 +1223,7 @@ steps:
       "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=hotserve" | jq -er .value)
     echo "::add-mask::$JWT"
     SHA256=$(sha256sum blog.tar.gz | cut -d' ' -f1)
-    curl --fail-with-body --max-time 600 -X POST \
+    curl --fail-with-body --max-time 900 -X POST \
       -H "Authorization: Bearer $JWT" \
       -d '{
         "url": "'"$ASSET_URL"'",
@@ -1291,7 +1296,7 @@ deploy:
         "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz"
     - |
       SHA256=$(sha256sum blog.tar.gz | cut -d' ' -f1)
-      curl --fail-with-body --max-time 600 -X POST \
+      curl --fail-with-body --max-time 900 -X POST \
         -H "Authorization: Bearer $HOTSERVE_JWT" \
         -d "{
           \"url\": \"$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/blog/$CI_COMMIT_SHORT_SHA/blog.tar.gz\",
@@ -1320,6 +1325,16 @@ status, the last health probe's answer, the last lines the app and
 its `pre_start` wrote (see [Webhook API](#webhook-api)); the whole
 journal stays on the box, `journalctl -t hotserve-blog`.
 
+`--max-time 900` is the budget [Webhook API](#webhook-api) gives, with
+the defaults and a `pre_start`, plus the artifact's transfer: the
+`pre_start`'s `deadline` (5m) + the health gate's `deadline` (5m) +
+one `health_interval` and two `health_timeout`s (9s) + `drain` (5s) +
+`grace` (10s) = 10m24s, which leaves 4m36s for the download. Raise it
+with any of those settings. A curl that gives up before the cutover
+fails the deploy, and the old version keeps serving — and a `pre_start`
+still running is stopped where it is, mid-migration; one that gives up
+after the cutover turns red a deploy the box completed.
+
 ## Server layout
 
 ```
@@ -1334,7 +1349,8 @@ journal stays on the box, `journalctl -t hotserve-blog`.
 ```
 
 Inside its sandbox an instance sees only `releases/<its version>/`
-and `shared/` of this tree (see [Sandbox](#sandbox)).
+and `shared/` of this tree, and its own `run/<nonce>/`, where it binds
+its socket (see [Sandbox](#sandbox)).
 
 ## Semantics and trade-offs (read this)
 
