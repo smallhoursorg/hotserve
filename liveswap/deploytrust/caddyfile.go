@@ -3,6 +3,7 @@ package deploytrust
 import (
 	"strings"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 
 	"github.com/smallhoursorg/hotserve/liveswap/internal/dispenser"
@@ -20,6 +21,7 @@ import (
 //	deploy_trust local {           # non-CI / manual / test fallback
 //	    public_key <path>
 //	    audience   <aud>           # this box's; `deploy-token --audience` to match
+//	    max_token_ttl <duration>   # longest exp - iat accepted; default 24h
 //	}
 //	deploy_trust oidc  { issuer <url>; audience <aud>; ... }
 func Parse(d *caddyfile.Dispenser) (TrustConfig, error) {
@@ -52,6 +54,18 @@ func Parse(d *caddyfile.Dispenser) (TrustConfig, error) {
 				return tc, d.ArgErr()
 			}
 			tc.PublicKey = d.Val()
+		case "max_token_ttl":
+			if !d.NextArg() {
+				return tc, d.ArgErr()
+			}
+			ttl, err := caddy.ParseDuration(d.Val())
+			if err != nil {
+				return tc, d.Errf("invalid max_token_ttl %q: %v", d.Val(), err)
+			}
+			// Kept as written, zero and negative included, for Build to
+			// refuse in one place for the Caddyfile and JSON alike.
+			cd := caddy.Duration(ttl)
+			tc.MaxTokenTTL = &cd
 		case "subject":
 			if !d.NextArg() {
 				return tc, d.ArgErr()

@@ -730,7 +730,16 @@ unaudienced token; for `local`, the name of this box, see below),
 `ref`, `environment`, etc.; a claim named `@id` is refused, because
 Caddy deletes that key from the config before hotserve reads it),
 `subject` (sugar for `claim sub`),
-`issuer` (oidc/gitlab), `public_key` (local).
+`issuer` (oidc/gitlab), `public_key` and `max_token_ttl` (local).
+
+A `local` token is a bearer credential for as long as it lives, and
+nothing on the box revokes one short of removing its key. So a
+`local` block accepts a token only while its lifetime, `exp - iat`, is
+at most `max_token_ttl <duration>` (default `24h`): a token without
+`iat`, or minted to live longer, is refused, and the journal's
+`refused` names the directive. `hotserve deploy-token` mints for
+`--ttl` (default `5m`) and warns above an hour. Mint one per deploy;
+a job that cannot raises the bound on its block.
 
 The OIDC presets also **require an identity claim** — one of
 `repository`/`repository_id`/… (github), `project_path`/`project_id`/…
@@ -827,8 +836,9 @@ repository can mint a token for audience `hotserve`, so an answer that
 named the failed check would tell them which apps exist and what each
 block pins. The `webhook auth failed` line carries `refused`: one
 entry per source, in config order, each the source's label and what
-it refused — the signature, `exp`, the audience, or a `claim` that did
-not match, with the identity the token presented:
+it refused — the signature, `exp`, a local token's lifetime over
+`max_token_ttl`, the audience, or a `claim` that did not match, with
+the identity the token presented:
 
 ```
 "refused":"oidc:https://token.actions.githubusercontent.com: claim \"repository\" mismatch, presented repository=your-org/other ref=refs/heads/main actor=alice; local:/etc/hotserve/alice.pub: go-jose/go-jose: error in cryptographic primitive"
@@ -838,9 +848,22 @@ A request with no bearer token says so instead, as does an app with
 no source at all. The box failing to consult the issuer — OIDC
 discovery on first use, or fetching its signing keys — lands here as
 well: still a 401 to the caller, with the network error in the
-journal. Each entry's reason is one line, cut at 300 bytes plus an
-ellipsis — an issuer's error quotes what the token carried, and a
-presented identity can be anything the issuer signed; the reason
+journal. An OIDC source fetches the issuer's keys only for a token
+signed under a key it does not hold yet, and at most once a minute:
+within a minute of its last fetch such a token is refused, with that
+fetch's error if it failed. So the first deploy after the issuer
+rotates its key, or comes back from an outage, can be refused for up
+to a minute; its retry goes through. A forged token under a key the
+box does hold costs it no request to the issuer, which is also why an
+issuer that replaces a key but keeps its kid is not picked up: tokens
+under the new key are refused, with `signature does not match the key
+held for kid "<kid>"; if the issuer replaced that key, systemctl
+reload hotserve` in `refused`, until the source fetches for another
+kid or that reload starts every source with an empty key set. Each
+entry's reason
+is one line, cut at 300 bytes plus an ellipsis — an issuer's error
+quotes what the token carried, and a presented identity can be
+anything the issuer signed; the reason
 comes before the identity, so the cut never takes it — after the
 source's label, which is your config and is not cut. The line count
 is bounded by the throttle below: past an address's ten failures a
