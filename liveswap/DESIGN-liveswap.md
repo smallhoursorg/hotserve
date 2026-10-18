@@ -408,7 +408,7 @@ backwards edges reappearing *despite* this table.
 | `liveswap.go` | App module, config structs + defaults, Validate, pool wiring |
 | `names.go` | the app-name and version alphabets, and the two helpers over them; shared by every layer |
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
-| `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
+| `appdirs.go` | `appDirs`: the on-disk layout for one app — path arithmetic, and the one check of what those paths resolve to (`ownDir`: canonical against canonical, the bind sources' rule). No state, no lock |
 | `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed at the name, no FIFO held, size-bounded — shared by the deploy records and `state.json` |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them, reading a zero field as unset, so a value below an option's minimum (0 included) is refused here, named; `soak` and `deploy_log_lines`, whose 0 is a setting, are pointers |
 | `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
@@ -451,8 +451,12 @@ backwards edges reappearing *despite* this table.
   prober dial that from then on; retiring an instance unlinks it. So
   bind once per instance. The unit removes its own
   socket when it stops (`ExecStopPost=`); a confirmed sweep prunes any
-  left behind. The health probe is `GET <health_path>` with
-  `Host: localhost`.
+  left behind, through `run/` and `proxy/` only as the directories
+  they name: a link at the app dir or at either
+  (`<root>/blog -> <root>/shop`) lands the prune in another app's
+  sockets, so it is refused and logged, and nothing is removed
+  (`appDirs.ownDir`, the check the deploy records' directory has). The
+  health probe is `GET <health_path>` with `Host: localhost`.
 - `Authorization` (`auth_header`) follows a redirect only while the
   hop's host is the first hop's or a subdomain of it, and is dropped
   for good at the first hop outside that domain (Go's

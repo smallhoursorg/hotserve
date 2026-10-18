@@ -566,7 +566,11 @@ cannot be told from one you meant. To put an app's data on another
 disk, bind-mount it at the same path (`mount --bind /mnt/blog-data
 /var/lib/liveswap/blog/shared`, or the equivalent fstab entry) — a
 mount resolves to itself, so it is invisible to that check, and an app
-cannot forge one.
+cannot forge one. The app's own directory and its `run/` and `proxy/`
+are held to the same rule before hotserve prunes the sockets of
+stopped instances there: through a link (`blog -> shop`) they would be
+another app's live sockets, so the link is logged as an error and
+nothing is removed through it.
 
 **Workloads the sandbox cannot host are not supported.** Anything
 that creates its own namespaces (Chromium's sandbox under Puppeteer,

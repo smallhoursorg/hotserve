@@ -241,22 +241,16 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*Red
 // recordsDir is the records directory as the directory it names
 // (rule 4): with create, made if absent; refused if a link or anything
 // else stands in its place, or if any ancestor is a link that lands it
-// elsewhere — `<root>/blog -> <root>/shop` would have blog's deploys
-// list, serve and prune shop's records. The check is the bind
-// sources': canonical against canonical (canonicalDeepest, so a root
-// not yet on disk under a linked ancestor resolves as far as it can),
-// with an alias on the liveswap root itself the one difference
-// allowed. Without create — every read — a missing directory is
-// fs.ErrNotExist and nothing is made: a status poll must not create
-// an app's tree.
+// elsewhere (appDirs.ownDir, whose canonicalDeepest resolves a root
+// not yet on disk under a linked ancestor as far as it can). Without
+// create — every read — a missing directory is fs.ErrNotExist and
+// nothing is made: a status poll must not create an app's tree.
 func recordsDir(d appDirs, create bool) (string, error) {
-	rootC := canonicalDeepest(d.root)
-	want := filepath.Join(rootC, filepath.Base(d.app), "deploys")
 	// The app dir first, before anything is created through it: an
 	// ancestor link would otherwise have MkdirAll make the directory
 	// where the link points before the check below refused it.
-	if got := canonicalDeepest(d.app); got != filepath.Dir(want) {
-		return "", fmt.Errorf("%s resolves to %s (a planted link is not followed)", d.app, got)
+	if err := d.ownDir(d.app); err != nil {
+		return "", err
 	}
 	if create {
 		if err := os.MkdirAll(d.deploys, 0o750); err != nil {
@@ -270,8 +264,8 @@ func recordsDir(d appDirs, create bool) (string, error) {
 	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		return "", fmt.Errorf("%s is not a directory (a planted link is not followed)", d.deploys)
 	}
-	if got := canonicalDeepest(d.deploys); got != want {
-		return "", fmt.Errorf("%s resolves to %s, not %s (a planted link is not followed)", d.deploys, got, want)
+	if err := d.ownDir(d.deploys); err != nil {
+		return "", err
 	}
 	return d.deploys, nil
 }

@@ -1465,6 +1465,95 @@ func TestSweepPrunesSocketsNotHeldByTheManager(t *testing.T) {
 	}
 }
 
+// Promise: a link at an app's directory, or at its run/ or proxy/, is
+// never pruned through, and the refusal is named. With
+// `<root>/demo -> <root>/shop`, demo's recovery and launches would
+// otherwise remove shop's live socket and pin: a confirmed sweep is
+// the manager's word about demo's units only, and the bind check that
+// refuses demo's launch (resolveBindSources) runs at Start, after the
+// sweep has pruned.
+func TestPruneDoesNotFollowALinkIntoASiblingsDirs(t *testing.T) {
+	const live = "5e5e5e5e5e5e5e5e" // shop's serving instance
+	plants := []struct {
+		name  string
+		plant func(t *testing.T, demo, shop appDirs)
+	}{
+		{"app dir", func(t *testing.T, demo, shop appDirs) {
+			must(t, os.Symlink("shop", demo.app))
+		}},
+		{"run", func(t *testing.T, demo, shop appDirs) {
+			must(t, os.MkdirAll(demo.app, 0o750))
+			must(t, os.Symlink(shop.run, demo.run))
+		}},
+		{"proxy", func(t *testing.T, demo, shop appDirs) {
+			must(t, os.MkdirAll(demo.app, 0o750))
+			must(t, os.Symlink(shop.proxy, demo.proxy))
+		}},
+	}
+	paths := []struct {
+		name string
+		run  func(t *testing.T, rig *testRig)
+	}{
+		{"recovery with nothing recorded", func(t *testing.T, rig *testRig) {
+			_ = rig.ma.ensureRunning() // its outcome is not the point: what it removed is
+		}},
+		{"recovery relaunching the recorded version", func(t *testing.T, rig *testRig) {
+			rig.store.state, rig.store.ok = appState{CurrentVersion: "v1"}, true
+			must(t, os.MkdirAll(rig.spec.dirs.release("v1"), 0o750))
+			_ = rig.ma.ensureRunning() // as above
+		}},
+		{"a deploy", func(t *testing.T, rig *testRig) {
+			_ = rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}) // as above
+		}},
+	}
+	for _, p := range plants {
+		for _, path := range paths {
+			t.Run(p.name+"/"+path.name, func(t *testing.T) {
+				rig := newTestRig(t)
+				core, logs := observer.New(zap.ErrorLevel)
+				rig.ma.logger = zap.New(core)
+				shop := newAppDirs(rig.spec.dirs.root, "shop")
+				must(t, shop.ensure())
+				bindSocket(t, shop.socket(live))
+				pin := filepath.Join(shop.proxy, live+".sock")
+				must(t, os.Link(shop.socket(live), pin))
+				p.plant(t, rig.spec.dirs, shop)
+				path.run(t, rig)
+				for _, f := range []string{shop.socket(live), pin} {
+					if _, err := os.Lstat(f); err != nil {
+						t.Errorf("shop's serving instance lost %s: %v", f, err)
+					}
+				}
+				refused := logs.FilterMessage("not pruning instance sockets").All()
+				if len(refused) == 0 || !strings.Contains(fmt.Sprint(refused[0].ContextMap()["error"]), "a planted link is not followed") {
+					t.Errorf("the refusal must be logged, naming the link: %v", logs.All())
+				}
+			})
+		}
+	}
+}
+
+// An alias on the liveswap root itself is the one difference the
+// prune's directory check allows: a root that is a link prunes a
+// leftover as a plain root does.
+func TestPruneThroughARootAlias(t *testing.T) {
+	target := shortTempDir(t)
+	alias := filepath.Join(shortTempDir(t), "root")
+	must(t, os.Symlink(target, alias))
+	d := newAppDirs(alias, "demo")
+	must(t, d.ensure())
+	const stale = "5e5e5e5e5e5e5e5e"
+	touchSocket(t, d.socket(stale))
+	must(t, os.WriteFile(filepath.Join(d.proxy, stale+".sock"), nil, 0o600))
+	pruneSockets(d, nil, zap.NewNop())
+	if got := socketNames(t, d.proxy); len(got) != 0 {
+		t.Fatalf("the leftover pin was not pruned under an aliased root: %v", got)
+	}
+	if _, err := os.Lstat(d.runDir(stale)); !os.IsNotExist(err) {
+		t.Fatalf("the leftover run dir was not pruned under an aliased root: %v", err)
+	}
+}
+
 // Promise: an instance's socket is gone once the instance is stopped —
 // the unit removes it (ExecStopPost=, which the fake handle mimics),
 // and the deploy's sweep would prune it anyway: the old one after a

@@ -142,12 +142,22 @@ var ownerLocks sync.Map // app name → *sync.Mutex; one per name ever seen
 // word is that nothing else is running. Best-effort: what cannot be
 // removed is logged, and the next launch's fresh nonce never collides
 // with it anyway.
+//
+// Each directory is pruned only as the directory it names (ownDir):
+// through a link at the app dir or at run/ or proxy/, the entries are
+// another directory's — a sibling's live socket and pin — and the
+// sweep that licensed the prune vouched for this app's units alone.
+// Such a directory is refused, named, and left as it is.
 func pruneSockets(d appDirs, keep []string, logger *zap.Logger) {
 	kept := map[string]bool{}
 	for _, n := range keep {
 		kept[n] = true
 	}
 	for _, dir := range []string{d.run, d.proxy} {
+		if err := d.ownDir(dir); err != nil {
+			logger.Error("not pruning instance sockets", zap.Error(err))
+			continue
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if !os.IsNotExist(err) {
