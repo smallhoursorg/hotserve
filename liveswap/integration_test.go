@@ -928,6 +928,69 @@ func TestIntegrationRollback(t *testing.T) {
 	})
 }
 
+// A reload that removes an app while a deploy of it is in flight leaves
+// none of its units running. The reload stops the old config's servers
+// without waiting for the deploy's request, which carries on; Destruct
+// waits for the deploy itself, then stops and sweeps what it left.
+func TestIntegrationRemovingAnAppMidDeployLeavesNoUnit(t *testing.T) {
+	bin := buildTestApp(t)
+	root := t.TempDir()
+	tarball := packRelease(t, bin, "v1", false)
+	inFetch := make(chan struct{}, 1)
+	artifactSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case inFetch <- struct{}{}:
+		default:
+		}
+		time.Sleep(time.Second) // the deploy is in flight while the reload lands
+		_, _ = w.Write(tarball)
+	}))
+	t.Cleanup(artifactSrv.Close)
+	artifactURL, err := url.Parse(artifactSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const app = "rmdemo"
+	tester := caddytest.NewTester(t)
+	tester.InitServer(appConfig(root, artifactURL.Port(), app), "caddyfile")
+
+	token := itestToken(t)
+	deployed := make(chan string, 1)
+	go func() {
+		body := fmt.Sprintf(`{"url":%q,"version":"v1"}`, artifactSrv.URL+"/rmdemo-v1.tar.gz")
+		req, _ := http.NewRequest(http.MethodPost, "http://localhost:9081/"+app, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+		if err != nil {
+			deployed <- err.Error()
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		data, _ := io.ReadAll(resp.Body)
+		deployed <- fmt.Sprintf("%d %s", resp.StatusCode, data)
+	}()
+	select {
+	case <-inFetch:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deploy never reached the artifact server")
+	}
+	// The reload that removes the app, mid-download.
+	tester.InitServer(appConfig(root, artifactURL.Port(), "rmother"), "caddyfile")
+	select {
+	case got := <-deployed:
+		if !strings.HasPrefix(got, "200 ") {
+			t.Fatalf("the deploy in flight runs to its end: %s", got)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the deploy in flight never answered")
+	}
+	pollUntil(t, 10*time.Second, "no unit of the removed app", func() bool { return appUnits(t, app) == "" })
+	time.Sleep(time.Second)
+	if units := appUnits(t, app); units != "" {
+		t.Fatalf("a unit of the removed app runs on:\n%s", units)
+	}
+}
+
 // appUnits is every unit the manager holds for app, in any state.
 func appUnits(t *testing.T, app string) string {
 	t.Helper()

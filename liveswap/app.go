@@ -280,7 +280,9 @@ type managedApp struct {
 	logger    *zap.Logger
 
 	// deployMu serializes deploys per app. TryLock (not a queue): a
-	// concurrent webhook gets an immediate 409 and CI can retry.
+	// concurrent webhook gets an immediate 409 and CI can retry. The
+	// one blocking Lock is Destruct's, on the app's removal, and it is
+	// never released.
 	deployMu sync.Mutex
 
 	// mu guards current, phase, phases and lastDeploy.
@@ -1588,7 +1590,6 @@ func (ma *managedApp) rollbackConfig(owner any) bool {
 func (ma *managedApp) Destruct() error {
 	ma.stopWatchdog()
 	c := ma.snapshot()
-	inst := ma.currentInstance()
 	if c.runner == nil {
 		return nil // pooled but never configured (a Start that failed before ours ran)
 	}
@@ -1598,14 +1599,25 @@ func (ma *managedApp) Destruct() error {
 		// units belong to whoever is or will be serving them. Leave
 		// them; the next start's sweep settles any that are truly
 		// orphaned.
-		if inst != nil {
+		if inst := ma.currentInstance(); inst != nil {
 			c.logger.Info("app keeps running for reattach", zap.String("version", inst.version), zap.String("unit", inst.handle.state().Unit))
 		}
 		return nil
 	}
 	// Removed by a reload that is now serving: no unit may outlive
-	// the definition. (The removing config's Cleanup has already
-	// joined its recovery, so nothing can launch after this sweep.)
+	// the definition. A deploy of the app may still be in flight — a
+	// reload stops the old config's servers without waiting for their
+	// requests — and past the sweep below it would start a unit nothing
+	// supervises, routes or stops. So the lock is taken, blocking: the
+	// deploy ends first, within its own bounds (DESIGN-liveswap.md,
+	// "Concurrency model"), and the reload's cleanup waits for it. It
+	// is never released: a removed app takes no further deploy, and a
+	// request the old config still serves gets a 409. The watchdog is
+	// stopped above and the removing config's Cleanup has joined its
+	// recovery, so nothing else can launch after this sweep either.
+	ma.deployMu.Lock()
+	// Read under the lock: a deploy that just promoted left its own.
+	inst := ma.currentInstance()
 	// Stop what we track (if anything), then everything else the
 	// manager holds for this app: a removed app must leave no unit
 	// behind, tracked or not — an ambiguous start may have left one

@@ -176,6 +176,10 @@ Concept map from the Nomad-era stack:
 - Config reloads MUST NOT restart running apps. Changed app definitions
   apply at the app's next launch: a deploy, a rollback, or a relaunch
   after a crash, a sustained health failure, or a reboot.
+- A reload that removes an app MUST leave none of its units running:
+  a deploy of it in flight is waited for, then everything the manager
+  holds for the app is stopped, and the removed app takes no deploy
+  after.
 - On Caddy start, each app with recorded state MUST be relaunched (or
   reattached, if the runner supports it) and published as soon as the
   process is up — the health gate is a deploy gate, not a boot gate.
@@ -233,6 +237,21 @@ there would defeat the pool.
   (re-wired each reload); deploys take a `snapshot()` once at start, so
   a mid-deploy reload never tears the config.
 - `deployMu.TryLock` serializes deploys per app; 409 instead of queue.
+  `Destruct`, removing the app, takes it with a blocking `Lock` and
+  keeps it: a reload stops the old config's servers without waiting
+  for their requests, so a deploy of the removed app can still be in
+  flight, and past Destruct's sweep it would start a unit nothing
+  supervises, routes or stops. The wait is the deploy's remaining
+  run. Once the artifact is on the box the app's own settings bound
+  it — `deadline` for a `pre_start` and again for the health gate
+  (plus one `health_interval` and two `health_timeout`s), `drain`,
+  and each stop's `grace` — with the runner's fixed allowances (30 s
+  for the start job, 30 s past a stop's grace); a download's or a
+  push upload's transfer has no bound of hotserve's own, only the
+  artifact host's or the client's pace and the server's read
+  timeouts. The removing reload's cleanup, and so its response, waits
+  that long. Kept, the lock leaves the removed app no further deploy:
+  a request the old config still serves gets a 409.
 - `mu` guards current instance/phase/last-deploy.
 - `activeSocket` is the single atomic the proxy hot path reads: the
   current instance's pinned socket, or nil while nothing serves.
@@ -362,9 +381,10 @@ on the pooled app, and a candidate Caddy rejects after our Start
 (another app's Start failing) has its definition rolled back by its
 own Cleanup — last-writer semantics, so a config replaced by a
 successful reload is untouched. Destruct stops a removed app's units
-only when another *started* config is live; a rejected candidate,
+only when another *started* config is live, and only once a deploy of
+the app in flight has ended (Concurrency model); a rejected candidate,
 `validate`, and process exit leave them to whoever is or will be
-serving them. Boot recovery is owned by the config that started it,
+serving them, and wait for nothing. Boot recovery is owned by the config that started it,
 retried with backoff for anything not explicitly permanent, and
 cancelled/joined by that config's Cleanup.
 
@@ -497,7 +517,9 @@ author's beliefs about systemd, and only the real thing corrects them.
    unit name in state.json, Cleanup joining recovery); the pre-flight
    on every relaunch path, on the spec it starts, and a refusal ending
    each once; Destruct's
-   live-config gate and rollback of a rejected candidate's definition;
+   live-config gate, its wait for a deploy in flight (nothing left
+   running whatever the deploy came to, no wait on exit), and rollback
+   of a rejected candidate's definition;
    the runner over a scripted manager (unit properties and naming,
    watcher terminal states and transport-error immunity, PID backfill,
    Stop/RunOnce outcomes, reconcile of an ambiguous start, concurrent
@@ -518,7 +540,8 @@ author's beliefs about systemd, and only the real thing corrects them.
    500 and v2 still serving; reload keeps the app PID; keep-N; OIDC,
    push and rollback deploys; watchdog restart and throttle recovery;
    a relaunch of a release built for another machine refused once by
-   the watchdog and by recovery, with no unit started.
+   the watchdog and by recovery, with no unit started; a reload that
+   removes an app mid-deploy leaves no unit of it running.
    The runner's own suite: a leader+worker tree is gone after Stop and
    after a leader crash; SIGKILL lands after grace, not before; exit
    statuses as systemd reports them; a second runner adopts a live

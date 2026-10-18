@@ -1408,7 +1408,8 @@ its socket (see [Sandbox](#sandbox)).
   that crashes is started again by systemd a second later and
   reattaches the same way (a start it refuses is not retried); removing
   the package stops them. Removing an app (or the whole `liveswap` block)
-  via a **reload** stops its units; if you instead edit the file and
+  via a **reload** stops its units, once any deploy of it already in
+  flight has finished (the reload waits for it); if you instead edit the file and
   *restart* hotserve with the whole block gone, nothing is left to
   judge the old units and they keep running — decommission them
   explicitly: `sudo -u hotserve XDG_RUNTIME_DIR=/run/user/$(id -u

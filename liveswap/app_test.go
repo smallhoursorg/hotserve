@@ -396,6 +396,35 @@ type fakeFetcher struct {
 	err     error
 	stats   archiveStats
 	lastReq deployRequest
+	// gate, when set, holds every fetch until the test sends its
+	// outcome (nil: carry on), after telling inFetch: a deploy in
+	// flight, holding deployMu, for as long as a test needs one.
+	gate    chan error
+	inFetch chan struct{}
+}
+
+// holdFetch makes the rig's deploys wait in fetch for the test. held
+// waits until one is waiting there; release lets it go with err as the
+// fetch's outcome (nil: the deploy proceeds).
+func (rig *testRig) holdFetch(t *testing.T) (held func(), release func(error)) {
+	rig.fetch.gate, rig.fetch.inFetch = make(chan error), make(chan struct{})
+	held = func() {
+		t.Helper()
+		select {
+		case <-rig.fetch.inFetch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no deploy reached fetch")
+		}
+	}
+	release = func(err error) {
+		t.Helper()
+		select {
+		case rig.fetch.gate <- err:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no deploy is held in fetch")
+		}
+	}
+	return held, release
 }
 
 func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, archiveStats, error) {
@@ -403,6 +432,12 @@ func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest,
 	if !req.rollback { // as the real fetcher: a rollback fetches and extracts nothing
 		progress("downloading")
 		progress("extracting")
+	}
+	if f.gate != nil {
+		f.inFetch <- struct{}{}
+		if err := <-f.gate; err != nil {
+			return "", archiveStats{}, err
+		}
 	}
 	if f.err != nil {
 		return "", archiveStats{}, f.err
@@ -1614,6 +1649,103 @@ func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 	// Deploy swept twice (pre-start, pre-GC); removal sweeps everything (keep=nil).
 	if n := rig.runner.sweepCount(); n != 3 || rig.runner.lastSweep() != nil {
 		t.Fatalf("removal must sweep the whole app with keep=nil, sweeps=%d last=%v", n, rig.runner.sweeps)
+	}
+}
+
+// liveHandles is every instance the runner started that still runs.
+func (r *fakeRunner) liveHandles() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var live []string
+	for _, h := range r.handles {
+		if h.isAlive() {
+			live = append(live, h.id)
+		}
+	}
+	return live
+}
+
+// Removing an app waits for a deploy of it in flight. A reload stops
+// the old config's servers without waiting for their requests, so
+// without the wait a deploy past Destruct's sweep would start a unit
+// nothing supervises, routes or stops. Whatever the deploy comes to,
+// nothing of the app is left running once Destruct returns, and the
+// removed app takes no deploy after.
+func TestDestructWaitsForADeployInFlight(t *testing.T) {
+	cases := []struct {
+		name     string
+		fetchErr error // the held deploy's fetch outcome
+		gateErr  error // its health gate's
+	}{
+		{"the deploy promotes", nil, nil},
+		{"the deploy fails its health gate", nil, errors.New("health check returned 500")},
+		{"the deploy fails before any launch", errors.New("download failed"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newTestRig(t)
+			markLive(t)
+			deployV1(t, rig) // serving: Destruct has an instance of its own to stop
+			rig.prober.err = tc.gateErr
+			held, release := rig.holdFetch(t)
+			deployed := make(chan error, 1)
+			go func() {
+				deployed <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+			}()
+			held()
+			destructed := make(chan error, 1)
+			go func() { destructed <- rig.ma.Destruct() }()
+			select {
+			case err := <-destructed:
+				t.Fatalf("Destruct returned (%v) while a deploy of the app was in flight", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			release(tc.fetchErr)
+			for _, ch := range []chan error{deployed, destructed} {
+				select {
+				case <-ch:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the deploy and then Destruct must both end")
+				}
+			}
+			if live := rig.runner.liveHandles(); len(live) != 0 {
+				t.Fatalf("instances left running after the app's removal: %v", live)
+			}
+			if rig.runner.lastSweep() != nil {
+				t.Fatal("removal must end with a sweep of the whole app")
+			}
+			if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/3", version: "v3"}); !errors.Is(err, errDeployInProgress) {
+				t.Fatalf("a removed app must take no deploy, got %v", err)
+			}
+		})
+	}
+}
+
+// On process exit Destruct does not wait for a deploy: the units stay
+// for the next start to reattach, and shutdown is not held up.
+func TestDestructOnExitDoesNotWaitForADeploy(t *testing.T) {
+	rig := newTestRig(t)
+	markLive(t)
+	deployV1(t, rig)
+	held, release := rig.holdFetch(t)
+	deployed := make(chan error, 1)
+	go func() {
+		deployed <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+	}()
+	held()
+	swapSeam(t, &caddyExitingSeam, func() bool { return true })
+	destructed := make(chan error, 1)
+	go func() { destructed <- rig.ma.Destruct() }()
+	select {
+	case err := <-destructed:
+		must(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Destruct on exit must not wait for a deploy")
+	}
+	release(nil)
+	must(t, <-deployed)
+	if rig.runner.stopCount() != 1 || len(rig.runner.liveHandles()) != 1 {
+		t.Fatalf("the deploy runs on to its end, and its instance is kept: stops %d, live %v", rig.runner.stopCount(), rig.runner.liveHandles())
 	}
 }
 
