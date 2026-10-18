@@ -1912,6 +1912,8 @@ table and holds both shipped files to it, line for line, and the
 | `.service` | `[Service]` | `NoNewPrivileges=yes` | |
 | `.service` | `[Service]` | `RestrictAddressFamilies=AF_UNIX` | the manager's socket (`systemctl reload`, `is-active`); no network |
 | `.service` | `[Service]` | `SystemCallFilter=@system-service` | |
+| `.service` | `[Service]` | `SystemCallFilter=~io_uring_setup` | less `io_uring_setup`, which `@system-service` admits through `@aio`: a ring's `IORING_OP_SOCKET` (kernel 5.19+) opens a socket of any family without `socket(2)`, the one call `RestrictAddressFamilies=` filters. A deny line after the allow list takes the name out of it. Nothing the applier runs sets up a ring |
+| `.service` | `[Service]` | `SystemCallArchitectures=native` | on amd64 the x86-32 ABI reaches `socket(2)` through `socketcall()`, and systemd does not apply `RestrictAddressFamilies=` to that ABI. Nothing the applier runs is 32-bit: hotserve, and Debian's own `ssh-keygen` and `systemctl` |
 
 Not in them, on purpose: `User=` (root writes root's file and asks the
 manager for the reload); `Restart=` (the path unit starts it again
@@ -2558,3 +2560,9 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-17, last — The secrets caps are confirmed by the owner (#234,
   "Decisions made during the build"), so the Caps table no longer marks
   them proposed: the figures are unchanged.
+- 2026-10-18 (#313) — The applier unit takes `io_uring_setup` out of
+  `@system-service` and runs the native syscall ABI only, as app units
+  do since #298, so `RestrictAddressFamilies=AF_UNIX` holds for the
+  applier's own processes. The sandbox's purpose is unchanged: a guard
+  against the applier's mistakes, not a boundary against a compromised
+  applier, which can still start any unit through the manager.

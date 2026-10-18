@@ -237,6 +237,16 @@ expect_show $svc DevicePolicy closed
 expect_show $svc PrivateTmp yes
 expect_show $svc NoNewPrivileges yes
 expect_show $svc RestrictAddressFamilies AF_UNIX
+expect_show $svc SystemCallArchitectures native
+# An allow list (no leading ~) that still holds io_uring_enter, the
+# rest of @aio, and not io_uring_setup: as for app units below.
+filter=" $(show $svc SystemCallFilter) "
+case "$filter" in
+" ~"*) die "$svc SystemCallFilter is a deny list: $filter" ;;
+*" io_uring_setup "*) die "$svc SystemCallFilter still allows io_uring_setup" ;;
+*" io_uring_enter "*) ;;
+*) die "$svc SystemCallFilter holds no io_uring_enter, so @aio is missing and io_uring_setup's absence proves nothing: $filter" ;;
+esac
 expect_show $svc TimeoutStartUSec infinity
 expect_show $svc StartLimitIntervalUSec 0
 expect_show hotserve-box-apply.path StartLimitIntervalUSec 0

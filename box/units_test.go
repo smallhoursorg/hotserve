@@ -84,6 +84,15 @@ func TestTheShippedUnitsSayWhatTheDesignLists(t *testing.T) {
 	if _, ok := svc["Install"]; ok {
 		t.Error("the service has an [Install] section: the path unit is its only start")
 	}
+	// RestrictAddressFamilies= holds only with both routes around it
+	// closed, as for app units (#298): an io_uring ring's socket op, and
+	// on amd64 the x86-32 ABI's socketcall().
+	if got := svc["Service"]["SystemCallFilter"]; !slices.Equal(got, []string{"@system-service", "~io_uring_setup"}) {
+		t.Errorf("SystemCallFilter %q: want @system-service, then ~io_uring_setup on a line of its own", got)
+	}
+	if got := svc["Service"]["SystemCallArchitectures"]; !slices.Equal(got, []string{"native"}) {
+		t.Errorf("SystemCallArchitectures %q: want native", got)
+	}
 	for key, want := range map[string][]string{
 		"DirectoryNotEmpty": {exchangeTree + "/in", exchangeTree + "/work"},
 		"PathExists":        {exchangeTree + "/txn.json"},

@@ -43,3 +43,5 @@ PrivateTmp=yes
 NoNewPrivileges=yes
 RestrictAddressFamilies=AF_UNIX
 SystemCallFilter=@system-service
+SystemCallFilter=~io_uring_setup
+SystemCallArchitectures=native
