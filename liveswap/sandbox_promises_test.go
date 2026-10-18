@@ -162,9 +162,9 @@ func TestNoIPCNamespaceWhileControlProcessesCannotJoinIt(t *testing.T) {
 	}
 }
 
-// Promise: "An app's sockets MUST be of the families
-// `RestrictAddressFamilies=` names, however they are created." That
-// filter acts on socket(2), and two other routes reach a socket:
+// Promise: "`RestrictAddressFamilies=` filters `socket(2)` alone, so
+// the other routes to a socket of a family it leaves out MUST be
+// closed too." Two are, and this pins them:
 //
 //   - An io_uring ring's IORING_OP_SOCKET (kernel 5.19+; Debian 13
 //     ships 6.12) creates one without that call, so a family the list
@@ -179,13 +179,18 @@ func TestNoIPCNamespaceWhileControlProcessesCannotJoinIt(t *testing.T) {
 //     executable is refused at the deploy's pre-flight instead
 //     (TestCheckMachineRefusesA32BitExecutable).
 //
+// One is open, and nothing here pins it: socketpair(2), which the
+// filter does not cover, in a family that supports it, AF_TIPC among
+// them (owed: #315). Denying socketpair is not an option: Node's
+// child_process uses it.
+//
 // The filter's order is half the promise. The manager builds a unit's
 // filter in the mode of the first SystemCallFilter= it reads: the
 // allow list first, then a deny entry that removes a name from it.
 // Reversed, the first entry would make a deny list, and the allow list
 // after it would take names out of that list rather than restrict
 // anything.
-func TestNoSocketBypassesTheAddressFamilyFilter(t *testing.T) {
+func TestTwoRoutesAroundTheAddressFamilyFilterAreClosed(t *testing.T) {
 	u := unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: probeSandboxSpec()}
 	if a, _ := propMap(u)["SystemCallArchitectures"].([]string); !reflect.DeepEqual(a, []string{"native"}) {
 		t.Errorf("SystemCallArchitectures = %v, want [native]: on amd64 the x86-32 ABI's socketcall() opens any family", a)

@@ -114,7 +114,7 @@ func checkMachine(path string) error {
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	if goarch == elf32 && strconv.IntSize == 64 {
-		return &preflightError{fmt.Sprintf("%s is a 32-bit executable, and an app on this box runs the native %s system-call ABI only (SystemCallArchitectures=native): build it for %s%s", path, runtime.GOARCH, runtime.GOARCH, runsOnHint(runtime.GOARCH))}
+		return &preflightError{fmt.Sprintf("%s is a 32-bit executable, and an app on this box runs the native %s system-call ABI only (SystemCallArchitectures=native): build it for %s", path, runtime.GOARCH, runtime.GOARCH)}
 	}
 	if goarch == "" || goarch == elf32 || goarch == runtime.GOARCH {
 		return nil

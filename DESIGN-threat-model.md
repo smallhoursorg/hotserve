@@ -977,11 +977,14 @@ it binds nothing of an app's and has no socket.
   (netlink for `getifaddrs()`, which Node and Go frameworks call at
   startup; the socket itself is not read-only, but changing a link, an
   address or a route needs `CAP_NET_ADMIN`, which nothing in the unit
-  holds). The family list filters `socket(2)` alone: an io_uring
-  ring's `IORING_OP_SOCKET` (kernel 5.19+) opens a socket of any family
-  without it, so no unit can set up a ring, and on amd64 the x86-32
-  ABI's `socketcall()` is not filtered at all, so no unit runs that
-  ABI (the deploy refuses a 32-bit executable).
+  holds). The family list filters `socket(2)` alone. Two routes around
+  it are closed: an io_uring ring's `IORING_OP_SOCKET` (kernel 5.19+)
+  opens a socket of any family without that call, so no unit can set
+  up a ring; and on amd64 the x86-32 ABI's `socketcall()` is not
+  filtered at all, so no unit runs that ABI (the deploy refuses a
+  32-bit executable). One is open: `socketpair(2)`, which the list does
+  not filter, in a module-backed family that supports it, such as
+  `AF_TIPC` (owed: #315).
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
   restarter of apps; hotserve.service itself is restarted by systemd
   after a crash, never after a refused start), `KillMode=control-group`,
@@ -1324,6 +1327,7 @@ Dated one-liners; the full text of each is in git.
   own limit check under a piped one. No app can write a core dump for
   debugging.
 - 2026-10-18 (#298) — The syscall filter takes `io_uring_setup` out of
-  `@system-service` and app units run the native ABI only: no app
-  opens a socket of a family `RestrictAddressFamilies=` leaves out.
-  Sibling IPC joined the residual risks (#311).
+  `@system-service` and app units run the native ABI only, closing two
+  routes to a socket of a family `RestrictAddressFamilies=` leaves out;
+  `socketpair(2)` is the one left (#315). Sibling IPC joined the
+  residual risks (#311).

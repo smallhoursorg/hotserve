@@ -237,12 +237,11 @@ below as a contract the sandbox path must keep.
   seccomp filter, with one call taken out — and
   `SystemCallArchitectures=native`. Pinned by
   `TestSandboxPropertiesEveryUnit`.
-- An app's sockets MUST be of the families `RestrictAddressFamilies=`
-  names, however they are created. That filter acts on `socket(2)`
-  alone, and two other routes reach a socket. `@aio`, inside
-  `@system-service`, admits `io_uring_setup`: a ring's
-  `IORING_OP_SOCKET` (kernel 5.19+; Debian 13 ships 6.12) opens a
-  socket of any family without that call, which would leave `AF_ALG`
+- `RestrictAddressFamilies=` filters `socket(2)` alone, so the other
+  routes to a socket of a family it leaves out MUST be closed too. Two
+  are. `@aio`, inside `@system-service`, admits `io_uring_setup`: a
+  ring's `IORING_OP_SOCKET` (kernel 5.19+; Debian 13 ships 6.12) opens
+  a socket of any family without that call, which would leave `AF_ALG`
   and `AF_VSOCK` one ring away. So the filter takes `io_uring_setup`
   back out (`SystemCallFilter=~io_uring_setup`, after the allow list:
   the first entry sets the filter's mode), and with no ring
@@ -252,8 +251,13 @@ below as a contract the sandbox path must keep.
   filter at all, so `SystemCallArchitectures=native` takes that ABI
   away. A 32-bit executable would die at its first system call, so the
   deploy's pre-flight refuses one as a 422 naming the setting
-  (`checkMachine`, liveswap/elf.go). Pinned by
-  `TestNoSocketBypassesTheAddressFamilyFilter` and
+  (`checkMachine`, liveswap/elf.go). One route is open: `socketpair(2)`,
+  which the filter does not cover, makes a connected pair in any family
+  that supports it, and `AF_TIPC`, a module Debian 13 builds and a call
+  can autoload, supports it on every socket type (owed: #315; denying
+  `socketpair` is not an option, since Node's `child_process` uses it).
+  Pinned by
+  `TestTwoRoutesAroundTheAddressFamilyFilterAreClosed` and
   `TestCheckMachineRefusesA32BitExecutable`; the integration, e2e and
   install-test lanes read the built filter and the architecture back
   off a live unit. What it costs the runtimes, checked 2026-10-18:
@@ -603,6 +607,7 @@ Dated one-liners; the full text of each is in git.
 - 2026-10-18 (#298) — `io_uring_setup` taken out of `@system-service`
   and `SystemCallArchitectures=native` added: an io_uring ring, and on
   amd64 the x86-32 ABI's `socketcall()`, opened sockets of families
-  `RestrictAddressFamilies=` leaves out. 32-bit executables are refused
-  at the deploy's pre-flight. `PrivateIPC=` was measured breaking
+  `RestrictAddressFamilies=` leaves out; `socketpair(2)` still can
+  (#315). 32-bit executables are refused at the deploy's pre-flight.
+  `PrivateIPC=` was measured breaking
   `ExecStopPost=` on systemd 257's user manager and moved to #311.

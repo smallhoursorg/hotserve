@@ -273,9 +273,10 @@ type runner interface {
 `Preflight` is the launch's resolution run before any unit exists:
 `command[0]` resolves (`resolveInView`, shared with `unitFor`) to a
 file inside the sandbox view, and an ELF built for another 64-bit
-machine, or a 32-bit ELF (units allow the native system-call ABI
-only), is refused naming the box's architecture and the `runs-on`
-to build on (`elf.go`, twenty bytes of header, no dependency). The
+machine is refused naming the box's architecture and the `runs-on`
+to build on, and a 32-bit ELF naming the architecture to build for,
+since units allow the native system-call ABI only (`elf.go`, twenty
+bytes of header, no dependency). The
 deploy runs it for the command and the `pre_start` in phase
 `preparing` and reports a refusal as a 422; `unitFor` still resolves
 at launch, as the last word before the manager acts.

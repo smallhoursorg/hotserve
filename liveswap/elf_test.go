@@ -156,5 +156,10 @@ func TestCheckMachineRefusesA32BitExecutable(t *testing.T) {
 				t.Errorf("machine %d: refusal %q lacks %q", machine, err, want)
 			}
 		}
+		// The fix is the build target, not the runner: a runs-on hint
+		// would send the deployer to the wrong knob.
+		if strings.Contains(err.Error(), "runs-on") {
+			t.Errorf("machine %d: refusal %q names a runner; a 32-bit build is fixed by its target", machine, err)
+		}
 	}
 }
