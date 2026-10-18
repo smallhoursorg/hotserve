@@ -808,6 +808,16 @@ case "$filter" in
 *" io_uring_enter "*) ;;
 *) die "SystemCallFilter holds no io_uring_enter, so @aio is missing and io_uring_setup's absence proves nothing: $filter" ;;
 esac
+# And the filter is in force inside the unit, not only set on it: on a
+# kernel without seccomp the manager skips it and the read-back above
+# still passes. Inside, the filter mode and io_uring_setup refused;
+# from outside, as the same user, the call must reach the kernel, or
+# the refusal inside proves nothing about the unit's own filter.
+expect_probe seccomp 2
+expect_probe io_uring_setup refused
+outside=$(su -s /bin/sh hotserve -c "perl -e 'syscall(425, 1, 0); print \$!{EPERM} ? q(refused) : q(reached)'")
+[ "$outside" = "reached" ] \
+	|| die "io_uring_setup outside the unit is '$outside', want reached: io_uring_setup=refused inside proves nothing"
 [ "$(user_systemctl show -p TemporaryFileSystem --value "$unit")" = "/:ro" ] || die "unit lacks TemporaryFileSystem=/:ro — the view is not deny-by-default"
 # The retired half of the old model, read back off the live unit. Both
 # properties still exist on every service, so test the value rather
@@ -816,7 +826,7 @@ esac
 case "$(user_systemctl show -p InaccessiblePaths --value "$unit")" in
 */*) die "unit still masks a list with InaccessiblePaths=" ;;
 esac
-echo "sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $(probe_val pid), $app_nprocs pids visible, native syscall ABI only, io_uring_setup filtered, /var/lib/hotserve $(probe_val hotserve_lib)"
+echo "sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $(probe_val pid), $app_nprocs pids visible, native syscall ABI only, seccomp in force (io_uring_setup refused inside, reached outside), /var/lib/hotserve $(probe_val hotserve_lib)"
 
 # `hotserve validate` provisions and cleans up without starting: run
 # as root (no user manager for uid 0) and as the hotserve user (the

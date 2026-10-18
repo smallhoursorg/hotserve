@@ -203,6 +203,31 @@ emit nofile_hard "$(ulimit -Hn)"
 # LimitCORE=0 (liveswap/systemd_dbus.go).
 emit core_soft "$(ulimit -Sc)"
 emit core_hard "$(ulimit -Hc)"
+# The syscall filter, in force rather than only set: on a kernel
+# without seccomp the manager skips SystemCallFilter= and every
+# property the lanes read back with `systemctl show` still says it is
+# there. `seccomp` is this process's mode (2 = filter; `absent` on a
+# kernel with no such line), read by the shell itself.
+seccomp_mode=absent
+while read -r sv_key sv_val; do
+	[ "$sv_key" = Seccomp: ] && seccomp_mode=$sv_val
+done </proc/self/status
+emit seccomp "$seccomp_mode"
+# The mode says some filter is loaded, not which. io_uring_setup is
+# the one call this filter takes out of @system-service
+# (DESIGN-sandbox.md), so `refused` (EPERM) is SystemCallFilter=
+# itself at work; a call that reaches the kernel fails EFAULT on the
+# null params instead. sh cannot make a system call, so perl's
+# syscall() does (perl-base is Essential on Debian), and 425 is
+# io_uring_setup on amd64 and arm64 alike. Each lane makes the same
+# call from outside the unit and must see it reach the kernel, or
+# `refused` could be a filter the lane's own process carries (a
+# container runtime's default profile denies io_uring).
+if command -v perl >/dev/null 2>&1; then
+	emit io_uring_setup "$(perl -e 'syscall(425, 1, 0); print $!{EPERM} ? "refused" : "reached"')"
+else
+	emit io_uring_setup skipped
+fi
 # A secret seeded into the supervisor's own environment: hotserve
 # builds the unit's environment rather than passing its own on, and
 # the app must never see it.

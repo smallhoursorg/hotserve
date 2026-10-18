@@ -263,7 +263,12 @@ below as a contract the sandbox path must keep.
   `TestTwoRoutesAroundTheAddressFamilyFilterAreClosed` and
   `TestCheckMachineRefusesA32BitExecutable`; the integration, e2e and
   install-test lanes read the built filter and the architecture back
-  off a live unit. What it costs the runtimes, checked 2026-10-18:
+  off a live unit. On a kernel without seccomp the manager skips
+  `SystemCallFilter=` and that read-back still passes, so the view
+  probe also shows from inside the unit that the filter is in force:
+  `Seccomp:` 2, and `io_uring_setup` refused with EPERM where the same
+  call, made by the lane as the same user outside the unit, reaches
+  the kernel. What it costs the runtimes, checked 2026-10-18:
   Node's libuv sets up a ring for batching `epoll_ctl` at every loop
   start and, refused, uses plain `epoll_ctl` (`uv__iou_init`, libuv
   1.51), and the Node example starts in the e2e lane; Deno's event

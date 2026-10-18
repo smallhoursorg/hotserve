@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // These run against a real systemd user manager (make test-integration
@@ -780,9 +781,9 @@ func readProbe(t *testing.T, shared string) map[string]string {
 // sandbox and reads the view from inside: the namespaces are in
 // effect, the root shows only the app's own dirs, everything nothing
 // named is absent (not merely unreadable), the manager's /proc is
-// closed, cgroupfs is read-only, /tmp is private and writable, HOME is
-// the shared dir. Then the unit is stopped through the runner like any
-// other.
+// closed, cgroupfs is read-only, the syscall filter is in force, /tmp
+// is private and writable, HOME is the shared dir. Then the unit is
+// stopped through the runner like any other.
 func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	r := integrationRunner(t)
 	root, release, shared := sandboxRoot(t)
@@ -832,6 +833,11 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 		// No core dump of a crashed app, and no way to raise the soft
 		// limit back: LimitCORE=0 on both, read back from inside.
 		"core_soft": "0", "core_hard": "0",
+		// The syscall filter is in force in here, not only set on the
+		// unit: seccomp's filter mode, and the call the filter takes
+		// out of @system-service refused (EPERM). The same call from
+		// outside the unit is checked below.
+		"seccomp": "2", "io_uring_setup": "refused",
 		// The base view: an OS the app can actually run on. Without
 		// these, "absent" below would only mean the unit is empty.
 		"binsh": "ok", "usrbinenv": "ok", "etcssl": "ok", "resolvconf": "ok",
@@ -877,6 +883,12 @@ func TestIntegrationSystemdSandboxedUnit(t *testing.T) {
 	}
 	if n, _ := strconv.Atoi(got["nprocs"]); n == 0 || n > 8 {
 		t.Errorf("nprocs = %q, want a handful (own PID namespace)", got["nprocs"])
+	}
+	// From this process, outside the unit, the same call reaches the
+	// kernel (EFAULT on the null params): otherwise "refused" above
+	// could be a filter this test inherited rather than the unit's.
+	if _, _, errno := syscall.Syscall(unix.SYS_IO_URING_SETUP, 1, 0, 0); errno == syscall.EPERM {
+		t.Errorf("io_uring_setup is refused outside the unit too, so io_uring_setup=refused inside proves nothing about the unit's filter")
 	}
 	unit := h.state().Unit
 	props := run(t, "systemctl", "--user", "show", unit, "-p", "PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,BindPaths,BindReadOnlyPaths,InaccessiblePaths,LimitCORE,LimitCORESoft,SystemCallArchitectures")
