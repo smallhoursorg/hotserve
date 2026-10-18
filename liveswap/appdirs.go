@@ -104,11 +104,34 @@ func (d appDirs) linkAt(dirs ...string) (string, error) {
 	return "", nil
 }
 
+// notOwnDirFix is the remedy for what linkAt refuses, wherever that is
+// reported.
+const notOwnDirFix = "if a link or a file stands here, replace it with a real directory (to keep its contents on another disk, bind-mount that location at this path); if Lstat failed, the error says why, and nothing here needs replacing"
+
+// fixedDirs is every dir ensure makes. deploys/ is not among them: the
+// record store is optional, made on first use by recordsDir, and a
+// failure there is a warning, not a deploy that cannot start.
+func (d appDirs) fixedDirs() []string {
+	return []string{d.releases, d.shared, d.tmp, d.run, d.proxy}
+}
+
+// writeRefusal refuses a deploy into an app dir that is not the
+// directory it names — the app dir, or a dir ensure makes, that is a
+// link (`<root>/blog -> shop`), a file, or unreadable (linkAt) — before
+// the deploy reads or writes anything through it. Through such a link
+// a deploy stages in shop's tmp/ and extracts into shop's releases/,
+// where two apps can remove each other's releases, or leave one behind
+// for the other to roll back to and run with its own data. The error
+// names the path as this app spells it, never what a link resolves to.
+func (d appDirs) writeRefusal() error {
+	if p, why := d.linkAt(d.fixedDirs()...); p != "" {
+		return fmt.Errorf("refusing to deploy: %s %w (fix: %s)", p, why, notOwnDirFix)
+	}
+	return nil
+}
+
 func (d appDirs) ensure() error {
-	// deploys/ is not here: the record store is optional, made on
-	// first use by recordsDir, and a failure there is a warning, not a
-	// deploy that cannot start.
-	for _, dir := range []string{d.releases, d.shared, d.tmp, d.run, d.proxy} {
+	for _, dir := range d.fixedDirs() {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}

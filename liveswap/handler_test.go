@@ -695,6 +695,38 @@ func TestWebhookPushLocksBeforeStaging(t *testing.T) {
 	}
 }
 
+// A push into an app dir whose tmp/ is a link is refused before the
+// upload is read or staged (#300): nothing lands where the link
+// points, the refusal says why, and the journal says who asked.
+func TestWebhookPushRefusesALinkedTmpBeforeStaging(t *testing.T) {
+	h, rig := newTestHandler(t)
+	core, logs := observer.New(zap.ErrorLevel)
+	rig.ma.logger = zap.New(core)
+	d := rig.spec.dirs
+	must(t, d.ensure())
+	elsewhere := t.TempDir()
+	must(t, os.Remove(d.tmp))
+	must(t, os.Symlink(elsewhere, d.tmp))
+	tr := &trackReader{}
+	req := httptest.NewRequest(http.MethodPost, "/demo?version=v9", tr)
+	req.Header.Set("Authorization", "Bearer "+appToken(t))
+	req.Header.Set("Content-Type", "application/gzip")
+	w := send(t, h, req)
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "refusing to deploy") {
+		t.Fatalf("push through a linked tmp/: got %d %s", w.Code, w.Body.String())
+	}
+	if tr.read {
+		t.Fatal("the upload was read before the refusal")
+	}
+	if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 0 {
+		t.Fatalf("staged where the link points: %v %v", entries, err)
+	}
+	got := logs.FilterMessage("deploy failed").All()
+	if len(got) != 1 || got[0].ContextMap()["source"] != "push" || got[0].ContextMap()["via"] == "" || got[0].ContextMap()["remote"] != req.RemoteAddr {
+		t.Fatalf("want one journal line naming the push, who and from where, got %v", got)
+	}
+}
+
 func TestWebhookAvailableVersionsIsArrayWhenEmpty(t *testing.T) {
 	h, _ := newTestHandler(t)
 	w := do(t, h, http.MethodGet, "/demo", appToken(t), "")
