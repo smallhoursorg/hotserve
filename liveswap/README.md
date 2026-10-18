@@ -284,7 +284,7 @@ resolved at config load.
 | `watchdog_grace` | `30s` | After every (re)start, probe failures don't count until this elapses; a crash always counts |
 | `watchdog_restarts` | `5` | Restart budget within `watchdog_window`; crash and health restarts share it |
 | `watchdog_window` | `10m` | Sliding window for the restart budget |
-| `keep` | `5` | Release dirs retained (GC after success). The running version is always kept, so this can be `keep+1` after rolling back to an old release |
+| `keep` | `5` | Release dirs retained (GC after success): the `keep` most recently deployed, a rollback counting as a deploy of its version. The version the deploy promoted is always one of them, and the version it replaced is the next |
 | `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
@@ -598,6 +598,14 @@ is, contains or sits inside one another app uses (another app's
 directory, one disk path mounted for two apps, a whole app dir mounted
 at another's) gives both apps the same files, writable, and hotserve
 does not refuse it (#308).
+
+The app's directory itself, and the directories hotserve keeps in it
+(`releases/`, `shared/`, `tmp/`, `run/`, `proxy/`, `deploys/`), must
+not be links either, wherever hotserve writes or deletes there:
+through a link (`blog -> shop`) they would be another app's. A deploy
+into such a directory is refused (500, naming the path and the
+remedy), and a socket prune, release GC or deploy record write logs
+it and goes no further.
 
 **Workloads the sandbox cannot host are not supported.** Anything
 that creates its own namespaces (Chromium's sandbox under Puppeteer,
@@ -952,11 +960,26 @@ curl --fail-with-body -X POST -H "Authorization: Bearer $JWT" \
 Rollback runs the same blue/green pipeline (start, health-gate, cut
 over), so it is zero-downtime too. A `422` is returned if that version
 is no longer on disk. To see what you can roll back to, `GET /<app>`
-returns `available_versions` — the on-disk releases, newest-first
-(`keep` of them, plus the running version when it is older than those —
-see the `keep` note above, so the list can briefly hold `keep+1`) —
-and `deploys`, what each recorded version's latest deploy came to
-(see [Deploy records](#deploy-records)).
+returns `available_versions` — the on-disk releases, the running
+version first, then most recently deployed first: the order the next
+deploy's release GC keeps them in (`keep` of them after a successful
+deploy) — and `deploys`, what each recorded version's latest deploy
+came to (see [Deploy records](#deploy-records)). A version's deploy
+time is its record's: the latest deploy or rollback of it. One whose
+latest deploy failed (a rollback to it that failed) comes after every
+one whose latest succeeded: it never served from that deploy, and
+takes no place from a version that did. A release with no record —
+deployed by a hotserve older than records, or its record could not
+be written — sorts after every recorded one, ordered among those by
+its directory's modification time (which the app running from it can
+change), and `ordered_by_mtime` names it: it is the first release GC
+prunes after the running one and the one before it, and a rollback
+target while it is on disk. A release whose record is there but cannot be read is
+listed the same way, and release GC holds it (neither deletes it nor
+counts it toward `keep`) and says so in the journal until the record
+can be read. During a version's first deploy, the version being
+promoted has no record yet: until the deploy returns, the status lists
+it first, as the running version, and names it in `ordered_by_mtime`.
 
 **Versions are immutable.** A deploy (URL or push) never overwrites an
 existing on-disk release, so a version you can roll back to can't be
@@ -1063,7 +1086,9 @@ the `sha256` it was pinned to, and the artifact's `artifact_entries` /
 `artifact_bytes` against the caps),
 the watchdog's state (restart counts, last restart cause), and
 `available_versions` — the on-disk releases you can roll back to,
-newest-first.
+the running version first, then most recently deployed first;
+`ordered_by_mtime` names any placed by their directory's mtime
+instead (see **3. Roll back** above).
 
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}` and not starting with a dot.
@@ -1160,11 +1185,13 @@ records none. It is never a hash the box took of an unpinned
 download. Records are kept for every version still on disk plus the
 newest `keep` others (failed deploys, whose release is removed at
 once, and versions release GC has pruned), so the set is bounded by
-about twice `keep`. They are written as the response filter left them
+about twice `keep`. When a record was written is its version's deploy
+time: the order of `available_versions` and of release GC. They are
+written as the response filter left them
 — a secret rotated later is not in an old record — and pass it again
 when read, like every body. One consequence: a version name equal to
 an `env_file` value is that value wherever it appears —
-`current_version`, `available_versions`, `last_deploy`, `deploys`, a
+`current_version`, `available_versions`, `ordered_by_mtime`, `last_deploy`, `deploys`, a
 record — and shows as `[redacted:KEY]`, and such a version's record
 is only the envelope (version, outcome, times, the pin, and why); so do not
 name versions (or apps) after `env_file` values; a release identifier
@@ -1346,7 +1373,7 @@ on disk` (the failed instance could not be confirmed stopped, so the
 dir is kept rather than pulled from under a process that may still
 run) or `cleanup of failed release` (removing it failed). Either way
 that version stays a 422 until release GC — which runs after a
-*successful* deploy and keeps the newest `keep` dirs — drops it; use
+*successful* deploy and keeps the `keep` most recently deployed — drops it; use
 a new version.
 
 ### GitLab CI

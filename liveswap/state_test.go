@@ -2,8 +2,10 @@ package liveswap
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -19,12 +21,13 @@ import (
 // name nothing could deploy or roll back to — is not listed, so it
 // is neither offered to an operator nor put on the filter's safe list.
 func TestListReleasesSkipsNamesThatAreNotVersions(t *testing.T) {
-	dir := t.TempDir()
+	d := newAppDirs(t.TempDir(), "demo")
+	dir := d.releases
 	for _, n := range []string{"v1", "2026.09.14", ".extract-abc", "a b", "..x", strings.Repeat("v", 65)} {
 		must(t, os.MkdirAll(filepath.Join(dir, n), 0o755))
 	}
 	must(t, os.WriteFile(filepath.Join(dir, "v9"), nil, 0o600)) // a file, not a release
-	got := listReleases(dir)
+	got, _ := listReleases(d)
 	sort.Strings(got)
 	if strings.Join(got, ",") != "2026.09.14,v1" {
 		t.Fatalf("listReleases = %v", got)
@@ -334,10 +337,345 @@ func TestFileStateStoreCorruptFile(t *testing.T) {
 	}
 }
 
+// The release-order ledger. Retention deletes the way back, which
+// nothing else holds, so for a fixed set of releases — with and
+// without deploy records, under directory mtimes the app may have set
+// to anything — each row spells out exactly what available_versions
+// lists (newest first), which entries it names as placed by mtime, and
+// exactly what release GC leaves on disk.
+func TestReleaseOrderLedger(t *testing.T) {
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := func(minute int) time.Time { return base.Add(time.Duration(minute) * time.Minute) }
+	future := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	epoch := time.Unix(0, 0)
+	type rel struct {
+		name string
+		// record is the outcome its deploy record holds: "" for none,
+		// "forged" for a file under its name that names another version,
+		// "unreadable" for something there that cannot be read as one.
+		record string
+		rec    time.Time // when hotserve wrote the record
+		dir    time.Time // the release dir's mtime: the app's to set
+	}
+	cases := []struct {
+		name        string
+		rels        []rel
+		linkRecords bool // deploys/ is a planted link: no record is read through it
+		keep        int
+		protect     string // the version the deploy running GC promoted
+		previous    string // the version it replaced: running until the cutover, so the list has it first
+		available   string // listReleases, newest first
+		byMtime     string // the entries it names as placed by mtime
+		kept        string // on disk after GC, by name
+	}{
+		{
+			name: "every release recorded: directory mtimes count for nothing",
+			rels: []rel{
+				{"v1", "succeeded", at(1), future},
+				{"v2", "succeeded", at(2), epoch},
+				{"v3", "succeeded", at(3), at(100)},
+				{"v4", "succeeded", at(4), epoch},
+			},
+			keep: 2, protect: "v4",
+			available: "v4 v3 v2 v1", kept: "v3 v4",
+		},
+		{
+			name: "the version just deployed has no record until the deploy returns: GC puts it first whatever its dir says",
+			rels: []rel{
+				{"v1", "succeeded", at(1), at(1)},
+				{"v2", "succeeded", at(2), future},
+				{"v3", "", time.Time{}, epoch}, // its pre_start or instance set it
+			},
+			keep: 2, protect: "v3",
+			available: "v2 v1 v3", byMtime: "v3", kept: "v2 v3",
+		},
+		{
+			name: "a rollback: the version rolled back to is this deploy's, so newest; keep counts it",
+			rels: []rel{
+				{"v1", "succeeded", at(1), epoch},
+				{"v2", "succeeded", at(2), future},
+				{"v3", "succeeded", at(3), at(3)},
+			},
+			keep: 2, protect: "v1",
+			available: "v3 v2 v1", kept: "v1 v3",
+		},
+		{
+			name: "a release whose latest deploy failed comes after every one whose latest succeeded",
+			rels: []rel{
+				{"v1", "failed", at(5), future}, // rolled back to after v3, and failed
+				{"v2", "succeeded", at(2), at(2)},
+				{"v3", "succeeded", at(3), at(3)}, // served until v4
+				{"v4", "", time.Time{}, at(6)},    // this deploy's
+			},
+			keep: 2, protect: "v4",
+			available: "v3 v2 v1 v4", byMtime: "v4", kept: "v3 v4",
+		},
+		{
+			name: "a failed rollback does not push the version that served out of keep",
+			rels: []rel{
+				{"v1", "failed", at(3), at(1)},    // the rollback to it failed
+				{"v2", "succeeded", at(2), at(2)}, // served throughout
+				{"v3", "", time.Time{}, at(4)},    // this deploy's
+			},
+			keep: 2, protect: "v3",
+			available: "v2 v1 v3", byMtime: "v3", kept: "v2 v3",
+		},
+		{
+			name: "a rollback whose record write was lost: the version it put in service is kept next to the new one",
+			rels: []rel{
+				{"v1", "succeeded", at(1), at(1)}, // rolled back to after v2; that record never landed
+				{"v2", "succeeded", at(2), at(2)},
+				{"v3", "", time.Time{}, at(4)}, // this deploy's, replacing v1
+			},
+			keep: 2, protect: "v3", previous: "v1",
+			available: "v1 v2 v3", byMtime: "v3", kept: "v1 v3",
+		},
+		{
+			name: "a record that is there but cannot be read: listed by mtime and named; GC holds its release uncounted and prunes the rest",
+			rels: []rel{
+				{"v1", "succeeded", at(1), at(1)},
+				{"v2", "unreadable", at(5), at(2)},
+				{"v3", "succeeded", at(3), at(3)},
+			},
+			keep: 1, protect: "v3", previous: "v2",
+			available: "v2 v3 v1", byMtime: "v2", kept: "v2 v3",
+		},
+		{
+			name: "a release with no record (deployed before records existed) sorts after every recorded one, and is named",
+			rels: []rel{
+				{"v0", "", time.Time{}, at(0)},
+				{"v1", "succeeded", at(1), future},
+				{"v2", "succeeded", at(2), epoch},
+			},
+			keep: 2, protect: "v2",
+			available: "v2 v1 v0", byMtime: "v0", kept: "v1 v2",
+		},
+		{
+			name: "no record and a 2099 mtime outranks no recorded release: it is the first GC candidate after the two held",
+			rels: []rel{
+				{"v0", "", time.Time{}, future},
+				{"v1", "succeeded", at(1), at(1)},
+				{"v2", "succeeded", at(2), at(2)}, // served until this deploy
+				{"v3", "", time.Time{}, at(3)},    // this deploy's
+			},
+			keep: 3, protect: "v3", previous: "v2",
+			available: "v2 v1 v0 v3", byMtime: "v0 v3", kept: "v1 v2 v3",
+		},
+		{
+			name: "the fallback's limit: among releases with no record, the dir mtime the app can set decides which goes first",
+			rels: []rel{
+				{"va", "", time.Time{}, at(1)},
+				{"vb", "", time.Time{}, future}, // whatever its age, its instance set 2099
+				{"v2", "succeeded", at(2), at(2)},
+			},
+			keep: 2, protect: "v2",
+			available: "v2 vb va", byMtime: "vb va", kept: "v2 vb",
+		},
+		{
+			name: "a dir whose name is not a version holds no keep place, whatever its mtime: a listed version is never pruned for it",
+			rels: []rel{
+				{"v0", "", time.Time{}, at(0)}, // listed, by mtime
+				{"v1", "succeeded", at(1), at(1)},
+				{"v2", "succeeded", at(2), at(2)},
+				{"old copy", "", time.Time{}, future}, // not a version: never listed
+			},
+			keep: 3, protect: "v2", previous: "v1",
+			available: "v1 v2 v0", byMtime: "v0", kept: "v0 v1 v2",
+		},
+		{
+			name: "a record that does not prove itself one counts as none",
+			rels: []rel{
+				{"v1", "forged", future, at(1)},
+				{"v2", "succeeded", at(2), epoch},
+			},
+			keep: 2, protect: "v2",
+			available: "v2 v1", byMtime: "v1", kept: "v1 v2",
+		},
+		{
+			name: "a planted link at deploys/: nothing is read through it, every release is listed by mtime, and GC prunes nothing",
+			rels: []rel{
+				{"v1", "succeeded", at(2), at(1)},
+				{"v2", "succeeded", at(1), at(2)},
+				{"v3", "succeeded", at(3), at(3)},
+			},
+			linkRecords: true,
+			keep:        2, protect: "v3",
+			available: "v3 v2 v1", byMtime: "v3 v2 v1", kept: "v1 v2 v3",
+		},
+		{
+			name: "deploy times that tie order by name, the same on every read",
+			rels: []rel{
+				{"v1", "succeeded", at(1), future},
+				{"v2", "succeeded", at(1), epoch},
+				{"v3", "succeeded", at(1), at(1)},
+			},
+			keep: 2, protect: "v1",
+			available: "v3 v2 v1", kept: "v1 v3",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newAppDirs(t.TempDir(), "demo")
+			for _, r := range tc.rels {
+				must(t, os.MkdirAll(d.release(r.name), 0o750))
+				switch r.record {
+				case "":
+				case "forged":
+					must(t, writeDeployRecord(d, r.name, []byte(`{"version":"other","status":"succeeded"}`)))
+				case "unreadable": // a directory at the record's name: open, stat, not a regular file
+					_, err := recordsDir(d, true)
+					must(t, err)
+					must(t, os.Mkdir(deployRecordPath(d.deploys, r.name), 0o750))
+				default:
+					must(t, writeDeployRecord(d, r.name, []byte(`{"version":"`+r.name+`","status":"`+r.record+`"}`)))
+				}
+				if r.record != "" {
+					must(t, os.Chtimes(deployRecordPath(d.deploys, r.name), r.rec, r.rec))
+				}
+			}
+			if tc.linkRecords {
+				elsewhere := filepath.Join(t.TempDir(), "deploys")
+				must(t, os.Rename(d.deploys, elsewhere))
+				must(t, os.Symlink(elsewhere, d.deploys))
+			}
+			for _, r := range tc.rels {
+				must(t, os.Chtimes(d.release(r.name), r.dir, r.dir))
+			}
+
+			available, byMtime := listReleases(d)
+			available, byMtime = runningFirst(available, tc.previous), runningFirst(byMtime, tc.previous) // as the status does
+			if got := strings.Join(available, " "); got != tc.available {
+				t.Errorf("available_versions = %q, want %q", got, tc.available)
+			}
+			if got := strings.Join(byMtime, " "); got != tc.byMtime {
+				t.Errorf("ordered_by_mtime = %q, want %q", got, tc.byMtime)
+			}
+
+			gcReleases(d, tc.keep, tc.protect, tc.previous, zap.NewNop())
+			onDisk, err := releaseNames(d.releases)
+			must(t, err)
+			sort.Strings(onDisk)
+			if got := strings.Join(onDisk, " "); got != tc.kept {
+				t.Fatalf("kept %q, want %q", got, tc.kept)
+			}
+			// What is left lists in the order it had: GC removes, and
+			// reorders nothing.
+			after, _ := listReleases(d)
+			after = runningFirst(after, tc.previous)
+			var want []string
+			for _, v := range available {
+				if slices.Contains(onDisk, v) {
+					want = append(want, v)
+				}
+			}
+			if !slices.Equal(after, want) {
+				t.Fatalf("available_versions after GC = %v, want %v", after, want)
+			}
+		})
+	}
+}
+
+// Release GC deletes only in the directory it names: with a link at
+// the app dir (`demo -> shop`) or at releases/, demo's GC would remove
+// shop's releases, so it prunes nothing and says why.
+func TestGCReleasesDoesNotPruneThroughALink(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, demo, shop appDirs)
+	}{
+		{"app dir", func(t *testing.T, demo, shop appDirs) {
+			must(t, os.Symlink("shop", demo.app))
+		}},
+		{"releases", func(t *testing.T, demo, shop appDirs) {
+			must(t, os.MkdirAll(demo.app, 0o750))
+			must(t, os.Symlink(shop.releases, demo.releases))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			shop, demo := newAppDirs(root, "shop"), newAppDirs(root, "demo")
+			for _, v := range []string{"v1", "v2", "v3"} {
+				must(t, os.MkdirAll(shop.release(v), 0o750))
+			}
+			tc.plant(t, demo, shop)
+			core, logs := observer.New(zap.WarnLevel)
+			gcReleases(demo, 1, "v3", "", zap.New(core))
+			onDisk, err := releaseNames(shop.releases)
+			must(t, err)
+			sort.Strings(onDisk)
+			if got := strings.Join(onDisk, " "); got != "v1 v2 v3" {
+				t.Fatalf("shop's releases after demo's GC: %s", got)
+			}
+			got := logs.FilterMessageSnippet("release GC: not pruning").All()
+			if len(got) != 1 || !strings.Contains(fmt.Sprint(got[0].ContextMap()["fix"]), "bind-mount") {
+				t.Fatalf("the refusal must be logged once, with the remedy: %v", logs.All())
+			}
+		})
+	}
+}
+
+// A deploy record that is there but cannot be read is not a missing
+// one: GC holds its release — not deleted, not counted toward keep —
+// names it, and prunes the rest in the order the readable records
+// give. A records directory that cannot be read leaves no order at
+// all: no release is deleted. Either way a crash's staging dir goes.
+func TestGCReleasesHoldsWhatItCannotOrder(t *testing.T) {
+	setup := func(t *testing.T) appDirs {
+		d := newAppDirs(t.TempDir(), "demo")
+		for _, v := range []string{"v0", "v1", "v2", "v3"} {
+			must(t, os.MkdirAll(d.release(v), 0o750))
+			must(t, writeDeployRecord(d, v, []byte(`{"version":"`+v+`","status":"succeeded"}`)))
+		}
+		must(t, os.Mkdir(filepath.Join(d.releases, ".extract-x"), 0o750))
+		return d
+	}
+	left := func(t *testing.T, d appDirs) string {
+		entries, err := os.ReadDir(d.releases)
+		must(t, err)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		sort.Strings(names)
+		return strings.Join(names, " ")
+	}
+
+	t.Run("one record unreadable", func(t *testing.T) {
+		d := setup(t)
+		must(t, os.Remove(deployRecordPath(d.deploys, "v1")))
+		must(t, os.Mkdir(deployRecordPath(d.deploys, "v1"), 0o750))
+		core, logs := observer.New(zap.ErrorLevel)
+		gcReleases(d, 2, "v3", "v2", zap.New(core))
+		if got := left(t, d); got != "v1 v2 v3" {
+			t.Fatalf("left %q, want v1 (held) v2 v3: v0 pruned, the staging dir removed", got)
+		}
+		got := logs.FilterMessageSnippet("holding a release").All()
+		if len(got) != 1 || got[0].ContextMap()["version"] != "v1" {
+			t.Fatalf("want one line holding v1: %v", logs.All())
+		}
+	})
+	t.Run("records directory refused", func(t *testing.T) {
+		d := setup(t)
+		elsewhere := filepath.Join(t.TempDir(), "deploys")
+		must(t, os.Rename(d.deploys, elsewhere))
+		must(t, os.Symlink(elsewhere, d.deploys))
+		core, logs := observer.New(zap.ErrorLevel)
+		gcReleases(d, 1, "v3", "v2", zap.New(core))
+		if got := left(t, d); got != "v0 v1 v2 v3" {
+			t.Fatalf("left %q, want every release and no staging dir", got)
+		}
+		if logs.FilterMessageSnippet("records directory cannot be read").Len() != 1 {
+			t.Fatalf("want one line naming the records directory: %v", logs.All())
+		}
+	})
+}
+
 func TestGCReleases(t *testing.T) {
-	dir := t.TempDir()
+	d := newAppDirs(t.TempDir(), "demo")
+	dir := d.releases
 	base := time.Now().Add(-time.Hour)
-	// v1 oldest ... v4 newest, plus a staging dir and a stray file.
+	// v1 oldest ... v4 newest (no records: placed by mtime), plus a
+	// staging dir and a stray file.
 	for i, v := range []string{"v1", "v2", "v3", "v4"} {
 		p := filepath.Join(dir, v)
 		must(t, os.MkdirAll(p, 0o755))
@@ -348,16 +686,19 @@ func TestGCReleases(t *testing.T) {
 	must(t, os.MkdirAll(filepath.Join(dir, ".hidden"), 0o755))
 	must(t, os.WriteFile(filepath.Join(dir, "README"), []byte("x"), 0o600))
 
-	// keep 2, protect the OLDEST (simulating a rollback still serving v1).
-	gcReleases(dir, 2, "v1", zap.NewNop())
+	// keep 2, protect the OLDEST (a rollback to v1): v1 is this
+	// deploy's, so newest, and holds one of the two places.
+	gcReleases(d, 2, "v1", "", zap.NewNop())
 
-	for _, v := range []string{"v1", "v3", "v4"} {
+	for _, v := range []string{"v1", "v4"} {
 		if _, err := os.Stat(filepath.Join(dir, v)); err != nil {
 			t.Errorf("%s should survive: %v", v, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "v2")); !os.IsNotExist(err) {
-		t.Error("v2 should have been pruned")
+	for _, v := range []string{"v2", "v3"} {
+		if _, err := os.Stat(filepath.Join(dir, v)); !os.IsNotExist(err) {
+			t.Errorf("%s should have been pruned", v)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".extract-v5")); !os.IsNotExist(err) {
 		t.Error("orphaned staging dir should have been removed (deploys are serialized, so any .extract-* seen by GC is a crash leftover)")

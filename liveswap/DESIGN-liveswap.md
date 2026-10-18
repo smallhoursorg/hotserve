@@ -183,9 +183,46 @@ Concept map from the Nomad-era stack:
 - After cutover the pipeline MUST wait `drain`, then SIGTERM the old
   instance's unit — SIGTERM to its whole cgroup, then SIGKILL after
   `grace`.
-- Release GC MUST run only after successful deploys, keep the newest
-  `keep` dirs by mtime, and never delete the currently-serving version.
-  A failed URL or push deploy's freshly extracted release dir is
+- Release GC MUST run only after successful deploys and keep the
+  `keep` most recently deployed releases, the one the deploy promoted
+  first — so the serving version is never deleted and counts toward
+  `keep` — and the one it replaced next, the way back, by what served
+  rather than by its record (a rollback whose record write was lost
+  leaves that version's record at an older deploy). A release's
+  deploy time MUST be one no app can write: its deploy record's write
+  time (`deploys/`, outside every view; the version's latest deploy or
+  rollback), never the release dir's own mtime, which the app running
+  from that dir can set to anything. A release whose latest deploy
+  failed (a failed rollback to it) comes after every release whose
+  latest deploy succeeded: that deploy never served, and takes no
+  place from one that did. A release with no record that proves itself
+  one (deployed before records existed, or its record write failed)
+  comes after every recorded release, ordered among its kind by its
+  dir's mtime, and the status MUST name it in `ordered_by_mtime`: that
+  mtime is the app's to set, so it decides nothing among recorded
+  releases, and such a release is the first GC candidate after the two
+  held by rank, and a rollback target while it is on disk. A version's
+  first deploy writes its record as the deploy returns, so from the
+  cutover until then the status names the running version in
+  `ordered_by_mtime` too. `available_versions` lists the releases in the
+  same order, the running version first — it is what the next deploy
+  keeps beside the new one — so the rollback targets an operator sees
+  are the ones the next GC keeps. GC MUST delete no release, and log
+  why, when the app dir or `releases/` is not the directory it names
+  (`linkAt`, as for the deploy's refusal above: through a link it
+  would delete another app's releases) or the records dir cannot be
+  read (refused the same way: the whole order would be the app's to
+  set). A release whose
+  own record is there but cannot be read (permissions, I/O, not a
+  regular file — not the same as none) MUST be held: neither deleted
+  nor counted toward `keep`, and named each GC, while the rest are
+  pruned by their records. Crash-orphaned `.extract-*` staging dirs
+  are removed whenever GC runs, since no order decides them. A dir
+  under `releases/` whose name is not a version sorts after every
+  release and holds no `keep` place, so it is removed whenever GC
+  prunes. Nothing could deploy it or roll back to it, and the status
+  does not list it, so it never takes the place of a version the
+  status lists. A failed URL or push deploy's freshly extracted release dir is
   removed (a rollback, or a relaunch of the running version, launches
   an existing release and never deletes it), so its version stays
   retriable — unless the failed instance
@@ -462,7 +499,7 @@ backwards edges reappearing *despite* this table.
 | `liveswap.go` | App module, config structs + defaults, Validate, pool wiring |
 | `names.go` | the app-name and version alphabets, and the two helpers over them; shared by every layer |
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
-| `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
+| `appdirs.go` | `appDirs`: the on-disk layout for one app — path arithmetic, and the one check that a dir of it is the directory it names (`linkAt`, by Lstat), which every place hotserve writes or deletes in an app dir runs. No state, no lock |
 | `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed at the name, no FIFO held, size-bounded — shared by the deploy records and `state.json` |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them, reading a zero field as unset, so a value below an option's minimum (0 included) is refused here, named; `soak` and `deploy_log_lines`, whose 0 is a setting, are pointers |
 | `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
@@ -482,7 +519,7 @@ backwards edges reappearing *despite* this table.
 | `health.go` | prober with soak/deadline arithmetic on an injected clock |
 | `journal.go` | the journal tail a failed deploy's response carries: `journalctl` run with argument lists built here, its output bounded |
 | `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff, the wait for a deploy holding the lock |
-| `state.go` | `state.json` atomic persistence, keep-N GC |
+| `state.go` | `state.json` atomic persistence; the release order (deploy time) that keep-N GC and `available_versions` share |
 | `deploys.go` | the deploy record store, `<app>/deploys/<version>.json`: written once through the filter, served back only through it, pruned with the releases; its four rules head the file |
 | `trustwarn.go` | the load-time pass that asks `deploytrust.WarnUnboundSource` about each `deploy_trust` block once, the global ones only when some app inherits them |
 | `deploytoken_cmd.go` | the `hotserve deploy-keygen` / `deploy-token` subcommands |
@@ -693,6 +730,8 @@ severity × occurrence × detection, then the fix's size and risk.
 | A watchdog restart that waits for a deploy holding the lock keeps the budget slot it claimed before the wait: a wait longer than `watchdog_window` lets the slot slide out before the restart happens, so that restart goes uncounted and a crash loop right after gets one restart more than the budget. | `handleFailure`, the wait for the lock | 2 | 2 | 3 | 12 | size 2 (re-stamp the slot once the lock is taken) | Under rule 3 the product is under 20. It takes a deploy longer than the window (ten minutes by default) over a dead instance, and costs one restart per such deploy. |
 | A `pre_start` that exits within milliseconds of `deadline` can still read as timed out: `jobResult` prefers a job result already received when the context ends, but not one whose signal is still in flight. The deploy fails red naming the deadline, and the release of a migration that ran is removed. | `jobResult` | 2 | 3 | 1 | 6 | size 3 (a second completion source: a oneshot's transient unit is unloaded on success, so no `Result` is left to ask for) | Rule 2 holds (red, named); under rule 3 the product is under 20. A migration that ends on its deadline has used its whole budget; raising `deadline` is the remedy. |
 | A Debian 13 host that passes the tutorial's step 2 (apt's `systemd (>= 257)` floor, `systemd-detect-virt --container`) but whose kernel or container refuses the sandbox's namespaces installs and serves the starter config, and first fails at step 3: `hotserve init`'s reload is liveswap's first start. That reload is refused, the probe's error names the cause, and the starter keeps serving; the box's repository, signer and workflow carry over to a fixed or new host. | `probeSandboxCapability`, from `App.Start` | 2 | 5 | 1 | 10 | size 3, risk 1 (a sandbox-check subcommand that step 2 runs as the hotserve user) | Rule 2 holds (it ends red and named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#274, 2026-10-17; #225 scored the same case at occurrence 3, but a host is the operator's choice, so it scores as input). The probe needs the hotserve user and its lingering manager, which the package's postinst creates, so the earliest any check could run is the end of `apt install`, minutes before step 3, with the same refusal and the same fix. A check in postinst could only warn, since a failed postinst leaves the package half-configured: one line in apt's output, after up to two 30-second probe budgets inside dpkg. And liveswap with no apps runs no probe (`len(a.managed) > 0` in `App.Start`), so the starter config cannot carry one. |
+| Releases with no deploy record that proves itself one (deployed before records existed, or whose record write failed) sort after every recorded release, ordered among themselves by their dirs' mtimes. A compromised instance running from one of them can set its own dir's mtime, keep its release, and have another unrecorded one pruned first. No recorded release is affected, nor the two GC holds by rank (`TestReleaseOrderLedger`, "the fallback's limit"). | `newestFirst`, state.go | 2 | 2 | 3 | 12 | size 3 (a birth-time key, with its own fallback where a filesystem reports none) | Rule 2 holds. Under rule 3 the product is under 20 and the fix is not size 1, risk 1. What moves is only which of the releases already first in line for pruning goes first, and each is named in the status (`ordered_by_mtime`) and in the GC line (`placed_by`). It needs two unrecorded releases on disk past the held pair plus a compromised app running from one of them. On a box with records since its first deploy that means two failed record writes as well (occurrence 1). Sorting these releases last is the owner's decision (#299, 2026-10-18): it leaves no app-writable input deciding a prune among recorded releases. |
+| A deploy that finds no instance in memory (the watchdog dropped one whose relaunch was refused for good, `dropIf`, or recovery has not launched the app) gives GC no replaced version to hold by rank. If the version that last served came in by a rollback whose record write was lost, its record is at an older deploy, and with `keep 2` that GC can prune it. | `deployLocked` → `gcReleases`, `previous` | 3 | 2 | 3 | 18 | size 2, risk 2 (fall back to `state.json`'s last-served version) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1. It takes two independent faults: the lost record write, and no instance in memory at the next deploy. With `keep 3` or more, that version stays among those kept unless newer ones were deployed since. The GC line names what it prunes (`placed_by`). |
 | `max_token_ttl {env.NAME}` in a `deploy_trust local` block is refused at config load (`invalid max_token_ttl "{env.NAME}"`), though the README says `{env.*}` placeholders are resolved at config load: the duration is parsed when the Caddyfile is, before placeholders are. | `deploytrust.Parse` | 2 | 5 | 1 | 10 | size 2, risk 2 (a string field, resolved in `ResolvePlaceholders` and parsed in `Build`) | Rule 2 holds (refused and named, before anything runs); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#296, 2026-10-17). Every liveswap duration directive (`health_interval`, `deadline`, …) parses the same way, so this one matches them; the Caddyfile's own `{$NAME}`, substituted when the file is read, works for all of them. |
 | An app dir, or a dir it makes, that is a link to a sibling's (`<root>/blog -> shop`, `blog/proxy -> ../shop/proxy`) is still followed outside a deploy. blog's status lists shop's releases as its own available versions, and so does the status a refused deploy's response carries. blog's recovery reads shop's `state.json`; it and the watchdog's relaunch make and remove a run dir in shop's `run/` and are refused at launch for a linked app dir, `releases/`, `shared/` or `run/`, recovery retrying, backing off to once a minute. A linked `proxy/` launches: blog's pins land in shop's `proxy/`, where shop's sweep removes them, so blog, not shop, goes unreachable. | `status`, `ensureRunning`, `launchVersion` | 3 | 5 | 3 | 45 | size 2, risk 1 (`writeRefusal` in status and before a relaunch, #300) | Scores to fix (rule 3); held by decision (#300, 2026-10-18: the deploy side is fixed, the rest held) until a box runs a link under the root, or renaming or aliasing an app becomes a feature. No box does. Nothing here writes into the sibling's releases or data: a deploy, push or rollback through such a dir is refused before it writes (`writeRefusal`), so a rollback to a listed version is refused and named; a relaunch through a linked app dir, `releases/`, `shared/` or `run/` is refused at launch (`resolveBindSources`), red and named; and the socket prune never follows a link (`linkAt`), so no sibling loses its socket and pin that way. |
 | A push refused before its upload is staged (a dir that is not the directory it names, like a 413 or a staging failure) leaves `last_deploy` as it was, where a URL deploy or rollback refused the same way replaces it. | `deployPush` | 2 | 5 | 1 | 10 | size 2, risk 2 (a push refusal through the pipeline's bookkeeping) | Under 20, and not a size-1, risk-1 fix (rule 3). The push's own response is the refusal, a 500 naming the path, the reason and the remedy, and the journal says it with who asked (`deploy failed`, `via`, `remote`). Every refusal of a push before staging already leaves `last_deploy` alone, so a status read after a push tells the same story for each. |

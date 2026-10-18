@@ -37,7 +37,12 @@ import (
 //     (recordedPin) — only a digest-shaped string. It lands in the
 //     new record, which goes through the filter again, and in
 //     last_deploy, where like every pin it is a safe string
-//     (redactorFor) until the next deploy replaces it.
+//     (redactorFor) until the next deploy replaces it. And one fact
+//     about a record is read back, with its outcome: its write time,
+//     off the open file and only for a record that proves itself one
+//     (recordedDeploy), which is its version's place in the release
+//     order that retention and available_versions follow (state.go) —
+//     a key the app cannot write.
 //  2. Nothing from disk reaches a response except through the filter
 //     as body text. A recorded version is a safe string like any
 //     other name, and no safe string equals a known value (redact.go,
@@ -233,45 +238,38 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*Red
 	safe := []string{ma.name, result.Version, result.SHA256}
 	if c.spec != nil {
 		safe = append(safe, c.spec.dirs.root, c.spec.dirs.app, c.spec.dirs.releases, c.spec.dirs.shared, c.spec.dirs.run)
-		safe = append(safe, listReleases(c.spec.dirs.releases)...)
+		onDisk, _ := listReleases(c.spec.dirs) // names only: the order is not this filter's concern
+		safe = append(safe, onDisk...)
 	}
 	return NewRedactor(kvs, safe), unknown
 }
 
 // recordsDir is the records directory as the directory it names
-// (rule 4): with create, made if absent; refused if a link or anything
-// else stands in its place, or if any ancestor is a link that lands it
-// elsewhere — `<root>/blog -> <root>/shop` would have blog's deploys
-// list, serve and prune shop's records. The check is the bind
-// sources': canonical against canonical (canonicalDeepest, so a root
-// not yet on disk under a linked ancestor resolves as far as it can),
-// with an alias on the liveswap root itself the one difference
-// allowed. Without create — every read — a missing directory is
-// fs.ErrNotExist and nothing is made: a status poll must not create
-// an app's tree.
+// (rule 4): with create, made if absent; refused when the app dir or it
+// is a link, is not a directory, or cannot be checked for one
+// (appDirs.linkAt, the rule every dir hotserve deletes in is held to) —
+// `<root>/blog -> <root>/shop` would have blog's deploys list, serve
+// and prune shop's records. An alias on the liveswap root itself is
+// the one difference allowed. Without create — every read — a missing
+// directory is fs.ErrNotExist and nothing is made: a status poll must
+// not create an app's tree.
 func recordsDir(d appDirs, create bool) (string, error) {
-	rootC := canonicalDeepest(d.root)
-	want := filepath.Join(rootC, filepath.Base(d.app), "deploys")
-	// The app dir first, before anything is created through it: an
-	// ancestor link would otherwise have MkdirAll make the directory
-	// where the link points before the check below refused it.
-	if got := canonicalDeepest(d.app); got != filepath.Dir(want) {
-		return "", fmt.Errorf("%s resolves to %s (a planted link is not followed)", d.app, got)
+	// The app dir first, before anything is created through it: a link
+	// there would otherwise have MkdirAll make the directory where it
+	// points before the check below refused it.
+	if p, why := d.linkAt(); p != "" {
+		return "", fmt.Errorf("%s %w", p, why)
 	}
 	if create {
 		if err := os.MkdirAll(d.deploys, 0o750); err != nil {
 			return "", err
 		}
 	}
-	fi, err := os.Lstat(d.deploys)
-	if err != nil {
+	if p, why := d.linkAt(d.deploys); p != "" {
+		return "", fmt.Errorf("%s %w", p, why)
+	}
+	if _, err := os.Lstat(d.deploys); err != nil {
 		return "", err // fs.ErrNotExist when absent and not creating
-	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-		return "", fmt.Errorf("%s is not a directory (a planted link is not followed)", d.deploys)
-	}
-	if got := canonicalDeepest(d.deploys); got != want {
-		return "", fmt.Errorf("%s resolves to %s, not %s (a planted link is not followed)", d.deploys, got, want)
 	}
 	return d.deploys, nil
 }
@@ -362,6 +360,34 @@ func recordedPin(d appDirs, version string) string {
 		return ""
 	}
 	return s.pin()
+}
+
+// recordedDeploy is when hotserve last wrote version's record in
+// records (a directory recordsDir vouched for; "" for none) — the
+// version's deploy time, which orders the releases (state.go) — and
+// whether that deploy failed. ok is false when there is no record that
+// proves itself one (rule 1): none under the name, the name is not a
+// version, or the object is not a record of it. err is a record that
+// is there and cannot be read — permissions, I/O, a link or anything
+// but a regular file at its name — which is not the same as none: GC
+// must not act on an order it could not read.
+func recordedDeploy(records, version string) (written time.Time, failed, ok bool, err error) {
+	if records == "" || !validVersion(version) {
+		return time.Time{}, false, false, nil
+	}
+	name := versionPathComponent(version) + ".json"
+	b, written, err := openRecord(filepath.Join(records, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, false, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, false, err
+	}
+	s, ok := recordHead(b, name)
+	if !ok {
+		return time.Time{}, false, false, nil
+	}
+	return written, s.Status == "failed", true, nil
 }
 
 // errNoDeployRecord is a version no deploy has been recorded for.

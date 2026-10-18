@@ -197,6 +197,34 @@ func TestSweepUnknownAppsPrunesAppsWithNoUnitsLeft(t *testing.T) {
 	}
 }
 
+// The start-time sweep prunes an unconfigured app's socket dirs only as
+// the directories they name: a stray unit of `demo`, whose dir is a
+// link to the configured shop's, gets its unit stopped and shop's live
+// socket and pin left alone.
+func TestSweepUnknownAppsDoesNotPruneThroughALinkedAppDir(t *testing.T) {
+	conn := newFakeSystemdConn()
+	root := t.TempDir()
+	shop := newAppDirs(root, "shop")
+	must(t, os.MkdirAll(shop.runDir("0a1b2c3d0a1b2c3d"), 0o750))
+	must(t, os.MkdirAll(shop.proxy, 0o750))
+	pin := filepath.Join(shop.proxy, "0a1b2c3d0a1b2c3d.sock")
+	must(t, os.WriteFile(pin, nil, 0o600))
+	must(t, os.Symlink("shop", filepath.Join(root, "demo")))
+	conn.setStatus("hotserve-demo.v1.0b1b2c3d0a1b2c3d.service", unitStatus{LoadState: "loaded", ActiveState: "active", Sandboxed: true})
+	swapSeam(t, &appConfiguredSeam, func(app string) bool { return app == "shop" })
+	if err := sweepUnknownApps(context.Background(), conn, root, zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if stops := conn.stops(); len(stops) != 1 {
+		t.Fatalf("demo's stray unit must still be stopped, got %v", stops)
+	}
+	for _, f := range []string{shop.runDir("0a1b2c3d0a1b2c3d"), pin} {
+		if _, err := os.Lstat(f); err != nil {
+			t.Fatalf("shop's %s was pruned through demo's link: %v", f, err)
+		}
+	}
+}
+
 // The two seams the sweep reads are swapped by tests while a sweep may
 // still be running: App.Start launches it on a goroutine nothing joins
 // (bounded only by unknownAppSweepTimeout), so one test's restore can

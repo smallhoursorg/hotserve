@@ -515,8 +515,8 @@ a box whose config changes on every signed push to `your-org/boxes`'
 Rollback is a button:
 Actions → deploy → **Run workflow**, with the version to go back to. A
 version is the first 12 characters of a commit on `main`, as the
-releases page lists them; the box keeps the newest five, so those are
-the ones it can relaunch. Leave "Use workflow from" on `main`: the
+releases page lists them; the box keeps the five it deployed most
+recently (a rollback counts), so those are the ones it can relaunch. Leave "Use workflow from" on `main`: the
 workflow runs from there whichever version it relaunches. The
 example's README says [more](../examples/node/README.md#rolling-back).
 The next app is a commit to the box's repository — another `app`

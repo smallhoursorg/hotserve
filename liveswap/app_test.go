@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -851,20 +852,26 @@ func TestDeployConcurrentGets409Error(t *testing.T) {
 	}
 }
 
+// deployAt deploys version through the rig and dates its deploy record
+// minute minutes after base: the record's write time is the release's
+// place in the order, and file times are too coarse to tell apart
+// deploys a fake pipeline runs within a millisecond.
+func deployAt(t *testing.T, rig *testRig, version string, base time.Time, minute int) {
+	t.Helper()
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/" + version, version: version}))
+	when := base.Add(time.Duration(minute) * time.Minute)
+	must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, version), when, when))
+}
+
 func TestDeployGCKeepsNewestReleases(t *testing.T) {
 	rig := newTestRig(t)
-	ctx := context.Background()
-	// keep=2 in testSpec; deploy three versions, backdating each
-	// BEFORE the next deploy so the GC that runs inside Deploy sees
-	// deterministic mtime ordering (v1 oldest, v3 newest).
+	// keep=2 in testSpec; deploy three versions, each recorded a
+	// minute after the last, so the GC inside the third deploy has v3
+	// (its own) and v2 to keep.
+	base := time.Now().Add(-time.Hour)
 	for i, v := range []string{"v1", "v2", "v3"} {
-		must(t, rig.ma.Deploy(ctx, deployRequest{url: "https://x/a", version: v}))
-		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
-		_ = os.Chtimes(rig.spec.dirs.release(v), mt, mt)
+		deployAt(t, rig, v, base, i)
 	}
-	// The final GC ran before v3 was backdated; run it once more the
-	// way the next deploy would see the world.
-	gcReleases(rig.spec.dirs.releases, rig.spec.keep, "v3", zap.NewNop())
 	entries, err := os.ReadDir(rig.spec.dirs.releases)
 	if err != nil {
 		t.Fatal(err)
@@ -878,6 +885,224 @@ func TestDeployGCKeepsNewestReleases(t *testing.T) {
 	}
 	if _, err := os.Stat(rig.spec.dirs.release("v3")); err != nil {
 		t.Fatal("current release must survive GC")
+	}
+	if _, err := os.Stat(rig.spec.dirs.release("v2")); err != nil {
+		t.Fatal("the release deployed before it must survive GC: it is the way back")
+	}
+}
+
+// mtimeSettingFetcher is the fake fetcher, after which the new
+// release's dir gets the mtime its pre_start or instance could give it
+// before release GC runs: the release being started is bound
+// read-write into its sandbox. The zero time leaves it alone.
+type mtimeSettingFetcher struct {
+	*fakeFetcher
+	mtime time.Time
+}
+
+func (f mtimeSettingFetcher) fetch(ctx context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, archiveStats, error) {
+	dir, stats, err := f.fakeFetcher.fetch(ctx, spec, req, progress)
+	if err == nil && !f.mtime.IsZero() {
+		err = os.Chtimes(dir, f.mtime, f.mtime)
+	}
+	return dir, stats, err
+}
+
+// Adversarial: the app can set any mtime on the release it runs from —
+// the running instance on its own dir, an earlier version's instance on
+// what is now a sibling's, the next version's pre_start or instance on
+// its own before GC — and none of it moves available_versions or what
+// the next deploy's GC prunes. With keep 3 and v1..v3 deployed in that
+// order, deploying v4 prunes v1 and only v1, and lists v4 v3 v2. With
+// a release from before records (v0, no record) on disk too and keep 4,
+// v0 is the one pruned whatever mtime it is given — 2099 included: a
+// release with no record outranks no recorded one.
+func TestReleaseOrderIgnoresMtimesTheAppSets(t *testing.T) {
+	future := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	epoch := time.Unix(0, 0)
+	marks := map[string]time.Time{"untouched": {}, "future": future, "epoch": epoch}
+	names := []string{"untouched", "future", "epoch"}
+	for _, legacy := range []bool{false, true} {
+		siblings := []string{"v1", "v2"}
+		before, pruned, after := []string{"v3", "v2", "v1"}, "v1", []string{"v4", "v3", "v2"}
+		var beforeByMtime []string
+		if legacy {
+			siblings = append(siblings, "v0")
+			before, pruned, after = []string{"v3", "v2", "v1", "v0"}, "v0", []string{"v4", "v3", "v2", "v1"}
+			beforeByMtime = []string{"v0"}
+		}
+		for _, own := range names {
+			for _, sibling := range siblings {
+				for _, sib := range names {
+					for _, next := range names {
+						t.Run(fmt.Sprintf("legacy=%t/v3=%s/%s=%s/v4=%s", legacy, own, sibling, sib, next), func(t *testing.T) {
+							rig := newTestRig(t)
+							rig.spec.keep = len(before)
+							base := time.Now().Add(-time.Hour)
+							if legacy {
+								must(t, os.MkdirAll(rig.spec.dirs.release("v0"), 0o750))
+								old := base.Add(-time.Hour)
+								must(t, os.Chtimes(rig.spec.dirs.release("v0"), old, old))
+							}
+							for i, v := range []string{"v1", "v2", "v3"} {
+								deployAt(t, rig, v, base, i)
+							}
+							for v, mark := range map[string]time.Time{"v3": marks[own], sibling: marks[sib]} {
+								if !mark.IsZero() {
+									must(t, os.Chtimes(rig.spec.dirs.release(v), mark, mark))
+								}
+							}
+							if got := rig.ma.status(); !slices.Equal(got.AvailableVersions, before) || !slices.Equal(got.OrderedByMtime, beforeByMtime) {
+								t.Fatalf("before v4: available_versions = %v, ordered_by_mtime = %v", got.AvailableVersions, got.OrderedByMtime)
+							}
+							rig.ma.fetch = mtimeSettingFetcher{fakeFetcher: rig.fetch, mtime: marks[next]}
+							must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v4", version: "v4"}))
+							onDisk, err := releaseNames(rig.spec.dirs.releases)
+							must(t, err)
+							want := slices.DeleteFunc(slices.Clone(before), func(v string) bool { return v == pruned })
+							want = append(want, "v4")
+							slices.Sort(onDisk)
+							slices.Sort(want)
+							if !slices.Equal(onDisk, want) {
+								t.Fatalf("GC left %v, want %v (%s pruned)", onDisk, want, pruned)
+							}
+							if got := rig.ma.status(); !slices.Equal(got.AvailableVersions, after) || got.OrderedByMtime != nil {
+								t.Fatalf("after v4: available_versions = %v, ordered_by_mtime = %v", got.AvailableVersions, got.OrderedByMtime)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+// A release with no deploy record sorts after every recorded one, by
+// its dir's mtime among its kind, and the status names it so: that one
+// key is the app's to move.
+func TestStatusNamesReleasesPlacedByMtime(t *testing.T) {
+	rig := newTestRig(t)
+	deployAt(t, rig, "v2", time.Now().Add(-time.Hour), 0)
+	must(t, os.MkdirAll(rig.spec.dirs.release("v1"), 0o750)) // deployed before records existed
+	old := time.Now().Add(-2 * time.Hour)
+	must(t, os.Chtimes(rig.spec.dirs.release("v1"), old, old))
+	got := rig.ma.status()
+	if !slices.Equal(got.AvailableVersions, []string{"v2", "v1"}) || !slices.Equal(got.OrderedByMtime, []string{"v1"}) {
+		t.Fatalf("available_versions = %v, ordered_by_mtime = %v", got.AvailableVersions, got.OrderedByMtime)
+	}
+	body, err := json.Marshal(got)
+	must(t, err)
+	if !strings.Contains(string(body), `"ordered_by_mtime":["v1"]`) {
+		t.Fatalf("status JSON lacks ordered_by_mtime: %s", body)
+	}
+}
+
+// A rollback that fails writes its version's record, newest of all,
+// and that deploy never served: it takes no place from a version that
+// did. keep 3, v1..v3 deployed, a failed rollback to v1, then v4: v4
+// and v3 are held by rank, and the third place is v2's, not v1's.
+func TestAFailedRollbackTakesNoPlaceFromAVersionThatServed(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.keep = 3
+	base := time.Now().Add(-time.Hour)
+	for i, v := range []string{"v1", "v2", "v3"} {
+		deployAt(t, rig, v, base, i)
+	}
+	rig.prober.err = errors.New("never became healthy")
+	if err := rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}); err == nil {
+		t.Fatal("the rollback to v1 should have failed its health gate")
+	}
+	rig.prober.err = nil
+	if got := rig.ma.status().AvailableVersions; !slices.Equal(got, []string{"v3", "v2", "v1"}) {
+		t.Fatalf("available_versions = %v, want v3 v2 v1: the failed v1 last", got)
+	}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v4", version: "v4"}))
+	onDisk, err := releaseNames(rig.spec.dirs.releases)
+	must(t, err)
+	slices.Sort(onDisk)
+	if !slices.Equal(onDisk, []string{"v2", "v3", "v4"}) {
+		t.Fatalf("GC left %v, want v2 v3 v4 (v1, whose latest deploy failed, pruned)", onDisk)
+	}
+}
+
+// A rollback whose record write is lost (a crash after the cutover, a
+// full disk) leaves its version's record at the deploy before: the
+// next deploy's GC still keeps that version, since it is the one the
+// new deploy replaced. keep 2: v1, v2, a rollback to v1 whose record
+// keeps v1's first time, then v3 — v1 and v3 stay.
+func TestALostRollbackRecordDoesNotPruneTheVersionThatServed(t *testing.T) {
+	rig := newTestRig(t)
+	base := time.Now().Add(-time.Hour)
+	deployAt(t, rig, "v1", base, 0)
+	deployAt(t, rig, "v2", base, 1)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}))
+	must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, "v1"), base, base)) // the rollback's record never landed
+	// The status agrees with the GC to come: v1 is running, so it is
+	// listed first, whatever its record says.
+	if got := rig.ma.status().AvailableVersions; !slices.Equal(got, []string{"v1", "v2"}) {
+		t.Fatalf("available_versions = %v, want v1 v2: the running version first", got)
+	}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v3", version: "v3"}))
+	onDisk, err := releaseNames(rig.spec.dirs.releases)
+	must(t, err)
+	slices.Sort(onDisk)
+	if !slices.Equal(onDisk, []string{"v1", "v3"}) {
+		t.Fatalf("GC left %v, want v1 v3: v1 is the way back from v3", onDisk)
+	}
+}
+
+// The status lists the running version first under the lock that
+// gives current_version: polled while rollbacks cut over between v1
+// and v2, every snapshot that lists the running version lists it
+// first, whichever side of a cutover its disk read fell on.
+func TestStatusListsTheRunningVersionFirstThroughCutovers(t *testing.T) {
+	rig := newTestRig(t)
+	base := time.Now().Add(-time.Hour)
+	deployAt(t, rig, "v1", base, 0)
+	deployAt(t, rig, "v2", base, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			v := []string{"v1", "v2"}[i%2]
+			if err := rig.ma.Deploy(context.Background(), deployRequest{version: v, rollback: true}); err != nil {
+				t.Errorf("rollback to %s: %v", v, err)
+				return
+			}
+		}
+	}()
+	// Errorf and break, never Fatalf: the rollbacks go on until done,
+	// and a goroutine that logs after its test ended panics the binary.
+	for polling := true; polling; {
+		select {
+		case <-done:
+			polling = false
+		default:
+		}
+		s := rig.ma.status()
+		if s.CurrentVersion != "" && slices.Contains(s.AvailableVersions, s.CurrentVersion) && s.AvailableVersions[0] != s.CurrentVersion {
+			t.Errorf("current_version %s, available_versions %v: the running version not first", s.CurrentVersion, s.AvailableVersions)
+			break
+		}
+	}
+	<-done
+}
+
+// With only proxy/ a link, the prune removes nothing — not even the
+// app's own leftovers under run/, which it checks first and would
+// otherwise remove before the refusal.
+func TestPruneRemovesNothingWhenEitherDirIsALink(t *testing.T) {
+	root := shortTempDir(t)
+	shop := newAppDirs(root, "shop")
+	must(t, shop.ensure())
+	demo := newAppDirs(root, "demo")
+	must(t, os.MkdirAll(demo.run, 0o750))
+	must(t, os.Symlink(shop.proxy, demo.proxy))
+	const stale = "5e5e5e5e5e5e5e5e"
+	touchSocket(t, demo.socket(stale))
+	pruneSockets(demo, nil, zap.NewNop())
+	if _, err := os.Lstat(demo.runDir(stale)); err != nil {
+		t.Fatalf("run/ was pruned before proxy/'s refusal: %v", err)
 	}
 }
 
