@@ -1482,8 +1482,9 @@ type statusSnapshot struct {
 	Deploys    []deploySummary   `json:"deploys,omitempty"`
 	LastDeploy *deployResult     `json:"last_deploy,omitempty"`
 	Watchdog   *watchdogSnapshot `json:"watchdog,omitempty"`
-	// AvailableVersions lists the on-disk releases, most recently
-	// deployed first (state.go, "Release order") — the versions
+	// AvailableVersions lists the on-disk releases, the running version
+	// first, then most recently deployed first (state.go, "Release
+	// order") — the versions
 	// `?rollback=<version>` can relaunch. Always serialized (a healthy
 	// app with no releases reports []), so an empty set is
 	// distinguishable from a server that doesn't report the field.
@@ -1500,8 +1501,13 @@ func (ma *managedApp) status() statusSnapshot {
 	available := []string{} // always an array in the JSON, never null
 	var byMtime []string
 	if c.spec != nil {
-		// Read releases outside ma.mu — it is disk I/O, and status is polled.
-		if rels, mtimes := listReleases(c.spec.dirs); rels != nil {
+		// Read releases outside ma.mu — it is disk I/O, and status is
+		// polled — the running version first (listReleases).
+		running := ""
+		if inst := ma.currentInstance(); inst != nil {
+			running = inst.version
+		}
+		if rels, mtimes := listReleases(c.spec.dirs, running); rels != nil {
 			available, byMtime = rels, mtimes
 		}
 		deploys = listDeploySummaries(c.spec.dirs)

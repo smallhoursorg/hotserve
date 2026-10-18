@@ -178,24 +178,29 @@ Concept map from the Nomad-era stack:
   first — so the serving version is never deleted and counts toward
   `keep` — and the one it replaced next, the way back, by what served
   rather than by its record (a rollback whose record write was lost
-  leaves that version's record at an older deploy). A release's deploy time MUST be one no app can write: its
-  deploy record's write time (`deploys/`, outside every view; the
-  version's latest deploy or rollback), never the release dir's own
-  mtime, which the app running from that dir can set to anything. A
-  release whose latest deploy failed (a failed rollback to it) comes
-  after every release whose latest deploy succeeded, so a failed
-  rollback never pushes the version that served through it out of
-  `keep`. A release with no record that proves itself one (deployed
-  before records existed, or its record write failed) is placed by its
-  dir's mtime, and the status MUST name it in `ordered_by_mtime`.
-  `available_versions` lists the releases in the same order, so the
-  rollback targets an operator sees are the ones GC keeps. GC MUST
-  prune nothing, and log why, when the releases dir is not the
-  directory it names (`appDirs.ownDir`: through a link it would delete
-  another app's releases) or a record cannot be read — the records
-  dir refused as a planted link, or a record that is there but
-  unreadable (permissions, I/O, not a regular file), which is not the
-  same as none: the order would be the app's to set. A failed URL or push deploy's freshly extracted release dir is
+  leaves that version's record at an older deploy). A release's
+  deploy time MUST be one no app can write: its deploy record's write
+  time (`deploys/`, outside every view; the version's latest deploy or
+  rollback), never the release dir's own mtime, which the app running
+  from that dir can set to anything. A release whose latest deploy
+  failed (a failed rollback to it) comes after every release whose
+  latest deploy succeeded: that deploy never served, and takes no
+  place from one that did. A release with no record that proves itself
+  one (deployed before records existed, or its record write failed) is
+  placed by its dir's mtime, and the status MUST name it in
+  `ordered_by_mtime`. `available_versions` lists the releases in the
+  same order, the running version first — it is what the next deploy
+  keeps beside the new one — so the rollback targets an operator sees
+  are the ones the next GC keeps. GC MUST delete no release, and log
+  why, when the releases dir is not the directory it names
+  (`appDirs.ownDir`: through a link it would delete another app's
+  releases) or the records dir cannot be read (refused as a planted
+  link: the whole order would be the app's to set). A release whose
+  own record is there but cannot be read (permissions, I/O, not a
+  regular file — not the same as none) MUST be held: neither deleted
+  nor counted toward `keep`, and named each GC, while the rest are
+  pruned by their records. Crash-orphaned `.extract-*` staging dirs
+  are removed whenever GC runs, since no order decides them. A failed URL or push deploy's freshly extracted release dir is
   removed (a rollback, or a relaunch of the running version, launches
   an existing release and never deletes it), so its version stays
   retriable — unless the failed instance
@@ -631,7 +636,7 @@ severity × occurrence × detection, then the fix's size and risk.
 | A request cancelled before or during `pre_start` does not stop it: the migration runs to its end, then the deploy starts the new instance and the health gate fails it on the cancelled request (phase `soaking`, `deploy canceled while waiting for health`). The new instance runs its startup for that moment, the release is removed, and a retry runs `pre_start` again, as it does after any gate failure that follows a `pre_start`. | `deployLocked`, after `pre_start` | 3 | 3 | 1 | 9 | size 2, risk 1 (a request check before the start); size 3, risk 3 (run the rest of the deploy detached) | Rule 2 holds (it ends red, the cause named); under rule 3 the product is under 20 and neither fix is size 1, risk 1. The shape is the owner's decision (#295, 2026-10-17): the gate aborts the deploy as it does for any client that left. The old instance serves throughout, and a migration that cannot run twice already meets the same retry after any gate failure. |
 | A `pre_start` that exits within milliseconds of `deadline` can still read as timed out: `jobResult` prefers a job result already received when the context ends, but not one whose signal is still in flight. The deploy fails red naming the deadline, and the release of a migration that ran is removed. | `jobResult` | 2 | 3 | 1 | 6 | size 3 (a second completion source: a oneshot's transient unit is unloaded on success, so no `Result` is left to ask for) | Rule 2 holds (red, named); under rule 3 the product is under 20. A migration that ends on its deadline has used its whole budget; raising `deadline` is the remedy. |
 | A Debian 13 host that passes the tutorial's step 2 (apt's `systemd (>= 257)` floor, `systemd-detect-virt --container`) but whose kernel or container refuses the sandbox's namespaces installs and serves the starter config, and first fails at step 3: `hotserve init`'s reload is liveswap's first start. That reload is refused, the probe's error names the cause, and the starter keeps serving; the box's repository, signer and workflow carry over to a fixed or new host. | `probeSandboxCapability`, from `App.Start` | 2 | 5 | 1 | 10 | size 3, risk 1 (a sandbox-check subcommand that step 2 runs as the hotserve user) | Rule 2 holds (it ends red and named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#274, 2026-10-17; #225 scored the same case at occurrence 3, but a host is the operator's choice, so it scores as input). The probe needs the hotserve user and its lingering manager, which the package's postinst creates, so the earliest any check could run is the end of `apt install`, minutes before step 3, with the same refusal and the same fix. A check in postinst could only warn, since a failed postinst leaves the package half-configured: one line in apt's output, after up to two 30-second probe budgets inside dpkg. And liveswap with no apps runs no probe (`len(a.managed) > 0` in `App.Start`), so the starter config cannot carry one. |
-| A release with no deploy record that proves itself one (deployed before records existed, or its record write failed) is placed by its dir's mtime, which a compromised instance running from that release can set: a future mtime holds one of the `keep` places, and the recorded release in the last of them is pruned instead (`TestReleaseOrderLedger`, "the fallback's limit"). | `placeRelease`, state.go | 5 | 2 | 3 | 30 | size 1, risk 2 (place every no-record release after every recorded one); size 3 (a birth-time key, with its own fallback where a filesystem reports none) | Scores to fix (rule 1); accepted by decision (#299: mtime only as the fallback for a release with no record, named in the status). It takes two independent faults — a record that was not written, and a compromised app running from that very release — and the release is named where an operator picks a rollback target (`ordered_by_mtime`) and in the GC line that prunes (`placed_by`). The size-1 fix moves the risk rather than closing it: a single failed record write would then sort the version deployed just before the next one last, and that deploy's GC would prune the way back (S5 × O3 × D5). |
+| A release with no deploy record that proves itself one (deployed before records existed, or its record write failed) is placed by its dir's mtime, which a compromised instance running from that release can set: a future mtime takes one of the `keep` places that GC does not hold by rank, so the oldest recorded release still kept is pruned instead. The new release and the one it replaced are held by rank, so the way back is never the one pushed out (`TestReleaseOrderLedger`, "the fallback's limit"). | `placeRelease`, state.go | 3 | 2 | 3 | 18 | size 1, risk 2 (place every no-record release after every recorded one); size 3 (a birth-time key, with its own fallback where a filesystem reports none) | Rule 2 holds: it takes two independent faults, a record that was not written and a compromised app running from that very release. Under rule 3 the product is under 20 (27 if a hostile `pre_start` filling the disk to fail its own record write counts as one fault), and neither fix is size 1, risk 1. What it costs is one older rollback target, not the way back. The release is named where an operator picks a rollback target (`ordered_by_mtime`) and in the GC line that prunes (`placed_by`). The mtime fallback is also the decision in #299. The size-1 fix moves the risk rather than closing it: a release whose record write failed would sort last and be pruned ahead of older recorded ones. |
 | `max_token_ttl {env.NAME}` in a `deploy_trust local` block is refused at config load (`invalid max_token_ttl "{env.NAME}"`), though the README says `{env.*}` placeholders are resolved at config load: the duration is parsed when the Caddyfile is, before placeholders are. | `deploytrust.Parse` | 2 | 5 | 1 | 10 | size 2, risk 2 (a string field, resolved in `ResolvePlaceholders` and parsed in `Build`) | Rule 2 holds (refused and named, before anything runs); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#296, 2026-10-17). Every liveswap duration directive (`health_interval`, `deadline`, …) parses the same way, so this one matches them; the Caddyfile's own `{$NAME}`, substituted when the file is read, works for all of them. |
 
 ## Non-goals

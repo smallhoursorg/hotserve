@@ -923,26 +923,31 @@ func TestStatusNamesReleasesPlacedByMtime(t *testing.T) {
 	}
 }
 
-// A rollback that fails writes its version's record, and that deploy
-// never served: the next deploy's GC keeps the version that served
-// through it, not the one that failed. keep 2, v2 serving, a failed
-// rollback to v1, then v3: v2 and v3 stay.
-func TestAFailedRollbackDoesNotPushOutTheVersionThatServed(t *testing.T) {
+// A rollback that fails writes its version's record, newest of all,
+// and that deploy never served: it takes no place from a version that
+// did. keep 3, v1..v3 deployed, a failed rollback to v1, then v4: v4
+// and v3 are held by rank, and the third place is v2's, not v1's.
+func TestAFailedRollbackTakesNoPlaceFromAVersionThatServed(t *testing.T) {
 	rig := newTestRig(t)
+	rig.spec.keep = 3
 	base := time.Now().Add(-time.Hour)
-	deployAt(t, rig, "v1", base, 0)
-	deployAt(t, rig, "v2", base, 1)
+	for i, v := range []string{"v1", "v2", "v3"} {
+		deployAt(t, rig, v, base, i)
+	}
 	rig.prober.err = errors.New("never became healthy")
 	if err := rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}); err == nil {
 		t.Fatal("the rollback to v1 should have failed its health gate")
 	}
 	rig.prober.err = nil
-	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v3", version: "v3"}))
+	if got := rig.ma.status().AvailableVersions; !slices.Equal(got, []string{"v3", "v2", "v1"}) {
+		t.Fatalf("available_versions = %v, want v3 v2 v1: the failed v1 last", got)
+	}
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v4", version: "v4"}))
 	onDisk, err := releaseNames(rig.spec.dirs.releases)
 	must(t, err)
 	slices.Sort(onDisk)
-	if !slices.Equal(onDisk, []string{"v2", "v3"}) {
-		t.Fatalf("GC left %v, want v2 v3: v2 is the way back from v3", onDisk)
+	if !slices.Equal(onDisk, []string{"v2", "v3", "v4"}) {
+		t.Fatalf("GC left %v, want v2 v3 v4 (v1, whose latest deploy failed, pruned)", onDisk)
 	}
 }
 
@@ -958,12 +963,35 @@ func TestALostRollbackRecordDoesNotPruneTheVersionThatServed(t *testing.T) {
 	deployAt(t, rig, "v2", base, 1)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}))
 	must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, "v1"), base, base)) // the rollback's record never landed
+	// The status agrees with the GC to come: v1 is running, so it is
+	// listed first, whatever its record says.
+	if got := rig.ma.status().AvailableVersions; !slices.Equal(got, []string{"v1", "v2"}) {
+		t.Fatalf("available_versions = %v, want v1 v2: the running version first", got)
+	}
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/v3", version: "v3"}))
 	onDisk, err := releaseNames(rig.spec.dirs.releases)
 	must(t, err)
 	slices.Sort(onDisk)
 	if !slices.Equal(onDisk, []string{"v1", "v3"}) {
 		t.Fatalf("GC left %v, want v1 v3: v1 is the way back from v3", onDisk)
+	}
+}
+
+// With only proxy/ a link, the prune removes nothing — not even the
+// app's own leftovers under run/, which it checks first and would
+// otherwise remove before the refusal.
+func TestPruneRemovesNothingWhenEitherDirIsALink(t *testing.T) {
+	root := shortTempDir(t)
+	shop := newAppDirs(root, "shop")
+	must(t, shop.ensure())
+	demo := newAppDirs(root, "demo")
+	must(t, os.MkdirAll(demo.run, 0o750))
+	must(t, os.Symlink(shop.proxy, demo.proxy))
+	const stale = "5e5e5e5e5e5e5e5e"
+	touchSocket(t, demo.socket(stale))
+	pruneSockets(demo, nil, zap.NewNop())
+	if _, err := os.Lstat(demo.runDir(stale)); err != nil {
+		t.Fatalf("run/ was pruned before proxy/'s refusal: %v", err)
 	}
 }
 

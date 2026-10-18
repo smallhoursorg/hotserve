@@ -925,17 +925,22 @@ curl --fail-with-body -X POST -H "Authorization: Bearer $JWT" \
 Rollback runs the same blue/green pipeline (start, health-gate, cut
 over), so it is zero-downtime too. A `422` is returned if that version
 is no longer on disk. To see what you can roll back to, `GET /<app>`
-returns `available_versions` — the on-disk releases, most recently
-deployed first, in the order release GC keeps them (`keep` of them
-after a successful deploy) — and `deploys`, what each recorded
-version's latest deploy came to (see [Deploy records](#deploy-records)).
-A version's deploy time is its record's: the latest deploy or rollback
-of it. One whose latest deploy failed (a rollback to it that failed)
-comes after every one whose latest succeeded, so a failed rollback
-never pushes out the version that kept serving. A release with no record — deployed by
-a hotserve older than records, or its record could not be written —
-is placed by its directory's modification time instead, which the app
-running from it can change, and `ordered_by_mtime` names it.
+returns `available_versions` — the on-disk releases, the running
+version first, then most recently deployed first: the order the next
+deploy's release GC keeps them in (`keep` of them after a successful
+deploy) — and `deploys`, what each recorded version's latest deploy
+came to (see [Deploy records](#deploy-records)). A version's deploy
+time is its record's: the latest deploy or rollback of it. One whose
+latest deploy failed (a rollback to it that failed) comes after every
+one whose latest succeeded: it never served from that deploy, and
+takes no place from a version that did. A release with no record —
+deployed by a hotserve older than records, or its record could not
+be written — is placed by its directory's modification time instead,
+which the app running from it can change, and `ordered_by_mtime`
+names it. A release whose record is there but cannot be read is
+listed the same way, and release GC holds it (neither deletes it nor
+counts it toward `keep`) and says so in the journal until the record
+can be read.
 
 **Versions are immutable.** A deploy (URL or push) never overwrites an
 existing on-disk release, so a version you can roll back to can't be
@@ -1042,8 +1047,9 @@ the `sha256` it was pinned to, and the artifact's `artifact_entries` /
 `artifact_bytes` against the caps),
 the watchdog's state (restart counts, last restart cause), and
 `available_versions` — the on-disk releases you can roll back to,
-most recently deployed first; `ordered_by_mtime` names any placed by
-their directory's mtime instead (see **3. Roll back** above).
+the running version first, then most recently deployed first;
+`ordered_by_mtime` names any placed by their directory's mtime
+instead (see **3. Roll back** above).
 
 The tarball's contents must sit at the archive root (`tar -czf
 app.tar.gz -C dist .`), with versions matching `[A-Za-z0-9._-]{1,64}` and not starting with a dot.
