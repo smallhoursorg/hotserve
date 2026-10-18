@@ -43,7 +43,9 @@ type runner interface {
 	// resolves to a file the unit will see inside its sandbox view,
 	// and an executable built for another machine is refused with the
 	// fix named. A deploy runs it for the command and the pre_start,
-	// and reports a refusal as the deployer's error (422).
+	// and reports a refusal as the deployer's error (422); every
+	// relaunch runs it for the command (launchVersion), and gives up on
+	// a refusal.
 	Preflight(spec startSpec) error
 
 	// Start launches a long-running instance and returns immediately.

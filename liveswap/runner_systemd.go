@@ -350,8 +350,8 @@ func resolveCommand(cmd, dir string) (string, error) {
 // resolveInView is the part of a launch that can be checked before a
 // unit exists: command[0] as the absolute path the unit will exec,
 // and the file that path finally names, inside the sandbox view. Both
-// Preflight and unitFor run it — the deploy to refuse early with a
-// 422, the launch as the last word before the manager acts.
+// Preflight and unitFor run it — a deploy or a relaunch to refuse
+// early, the launch as the last word before the manager acts.
 func resolveInView(spec startSpec) (argv0, target string, err error) {
 	if len(spec.command) == 0 {
 		return "", "", errors.New("empty command")
@@ -398,8 +398,9 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 	return argv0, target, nil
 }
 
-// Preflight is the deploy's early word: the command resolves inside
-// the view, and the file it names was built for this machine.
+// Preflight is a launch's early word, a deploy's and a relaunch's: the
+// command resolves inside the view, and the file it names was built
+// for this machine.
 func (r *systemdRunner) Preflight(spec startSpec) error {
 	_, target, err := resolveInView(spec)
 	if err != nil {

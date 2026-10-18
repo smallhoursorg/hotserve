@@ -2,6 +2,7 @@ package liveswap
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -584,7 +585,7 @@ func TestGCReleasesDoesNotPruneThroughALink(t *testing.T) {
 				must(t, os.MkdirAll(shop.release(v), 0o750))
 			}
 			tc.plant(t, demo, shop)
-			core, logs := observer.New(zap.ErrorLevel)
+			core, logs := observer.New(zap.WarnLevel)
 			gcReleases(demo, 1, "v3", "", zap.New(core))
 			onDisk, err := releaseNames(shop.releases)
 			must(t, err)
@@ -592,8 +593,9 @@ func TestGCReleasesDoesNotPruneThroughALink(t *testing.T) {
 			if got := strings.Join(onDisk, " "); got != "v1 v2 v3" {
 				t.Fatalf("shop's releases after demo's GC: %s", got)
 			}
-			if logs.FilterMessage("release GC: not pruning").Len() != 1 {
-				t.Fatalf("the refusal must be logged once: %v", logs.All())
+			got := logs.FilterMessageSnippet("release GC: not pruning").All()
+			if len(got) != 1 || !strings.Contains(fmt.Sprint(got[0].ContextMap()["fix"]), "bind-mount") {
+				t.Fatalf("the refusal must be logged once, with the remedy: %v", logs.All())
 			}
 		})
 	}

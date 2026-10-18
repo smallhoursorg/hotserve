@@ -269,17 +269,21 @@ func listReleases(d appDirs, current string) (versions, byMtime []string) {
 // of the keep places, then previous — the version it replaced, the
 // way back; "" when none, or protect itself on a relaunch. Crash
 // orphans of extraction are always removed. No release is deleted, and
-// GC says why, when the releases dir is not the directory it names
-// (ownDir: through a link it would delete another app's releases) or
-// the records dir cannot be read (the whole order would then be one
-// the app can set). A release whose own record is there but cannot be
-// read is held: neither deleted nor counted toward keep, and named, so
-// the rest are pruned in an order the app cannot set. Failures are
+// GC says why, when the app dir or releases/ is not the directory it
+// names (linkAt: through a link it would delete another app's
+// releases; the deploy's writeRefusal checked the same before it
+// wrote, and this is the check at the deletion itself) or the records
+// dir cannot be read (the whole order would then be one the app can
+// set). A release whose own record is there but cannot be read is
+// held: neither deleted nor counted toward keep, and named, so the
+// rest are pruned in an order the app cannot set. Failures are
 // logged, not fatal: GC must never break a deploy that already
 // succeeded.
 func gcReleases(d appDirs, keep int, protect, previous string, logger *zap.Logger) {
-	if err := d.ownDir(d.releases); err != nil {
-		logger.Error("release GC: not pruning", zap.Error(err))
+	if p, why := d.linkAt(d.releases); p != "" {
+		logger.Warn("release GC: not pruning: the app dir or releases/ is not the directory it names",
+			zap.String("app_dir", d.app), zap.String("path", p), zap.Error(why),
+			zap.String("fix", notOwnDirFix))
 		return
 	}
 	entries, err := os.ReadDir(d.releases)

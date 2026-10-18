@@ -1,16 +1,17 @@
 package liveswap
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
 
 // The on-disk layout every other file addresses an app's files
-// through. Path arithmetic over one root and one app name, and the one
-// check of what those paths resolve to (ownDir): it holds no state,
-// takes no lock, and knows nothing about the deploy pipeline, which is
-// why it is not in app.go.
+// through. Pure path arithmetic over one root and one app name: it
+// holds no state, takes no lock, and knows nothing about the deploy
+// pipeline, which is why it is not in app.go.
 
 // appDirs is the on-disk layout for one app:
 //
@@ -76,68 +77,64 @@ func (d appDirs) release(version string) string {
 	return filepath.Join(d.releases, versionPathComponent(version))
 }
 
+// linkAt returns the first of the app dir and dirs (its fixed subdirs)
+// that is not the directory it names, and why: a link, dangling or
+// not; anything else but a directory; or a path Lstat cannot answer
+// for (EIO), since the reads after it might yet succeed through a link
+// it missed. It returns "" when each is a directory or absent. An app
+// name is one path element, so these are the only two levels below
+// the root: with a link at neither, the path reaches the directory it
+// names through whatever alias the root itself is — recordsDir's rule,
+// read off Lstat rather than by resolving, so a dangling link cannot
+// pass as the name it stands in for.
+func (d appDirs) linkAt(dirs ...string) (string, error) {
+	for _, p := range append([]string{d.app}, dirs...) {
+		fi, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// absent: nothing to follow
+		case err != nil:
+			return p, fmt.Errorf("cannot be checked for a link: %w", err)
+		case fi.Mode()&os.ModeSymlink != 0:
+			return p, errors.New("is a link, which is not followed under the liveswap root")
+		case !fi.IsDir():
+			return p, errors.New("is not a directory")
+		}
+	}
+	return "", nil
+}
+
+// notOwnDirFix is the remedy for what linkAt refuses, wherever that is
+// reported.
+const notOwnDirFix = "if a link or a file stands here, replace it with a real directory (to keep its contents on another disk, bind-mount that location at this path); if Lstat failed, the error says why, and nothing here needs replacing"
+
+// fixedDirs is every dir ensure makes. deploys/ is not among them: the
+// record store is optional, made on first use by recordsDir, and a
+// failure there is a warning, not a deploy that cannot start.
+func (d appDirs) fixedDirs() []string {
+	return []string{d.releases, d.shared, d.tmp, d.run, d.proxy}
+}
+
+// writeRefusal refuses a deploy into an app dir that is not the
+// directory it names — the app dir, or a dir ensure makes, that is a
+// link (`<root>/blog -> shop`), a file, or unreadable (linkAt) — before
+// the deploy reads or writes anything through it. Through such a link
+// a deploy stages in shop's tmp/ and extracts into shop's releases/,
+// where two apps can remove each other's releases, or leave one behind
+// for the other to roll back to and run with its own data. The error
+// names the path as this app spells it, never what a link resolves to.
+func (d appDirs) writeRefusal() error {
+	if p, why := d.linkAt(d.fixedDirs()...); p != "" {
+		return fmt.Errorf("refusing to deploy: %s %w (fix: %s)", p, why, notOwnDirFix)
+	}
+	return nil
+}
+
 func (d appDirs) ensure() error {
-	// deploys/ is not here: the record store is optional, made on
-	// first use by recordsDir, and a failure there is a warning, not a
-	// deploy that cannot start.
-	for _, dir := range []string{d.releases, d.shared, d.tmp, d.run, d.proxy} {
+	for _, dir := range d.fixedDirs() {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// ownDir refuses dir — the app dir, or a directory directly under it —
-// unless it resolves to that same path under the canonical root. A
-// link at the app dir or at dir lands whatever is done there in
-// another directory: `<root>/blog -> <root>/shop` would have blog's
-// socket prune remove shop's live socket and pin (pruneSockets) and
-// blog's deploys list, serve and prune shop's records (recordsDir).
-// The rule is the bind sources' (resolveBindSources, sandbox.go):
-// canonical against canonical, with an alias on the liveswap root
-// itself the one difference allowed. A directory not made yet passes
-// when the app dir does, since canonicalDeepest resolves as far as the
-// path exists.
-func (d appDirs) ownDir(dir string) error {
-	want := filepath.Join(canonicalDeepest(d.root), filepath.Base(d.app))
-	if got := canonicalDeepest(d.app); got != want {
-		return fmt.Errorf("%s resolves to %s (a planted link is not followed)", d.app, got)
-	}
-	if dir == d.app {
-		return nil
-	}
-	want = filepath.Join(want, filepath.Base(dir))
-	if got := canonicalDeepest(dir); got != want {
-		return fmt.Errorf("%s resolves to %s, not %s (a planted link is not followed)", dir, got, want)
-	}
-	return nil
-}
-
-// canonicalDeepest is EvalSymlinks for a path whose leaf may not exist
-// yet: it resolves the deepest ancestor that does and re-appends the
-// rest unchanged, falling back to p when nothing resolves.
-//
-// EvalSymlinks fails outright on a missing final component, and an
-// env_file is explicitly allowed to be absent until the first deploy —
-// so resolving the whole path would silently give back only the
-// lexical spelling for exactly the configurations that need checking.
-// With `/safe/link -> /var/lib/liveswap/blog/shared` and
-// `env_file /safe/link/shop.env` not yet created, blog's own bind
-// exposes that file the moment it appears, while a lexical comparison
-// sees two unrelated strings. The link is in the PARENT, which is why the
-// deepest existing ancestor is the thing to resolve.
-func canonicalDeepest(p string) string {
-	rest := ""
-	for cur := p; ; {
-		if c, err := filepath.EvalSymlinks(cur); err == nil {
-			return filepath.Join(c, rest)
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p // reached the root without resolving anything
-		}
-		rest = filepath.Join(filepath.Base(cur), rest)
-		cur = parent
-	}
 }

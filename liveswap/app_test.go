@@ -298,6 +298,23 @@ func (r *fakeRunner) startCount() int {
 	return len(r.started)
 }
 
+func (r *fakeRunner) setPreflightErr(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.preflightErr = err
+}
+
+// lastPreflightAndStart is the spec the last pre-flight checked and the
+// one the last Start (or RunOnce) launched.
+func (r *fakeRunner) lastPreflightAndStart() (preflight, started startSpec, n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.preflights) == 0 || len(r.started) == 0 {
+		return startSpec{}, startSpec{}, len(r.preflights)
+	}
+	return r.preflights[len(r.preflights)-1], r.started[len(r.started)-1], len(r.preflights)
+}
+
 func (r *fakeRunner) handleAt(i int) *fakeHandle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -380,6 +397,35 @@ type fakeFetcher struct {
 	err     error
 	stats   archiveStats
 	lastReq deployRequest
+	// gate, when set, holds every fetch until the test sends its
+	// outcome (nil: carry on), after telling inFetch: a deploy in
+	// flight, holding deployMu, for as long as a test needs one.
+	gate    chan error
+	inFetch chan struct{}
+}
+
+// holdFetch makes the rig's deploys wait in fetch for the test. held
+// waits until one is waiting there; release lets it go with err as the
+// fetch's outcome (nil: the deploy proceeds).
+func (rig *testRig) holdFetch(t *testing.T) (held func(), release func(error)) {
+	rig.fetch.gate, rig.fetch.inFetch = make(chan error), make(chan struct{})
+	held = func() {
+		t.Helper()
+		select {
+		case <-rig.fetch.inFetch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no deploy reached fetch")
+		}
+	}
+	release = func(err error) {
+		t.Helper()
+		select {
+		case rig.fetch.gate <- err:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no deploy is held in fetch")
+		}
+	}
+	return held, release
 }
 
 func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest, progress func(string)) (string, archiveStats, error) {
@@ -387,6 +433,12 @@ func (f *fakeFetcher) fetch(_ context.Context, spec *appSpec, req deployRequest,
 	if !req.rollback { // as the real fetcher: a rollback fetches and extracts nothing
 		progress("downloading")
 		progress("extracting")
+	}
+	if f.gate != nil {
+		f.inFetch <- struct{}{}
+		if err := <-f.gate; err != nil {
+			return "", archiveStats{}, err
+		}
 	}
 	if f.err != nil {
 		return "", archiveStats{}, f.err
@@ -1014,21 +1066,6 @@ func TestPruneRemovesNothingWhenEitherDirIsALink(t *testing.T) {
 	pruneSockets(demo, nil, zap.NewNop())
 	if _, err := os.Lstat(demo.runDir(stale)); err != nil {
 		t.Fatalf("run/ was pruned before proxy/'s refusal: %v", err)
-	}
-}
-
-// A link at the app dir is refused once per prune, naming the app dir,
-// not once for each of run/ and proxy/.
-func TestPruneRefusesALinkOnce(t *testing.T) {
-	root := shortTempDir(t)
-	shop := newAppDirs(root, "shop")
-	must(t, shop.ensure())
-	demo := newAppDirs(root, "demo")
-	must(t, os.Symlink("shop", demo.app))
-	core, logs := observer.New(zap.ErrorLevel)
-	pruneSockets(demo, nil, zap.New(core))
-	if got := logs.FilterMessage("not pruning instance sockets").All(); len(got) != 1 || !strings.Contains(fmt.Sprint(got[0].ContextMap()["error"]), demo.app) {
-		t.Fatalf("want one refusal naming %s: %v", demo.app, logs.All())
 	}
 }
 
@@ -1668,95 +1705,6 @@ func TestSweepPrunesSocketsNotHeldByTheManager(t *testing.T) {
 	}
 }
 
-// Promise: a link at an app's directory, or at its run/ or proxy/, is
-// never pruned through, and the refusal is named. With
-// `<root>/demo -> <root>/shop`, demo's recovery and launches would
-// otherwise remove shop's live socket and pin: a confirmed sweep is
-// the manager's word about demo's units only, and the bind check that
-// refuses demo's launch (resolveBindSources) runs at Start, after the
-// sweep has pruned.
-func TestPruneDoesNotFollowALinkIntoASiblingsDirs(t *testing.T) {
-	const live = "5e5e5e5e5e5e5e5e" // shop's serving instance
-	plants := []struct {
-		name  string
-		plant func(t *testing.T, demo, shop appDirs)
-	}{
-		{"app dir", func(t *testing.T, demo, shop appDirs) {
-			must(t, os.Symlink("shop", demo.app))
-		}},
-		{"run", func(t *testing.T, demo, shop appDirs) {
-			must(t, os.MkdirAll(demo.app, 0o750))
-			must(t, os.Symlink(shop.run, demo.run))
-		}},
-		{"proxy", func(t *testing.T, demo, shop appDirs) {
-			must(t, os.MkdirAll(demo.app, 0o750))
-			must(t, os.Symlink(shop.proxy, demo.proxy))
-		}},
-	}
-	paths := []struct {
-		name string
-		run  func(t *testing.T, rig *testRig)
-	}{
-		{"recovery with nothing recorded", func(t *testing.T, rig *testRig) {
-			_ = rig.ma.ensureRunning() // its outcome is not the point: what it removed is
-		}},
-		{"recovery relaunching the recorded version", func(t *testing.T, rig *testRig) {
-			rig.store.state, rig.store.ok = appState{CurrentVersion: "v1"}, true
-			must(t, os.MkdirAll(rig.spec.dirs.release("v1"), 0o750))
-			_ = rig.ma.ensureRunning() // as above
-		}},
-		{"a deploy", func(t *testing.T, rig *testRig) {
-			_ = rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}) // as above
-		}},
-	}
-	for _, p := range plants {
-		for _, path := range paths {
-			t.Run(p.name+"/"+path.name, func(t *testing.T) {
-				rig := newTestRig(t)
-				core, logs := observer.New(zap.ErrorLevel)
-				rig.ma.logger = zap.New(core)
-				shop := newAppDirs(rig.spec.dirs.root, "shop")
-				must(t, shop.ensure())
-				bindSocket(t, shop.socket(live))
-				pin := filepath.Join(shop.proxy, live+".sock")
-				must(t, os.Link(shop.socket(live), pin))
-				p.plant(t, rig.spec.dirs, shop)
-				path.run(t, rig)
-				for _, f := range []string{shop.socket(live), pin} {
-					if _, err := os.Lstat(f); err != nil {
-						t.Errorf("shop's serving instance lost %s: %v", f, err)
-					}
-				}
-				refused := logs.FilterMessage("not pruning instance sockets").All()
-				if len(refused) == 0 || !strings.Contains(fmt.Sprint(refused[0].ContextMap()["error"]), "a planted link is not followed") {
-					t.Errorf("the refusal must be logged, naming the link: %v", logs.All())
-				}
-			})
-		}
-	}
-}
-
-// An alias on the liveswap root itself is the one difference the
-// prune's directory check allows: a root that is a link prunes a
-// leftover as a plain root does.
-func TestPruneThroughARootAlias(t *testing.T) {
-	target := shortTempDir(t)
-	alias := filepath.Join(shortTempDir(t), "root")
-	must(t, os.Symlink(target, alias))
-	d := newAppDirs(alias, "demo")
-	must(t, d.ensure())
-	const stale = "5e5e5e5e5e5e5e5e"
-	touchSocket(t, d.socket(stale))
-	must(t, os.WriteFile(filepath.Join(d.proxy, stale+".sock"), nil, 0o600))
-	pruneSockets(d, nil, zap.NewNop())
-	if got := socketNames(t, d.proxy); len(got) != 0 {
-		t.Fatalf("the leftover pin was not pruned under an aliased root: %v", got)
-	}
-	if _, err := os.Lstat(d.runDir(stale)); !os.IsNotExist(err) {
-		t.Fatalf("the leftover run dir was not pruned under an aliased root: %v", err)
-	}
-}
-
 // Promise: an instance's socket is gone once the instance is stopped —
 // the unit removes it (ExecStopPost=, which the fake handle mimics),
 // and the deploy's sweep would prune it anyway: the old one after a
@@ -1889,6 +1837,109 @@ func TestDestructOnRemovalSweepsWholeApp(t *testing.T) {
 	// Deploy swept twice (pre-start, pre-GC); removal sweeps everything (keep=nil).
 	if n := rig.runner.sweepCount(); n != 3 || rig.runner.lastSweep() != nil {
 		t.Fatalf("removal must sweep the whole app with keep=nil, sweeps=%d last=%v", n, rig.runner.sweeps)
+	}
+}
+
+// liveHandles is every instance the runner started that still runs.
+func (r *fakeRunner) liveHandles() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var live []string
+	for _, h := range r.handles {
+		if h.isAlive() {
+			live = append(live, h.id)
+		}
+	}
+	return live
+}
+
+// Removing an app waits for a deploy of it in flight. A reload stops
+// the old config's servers without waiting for their requests, so
+// without the wait a deploy past Destruct's sweep would start a unit
+// nothing supervises, routes or stops. Whatever the deploy comes to,
+// nothing of the app is left running once Destruct returns, and the
+// removed app takes no deploy after.
+func TestDestructWaitsForADeployInFlight(t *testing.T) {
+	cases := []struct {
+		name     string
+		fetchErr error // the held deploy's fetch outcome
+		gateErr  error // its health gate's
+	}{
+		{"the deploy promotes", nil, nil},
+		{"the deploy fails its health gate", nil, errors.New("health check returned 500")},
+		{"the deploy fails before any launch", errors.New("download failed"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newTestRig(t)
+			core, logs := observer.New(zap.WarnLevel)
+			rig.ma.logger = zap.New(core)
+			markLive(t)
+			deployV1(t, rig) // serving: Destruct has an instance of its own to stop
+			rig.prober.err = tc.gateErr
+			held, release := rig.holdFetch(t)
+			deployed := make(chan error, 1)
+			go func() {
+				deployed <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+			}()
+			held()
+			destructed := make(chan error, 1)
+			go func() { destructed <- rig.ma.Destruct() }()
+			// The wait is named: a reload that hangs on it says why.
+			waitUntil(t, "Destruct to name its wait", func() bool {
+				return logs.FilterMessageSnippet("waiting for the deploy to end").Len() == 1
+			})
+			select {
+			case err := <-destructed:
+				t.Fatalf("Destruct returned (%v) while a deploy of the app was in flight", err)
+			default:
+			}
+			release(tc.fetchErr)
+			for _, ch := range []chan error{deployed, destructed} {
+				select {
+				case <-ch:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the deploy and then Destruct must both end")
+				}
+			}
+			if live := rig.runner.liveHandles(); len(live) != 0 {
+				t.Fatalf("instances left running after the app's removal: %v", live)
+			}
+			if rig.runner.lastSweep() != nil {
+				t.Fatal("removal must end with a sweep of the whole app")
+			}
+			if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/3", version: "v3"}); !errors.Is(err, errDeployInProgress) {
+				t.Fatalf("a removed app must take no deploy, got %v", err)
+			}
+		})
+	}
+}
+
+// On process exit Destruct does not wait for a deploy: the units stay
+// for the next start to reattach, and shutdown is not held up.
+func TestDestructOnExitDoesNotWaitForADeploy(t *testing.T) {
+	rig := newTestRig(t)
+	markLive(t)
+	deployV1(t, rig)
+	held, release := rig.holdFetch(t)
+	deployed := make(chan error, 1)
+	go func() {
+		deployed <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+	}()
+	held()
+	swapSeam(t, &caddyExitingSeam, func() bool { return true })
+	destructed := make(chan error, 1)
+	go func() { destructed <- rig.ma.Destruct() }()
+	select {
+	case err := <-destructed:
+		must(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Destruct on exit must not wait for a deploy")
+	}
+	release(nil)
+	must(t, <-deployed)
+	if rig.runner.stopCount() != 1 || len(rig.runner.liveHandles()) != 1 {
+		t.Fatalf("the deploy runs on to its end, and its instance is kept: stops %d, live %v", rig.runner.stopCount(), rig.runner.liveHandles())
 	}
 }
 
@@ -2058,6 +2109,28 @@ func TestRecoverGivesUpOnPermanentErrors(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("recover must return on a permanent error, not retry forever")
+	}
+}
+
+// A recovery that gave up says why in status until the cause is gone:
+// with state.json removed there is nothing to recover and nothing
+// failing, so the next recovery clears the reason.
+func TestRecoveryWithNothingRecordedClearsAGivenUpReason(t *testing.T) {
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v7", Nonce: recordedNonce, Handle: handleState{PID: 1}}
+	rig.store.ok = true // the release dir missing: recovery gives up
+	rig.startWatchdogT(t)
+	rig.ma.recover(context.Background(), zap.NewNop())
+	waitUntil(t, "status to name why recovery gave up", func() bool {
+		wd := rig.ma.status().Watchdog
+		return wd != nil && strings.Contains(wd.LastFailure, "release dir is missing")
+	})
+	rig.store.mu.Lock()
+	rig.store.state, rig.store.ok = appState{}, false
+	rig.store.mu.Unlock()
+	must(t, rig.ma.ensureRunning())
+	if wd := rig.ma.status().Watchdog; wd.LastFailure != "" {
+		t.Fatalf("nothing recorded is nothing failing: %+v", wd)
 	}
 }
 
@@ -2556,4 +2629,72 @@ func TestFailedDeployKeepsReleaseWhenStartUnconfirmed(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "left on disk") {
 		t.Fatalf("an unreconciled pre_start must keep the release: %v", err)
 	}
+}
+
+// treeOf lists every path under dir, relative to it, so a test can
+// tell whether anything was written there.
+func treeOf(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	must(t, filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		out = append(out, rel)
+		return err
+	}))
+	return out
+}
+
+// A deploy or rollback into an app dir that is not the directory it
+// names is refused before it reads or writes anything through it
+// (#300): through `<root>/demo -> shop`, or any of the dirs it makes
+// linked to shop's, nothing lands in shop's dirs, nothing is fetched
+// or launched, and the refusal names demo's own path, never shop's.
+func TestDeployRefusesAnAppDirThatIsALink(t *testing.T) {
+	for _, link := range []string{"", "releases", "shared", "tmp", "run", "proxy"} {
+		for _, req := range []deployRequest{
+			{url: "https://x/a.tgz", version: "v9"},
+			{version: "v1", rollback: true}, // a version shop has
+		} {
+			t.Run(link+"/"+req.source(), func(t *testing.T) {
+				rig := newTestRig(t)
+				demo := rig.spec.dirs
+				shop := newAppDirs(demo.root, "shop")
+				staleInstance(t, shop, linkTestNonce)
+				must(t, os.MkdirAll(shop.release("v1"), 0o750))
+				before := treeOf(t, shop.app)
+				want := demo.app
+				if link == "" {
+					must(t, os.Symlink("shop", demo.app))
+				} else {
+					must(t, demo.ensure())
+					want = filepath.Join(demo.app, link)
+					must(t, os.Remove(want))
+					must(t, os.Symlink(filepath.Join("..", "shop", link), want))
+				}
+				err := rig.ma.Deploy(context.Background(), req)
+				if err == nil || !strings.Contains(err.Error(), "refusing to deploy: "+want+" ") || strings.Contains(err.Error(), "shop") {
+					t.Fatalf("want a refusal naming %s and not shop, got %v", want, err)
+				}
+				if rig.fetch.lastReq.version != "" || rig.runner.startCount() != 0 {
+					t.Fatal("the deploy went on through the link")
+				}
+				if after := treeOf(t, shop.app); !slices.Equal(before, after) {
+					t.Fatalf("shop's dirs changed through demo's link:\n before %v\n after  %v", before, after)
+				}
+			})
+		}
+	}
+}
+
+// The one difference the refusal allows is an alias on the liveswap
+// root itself (/srv/liveswap -> /mnt/liveswap): a deploy goes on.
+func TestDeployThroughAnAliasedRoot(t *testing.T) {
+	rig := newTestRig(t)
+	alias := filepath.Join(shortTempDir(t), "alias")
+	must(t, os.Symlink(rig.spec.dirs.root, alias))
+	rig.spec.dirs = newAppDirs(alias, "demo")
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"}))
 }

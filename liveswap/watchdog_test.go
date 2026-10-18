@@ -3,11 +3,15 @@ package liveswap
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // currentState is a test accessor for the loop's reported state.
@@ -503,39 +507,254 @@ func TestWatchdogIgnoresDeployStoppedOldInstance(t *testing.T) {
 	}
 }
 
-func TestWatchdogYieldsWhileDeployHoldsLock(t *testing.T) {
-	rig := newTestRig(t)
-	rig.spec.wdRestarts = 100 // keep the yield loop far from exhaustion
-	deployV1(t, rig)
-	rig.startWatchdogT(t)
-	waitUntil(t, "watchdog to arm", func() bool {
-		s := rig.ma.wd.currentState()
-		return s == wdStateGrace || s == wdStateWatching
-	})
-
-	rig.ma.deployMu.Lock()
-	rig.runner.handleAt(0).kill()
-	// Give the loop several backoff cycles: it must keep yielding, not
-	// start anything, while the deploy lock is held.
-	for i := 0; i < 5; i++ {
-		rig.clock.Advance(2 * time.Second)
-		time.Sleep(5 * time.Millisecond)
+// advanceBy moves the fake clock in one-second steps, letting the loop
+// run between them, as time passing does.
+func advanceBy(rig *testRig, d time.Duration) {
+	for range int(d / time.Second) {
+		rig.clock.Advance(time.Second)
+		time.Sleep(time.Millisecond)
 	}
-	if got := rig.runner.startCount(); got != 1 {
-		rig.ma.deployMu.Unlock()
-		t.Fatalf("watchdog must not restart while a deploy holds the lock, got %d starts", got)
-	}
-	rig.ma.deployMu.Unlock()
+}
 
-	advanceUntil(t, rig, time.Second, "restart after the lock is released", func() bool {
-		return rig.runner.startCount() == 2
+// The ledger of a watchdog restart that meets a deploy over an
+// instance that is dead and unrouted. The restart waits for the
+// deploy's end — no re-entry per backoff step, so one crash Warn
+// however long the deploy runs — and what the deploy comes to decides
+// what follows: a promoted deploy's instance is adopted and no restart
+// happens; after a failed one the restart goes at once, whether it was
+// waiting for the lock or still waiting out a step of up to a minute.
+// "At once" is measured on the fake clock: the restart lands with the
+// clock where the deploy left it. Nothing but a deploy's end shortens
+// a step: a config nudge does not, and the step itself is never
+// refunded (it grows as before).
+func TestWatchdogWaitsForADeployOverADeadInstance(t *testing.T) {
+	setup := func(t *testing.T, step int) (*testRig, *observer.ObservedLogs) {
+		t.Helper()
+		rig := newTestRig(t)
+		core, logs := observer.New(zap.WarnLevel)
+		rig.ma.logger = zap.New(core)
+		deployV1(t, rig)
+		rig.ma.wd.backoffStep = step // before the loop runs: nothing else reads it yet
+		rig.startWatchdogT(t)
+		waitUntil(t, "watchdog to arm", func() bool {
+			s := rig.ma.wd.currentState()
+			return s == wdStateGrace || s == wdStateWatching
+		})
+		rig.runner.handleAt(0).kill()
+		waitUntil(t, "the restart waits out its backoff", func() bool {
+			return rig.ma.wd.currentState() == wdStateBackoff
+		})
+		return rig, logs
+	}
+	crashWarns := func(logs *observer.ObservedLogs) int {
+		return logs.FilterMessage("watchdog: process exited unexpectedly").Len()
+	}
+	restartedInPlace := func(t *testing.T, rig *testRig, logs *observer.ObservedLogs) {
+		t.Helper()
+		at := rig.clock.Now()
+		waitUntil(t, "the restart after the failed deploy", func() bool {
+			return rig.runner.startCount() == 2 && rig.ma.activeSocket.Load() != nil
+		})
+		if !rig.clock.Now().Equal(at) {
+			t.Fatal("the restart must not wait for the clock")
+		}
+		if n := crashWarns(logs); n != 1 {
+			t.Fatalf("crash Warns = %d, want 1", n)
+		}
+		waitUntil(t, "the restart recorded", func() bool {
+			s := rig.ma.status()
+			return s.CurrentVersion == "v1" && s.Running && s.Watchdog.RestartsInWindow == 1 && s.Watchdog.LastRestartCause == "crash"
+		})
+	}
+
+	t.Run("a deploy holds the lock past the step, then fails", func(t *testing.T) {
+		rig, logs := setup(t, 0) // a one-second step
+		held, release := rig.holdFetch(t)
+		deployed := make(chan error, 1)
+		go func() {
+			deployed <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+		}()
+		held()
+		advanceBy(rig, 5*time.Minute) // a long deploy
+		if n := rig.runner.startCount(); n != 1 {
+			t.Fatalf("no restart while a deploy holds the lock: %d starts", n)
+		}
+		if n := crashWarns(logs); n != 1 {
+			t.Fatalf("the restart waits for the deploy rather than re-entering per step: %d crash Warns", n)
+		}
+		release(errors.New("download failed"))
+		if err := <-deployed; err == nil {
+			t.Fatal("the deploy should have failed")
+		}
+		restartedInPlace(t, rig, logs)
 	})
-	// Every yielded cycle must refund its claimed slot: only the one
-	// restart that actually happened may count against the window.
-	waitUntil(t, "budget reflects only the real restart", func() bool {
-		s := rig.ma.status()
-		return s.Watchdog != nil && s.Watchdog.RestartsInWindow == 1
+	t.Run("a deploy that fails ends a minute-long step", func(t *testing.T) {
+		rig, logs := setup(t, 6) // a 60s step
+		rig.fetch.err = errors.New("download failed")
+		if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}); err == nil {
+			t.Fatal("the deploy should have failed")
+		}
+		restartedInPlace(t, rig, logs)
 	})
+	t.Run("a deploy that fails during a throttle ends the step after it", func(t *testing.T) {
+		rig := newTestRig(t)
+		rig.spec.wdRestarts, rig.spec.wdWindow = 1, 30*time.Second
+		deployV1(t, rig)
+		rig.startWatchdogT(t)
+		waitUntil(t, "watchdog to arm", func() bool {
+			s := rig.ma.wd.currentState()
+			return s == wdStateGrace || s == wdStateWatching
+		})
+		rig.runner.handleAt(0).kill()
+		advanceUntil(t, rig, time.Second, "the one budgeted restart", func() bool {
+			return rig.runner.startCount() == 2 && rig.ma.wd.currentState() == wdStateGrace
+		})
+		rig.runner.handleAt(1).kill()
+		waitUntil(t, "throttled", func() bool { return rig.ma.wd.currentState() == wdStateThrottled })
+		rig.fetch.err = errors.New("download failed")
+		if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}); err == nil {
+			t.Fatal("the deploy should have failed")
+		}
+		// The throttle is the budget's and stands; the backoff step after
+		// it (2 s by now) is not waited out.
+		rig.clock.Advance(rig.ma.wd.untilBudgetFrees(rig.clock.Now(), rig.spec.wdWindow))
+		// The loop may have read the clock before the advance and armed
+		// its timer after it, from the advanced time: a poke makes it
+		// look at the budget again, without moving the clock through the
+		// backoff step this row is about.
+		rig.ma.pokeWatchdog()
+		waitUntil(t, "the restart as the budget frees", func() bool { return rig.runner.startCount() == 3 })
+	})
+	t.Run("a config nudge ends no step", func(t *testing.T) {
+		rig, _ := setup(t, 6)
+		reloadSpec(rig, func(*appSpec) {})
+		time.Sleep(20 * time.Millisecond)
+		advanceBy(rig, 59*time.Second)
+		if n := rig.runner.startCount(); n != 1 {
+			t.Fatalf("a nudge must not cut the step short: %d starts", n)
+		}
+		advanceUntil(t, rig, time.Second, "the restart at the step's end", func() bool {
+			return rig.runner.startCount() == 2
+		})
+	})
+	t.Run("a deploy that promotes replaces the dead instance", func(t *testing.T) {
+		rig, logs := setup(t, 0)
+		held, release := rig.holdFetch(t)
+		deployed := make(chan error, 1)
+		go func() {
+			deployed <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+		}()
+		held()
+		advanceBy(rig, 5*time.Second) // past the step: the restart waits for the lock
+		release(nil)
+		must(t, <-deployed)
+		waitUntil(t, "the watchdog supervises the deployed instance", func() bool {
+			s := rig.ma.wd.currentState()
+			inst := rig.ma.currentInstance()
+			return (s == wdStateGrace || s == wdStateWatching) && inst != nil && inst.version == "v2"
+		})
+		if n := rig.runner.startCount(); n != 2 {
+			t.Fatalf("starts = %d, want the two deploys' and no restart", n)
+		}
+		if s := rig.ma.status(); s.Watchdog.RestartsInWindow != 0 || crashWarns(logs) != 1 {
+			t.Fatalf("no restart happened: %+v, %d crash Warns", s.Watchdog, crashWarns(logs))
+		}
+	})
+	t.Run("recovery letting go wakes a restart waiting for the lock", func(t *testing.T) {
+		rig, _ := setup(t, 0)
+		rig.ma.deployMu.Lock() // what ensureRunning holds
+		advanceBy(rig, 5*time.Second)
+		if n := rig.runner.startCount(); n != 1 {
+			rig.ma.unlockDeploy()
+			t.Fatalf("no restart while recovery holds the lock: %d starts", n)
+		}
+		rig.ma.unlockDeploy()
+		waitUntil(t, "the restart once recovery lets go", func() bool { return rig.runner.startCount() == 2 })
+	})
+}
+
+// takePoke reports whether a poke is waiting for the watchdog, taking it.
+func takePoke(ma *managedApp) bool {
+	select {
+	case <-ma.wdNotify:
+		return true
+	default:
+		return false
+	}
+}
+
+// Every holder of deployMu but the watchdog wakes it as it lets go — a
+// restart that found the lock held waits for exactly that — and a
+// deploy's end is told apart from any other wake-up, which is what
+// lets a restart still waiting out its backoff go at once. The rows
+// are the ends that poke nothing on the way (no promote, no publish),
+// so the poke seen is the release's own.
+func TestEveryLockHolderWakesTheWatchdogAsItLetsGo(t *testing.T) {
+	cases := []struct {
+		name   string
+		deploy bool // a deploy's end, which deploysEnded counts
+		run    func(t *testing.T, h *Handler, rig *testRig)
+	}{
+		{"a deploy that fails before a launch", true, func(t *testing.T, _ *Handler, rig *testRig) {
+			rig.fetch.err = errTest
+			if rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}) == nil {
+				t.Fatal("the deploy should have failed")
+			}
+		}},
+		{"a deploy refused with a 422", true, func(t *testing.T, _ *Handler, rig *testRig) {
+			var ve validationError
+			if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}); !errors.As(err, &ve) {
+				t.Fatalf("want the running version's refusal, got %v", err)
+			}
+		}},
+		{"a deploy that fails its health gate", true, func(t *testing.T, _ *Handler, rig *testRig) {
+			rig.prober.err = errTest
+			if rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}) == nil {
+				t.Fatal("the deploy should have failed")
+			}
+		}},
+		{"a push refused while staging", true, func(t *testing.T, h *Handler, rig *testRig) {
+			rig.spec.maxArtifactSize = 8
+			if w := send(t, h, gzipDeploy(t, "/demo?version=v2", appToken(t), "way past eight bytes")); w.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("push: got %d, want 413", w.Code)
+			}
+		}},
+		{"a push that fails its health gate", true, func(t *testing.T, h *Handler, rig *testRig) {
+			rig.prober.err = errTest
+			if w := send(t, h, gzipDeploy(t, "/demo?version=v2", appToken(t), "tarball-bytes")); w.Code != http.StatusInternalServerError {
+				t.Fatalf("push: got %d, want 500", w.Code)
+			}
+		}},
+		{"a recovery that finds the instance running", false, func(t *testing.T, _ *Handler, rig *testRig) {
+			must(t, rig.ma.ensureRunning())
+		}},
+		{"a recovery that gives up", false, func(t *testing.T, _ *Handler, rig *testRig) {
+			rig.runner.handleAt(0).kill()
+			must(t, os.RemoveAll(rig.spec.dirs.release("v1")))
+			if err := rig.ma.ensureRunning(); err == nil || transientRecovery(err) {
+				t.Fatalf("want a permanent recovery error, got %v", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, rig := newTestHandler(t)
+			deployV1(t, rig)
+			takePoke(rig.ma)
+			ended := rig.ma.deploysEnded.Load()
+			tc.run(t, h, rig)
+			if !rig.ma.deployMu.TryLock() {
+				t.Fatal("the lock must be free once the holder is done")
+			}
+			rig.ma.deployMu.Unlock()
+			if !takePoke(rig.ma) {
+				t.Fatal("letting go of the lock must wake the watchdog")
+			}
+			if moved := rig.ma.deploysEnded.Load() != ended; moved != tc.deploy {
+				t.Fatalf("deploysEnded moved = %v, want %v (only a deploy's end counts)", moved, tc.deploy)
+			}
+		})
+	}
 }
 
 func TestWatchdogReloadAppliesWithoutRestart(t *testing.T) {

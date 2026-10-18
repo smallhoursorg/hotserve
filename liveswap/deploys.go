@@ -245,33 +245,31 @@ func (ma *managedApp) recordRedactor(c collaborators, result deployResult) (*Red
 }
 
 // recordsDir is the records directory as the directory it names
-// (rule 4): with create, made if absent; refused if a link or anything
-// else stands in its place, or if any ancestor is a link that lands it
-// elsewhere (appDirs.ownDir, whose canonicalDeepest resolves a root
-// not yet on disk under a linked ancestor as far as it can). Without
-// create — every read — a missing directory is fs.ErrNotExist and
-// nothing is made: a status poll must not create an app's tree.
+// (rule 4): with create, made if absent; refused when the app dir or it
+// is a link, is not a directory, or cannot be checked for one
+// (appDirs.linkAt, the rule every dir hotserve deletes in is held to) —
+// `<root>/blog -> <root>/shop` would have blog's deploys list, serve
+// and prune shop's records. An alias on the liveswap root itself is
+// the one difference allowed. Without create — every read — a missing
+// directory is fs.ErrNotExist and nothing is made: a status poll must
+// not create an app's tree.
 func recordsDir(d appDirs, create bool) (string, error) {
-	// The app dir first, before anything is created through it: an
-	// ancestor link would otherwise have MkdirAll make the directory
-	// where the link points before the check below refused it.
-	if err := d.ownDir(d.app); err != nil {
-		return "", err
+	// The app dir first, before anything is created through it: a link
+	// there would otherwise have MkdirAll make the directory where it
+	// points before the check below refused it.
+	if p, why := d.linkAt(); p != "" {
+		return "", fmt.Errorf("%s %w", p, why)
 	}
 	if create {
 		if err := os.MkdirAll(d.deploys, 0o750); err != nil {
 			return "", err
 		}
 	}
-	fi, err := os.Lstat(d.deploys)
-	if err != nil {
+	if p, why := d.linkAt(d.deploys); p != "" {
+		return "", fmt.Errorf("%s %w", p, why)
+	}
+	if _, err := os.Lstat(d.deploys); err != nil {
 		return "", err // fs.ErrNotExist when absent and not creating
-	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-		return "", fmt.Errorf("%s is not a directory (a planted link is not followed)", d.deploys)
-	}
-	if err := d.ownDir(d.deploys); err != nil {
-		return "", err
 	}
 	return d.deploys, nil
 }
