@@ -1684,6 +1684,8 @@ func TestDestructWaitsForADeployInFlight(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newTestRig(t)
+			core, logs := observer.New(zap.WarnLevel)
+			rig.ma.logger = zap.New(core)
 			markLive(t)
 			deployV1(t, rig) // serving: Destruct has an instance of its own to stop
 			rig.prober.err = tc.gateErr
@@ -1699,6 +1701,10 @@ func TestDestructWaitsForADeployInFlight(t *testing.T) {
 			case err := <-destructed:
 				t.Fatalf("Destruct returned (%v) while a deploy of the app was in flight", err)
 			case <-time.After(50 * time.Millisecond):
+			}
+			// The wait is named: a reload that hangs on it says why.
+			if n := logs.FilterMessageSnippet("waiting for the deploy to end").Len(); n != 1 {
+				t.Fatalf("Destruct's wait must be named in the journal once, got %d: %v", n, logs.All())
 			}
 			release(tc.fetchErr)
 			for _, ch := range []chan error{deployed, destructed} {

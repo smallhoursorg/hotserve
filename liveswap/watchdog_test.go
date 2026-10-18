@@ -596,6 +596,30 @@ func TestWatchdogWaitsForADeployOverADeadInstance(t *testing.T) {
 		}
 		restartedInPlace(t, rig, logs)
 	})
+	t.Run("a deploy that fails during a throttle ends the step after it", func(t *testing.T) {
+		rig := newTestRig(t)
+		rig.spec.wdRestarts, rig.spec.wdWindow = 1, 30*time.Second
+		deployV1(t, rig)
+		rig.startWatchdogT(t)
+		waitUntil(t, "watchdog to arm", func() bool {
+			s := rig.ma.wd.currentState()
+			return s == wdStateGrace || s == wdStateWatching
+		})
+		rig.runner.handleAt(0).kill()
+		advanceUntil(t, rig, time.Second, "the one budgeted restart", func() bool {
+			return rig.runner.startCount() == 2 && rig.ma.wd.currentState() == wdStateGrace
+		})
+		rig.runner.handleAt(1).kill()
+		waitUntil(t, "throttled", func() bool { return rig.ma.wd.currentState() == wdStateThrottled })
+		rig.fetch.err = errors.New("download failed")
+		if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}); err == nil {
+			t.Fatal("the deploy should have failed")
+		}
+		// The throttle is the budget's and stands; the backoff step after
+		// it (2 s by now) is not waited out.
+		rig.clock.Advance(rig.ma.wd.untilBudgetFrees(rig.clock.Now(), rig.spec.wdWindow))
+		waitUntil(t, "the restart as the budget frees", func() bool { return rig.runner.startCount() == 3 })
+	})
 	t.Run("a config nudge ends no step", func(t *testing.T) {
 		rig, _ := setup(t, 6)
 		reloadSpec(rig, func(*appSpec) {})

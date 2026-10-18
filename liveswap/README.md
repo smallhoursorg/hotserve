@@ -341,9 +341,11 @@ successful deploy is the fast path out of a throttle wait: it resets
 the budget and backoff immediately. A long-running throttle loop means
 the release itself is broken — watch `restarts_in_window` in the
 status JSON (loop alerting is on the roadmap). A deploy running over
-a dead instance holds the restart until it ends: one that promotes
-replaces the instance, and after one that fails the restart goes
-within about a second, without waiting out the rest of its backoff.
+a dead instance holds the restart until it ends (the state stays
+`backoff` meanwhile): one that promotes replaces the instance, and
+after one that fails the restart goes within about a second, without
+waiting out the rest of its backoff — though a throttle still waits
+for its budget.
 Health probes never
 follow redirects: a 3xx answer is simply "not 2xx".
 

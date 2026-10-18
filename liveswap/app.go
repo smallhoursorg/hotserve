@@ -1185,6 +1185,7 @@ func (ma *managedApp) ensureRunning() error {
 		ma.current = inst
 		ma.mu.Unlock()
 		ma.activeSocket.Store(inst.sock)
+		ma.wd.setLastFailure("") // a recovery that gave up, or a refusal, is over
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
 		ma.pokeWatchdog()
 		if !ma.sweep(c, inst, "") {
@@ -1212,6 +1213,7 @@ func (ma *managedApp) ensureRunning() error {
 	if err := ma.publishInstance(c, inst); err != nil {
 		c.logger.Warn("persisting recovered state", zap.Error(err))
 	}
+	ma.wd.setLastFailure("") // a recovery that gave up, or a refusal, is over
 	c.logger.Info("relaunched current version after restart",
 		zap.String("version", st.CurrentVersion), zap.String("socket", inst.socket))
 	ma.pokeWatchdog()
@@ -1639,7 +1641,12 @@ func (ma *managedApp) Destruct() error {
 	// request the old config still serves gets a 409. The watchdog is
 	// stopped above and the removing config's Cleanup has joined its
 	// recovery, so nothing else can launch after this sweep either.
-	ma.deployMu.Lock()
+	// A wait is named: it holds the reload, and every config change
+	// after it, for as long as the deploy runs.
+	if !ma.deployMu.TryLock() {
+		c.logger.Warn("app removed while a deploy of it is in flight; waiting for the deploy to end before stopping its units, and the reload completes then")
+		ma.deployMu.Lock()
+	}
 	// Read under the lock: a deploy that just promoted left its own.
 	inst := ma.currentInstance()
 	// Stop what we track (if anything), then everything else the

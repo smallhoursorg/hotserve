@@ -165,6 +165,14 @@ func TestRecoveryGivesUpOnARelaunchItsPreflightRefuses(t *testing.T) {
 		wd := rig.ma.status().Watchdog
 		return wd != nil && wd.LastFailure == "relaunching v7: "+wrongArch
 	})
+	// The cause fixed, a reload's recovery launches the app, and the
+	// refusal goes with that launch — not at the first healthy probe,
+	// which a disabled watchdog never makes.
+	rig.runner.setPreflightErr(nil)
+	must(t, rig.ma.ensureRunning())
+	if s := rig.ma.status(); !s.Running || s.Watchdog.LastFailure != "" {
+		t.Fatalf("a launch replaces the refusal: %+v %+v", s, s.Watchdog)
+	}
 }
 
 // A watchdog restart the pre-flight refuses — the release rewritten

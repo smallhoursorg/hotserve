@@ -133,7 +133,8 @@ func (w *watchdogState) recordFailure(desc string) int {
 
 // setLastFailure records why the app is not running when no probe
 // will say it: a relaunch refused for good, or a recovery that gave
-// up. A healthy probe of a later instance, or a deploy, clears it.
+// up. The next launch clears it: recovery's (with ""), a deploy's
+// (reset), or a healthy probe of a later instance.
 func (w *watchdogState) setLastFailure(desc string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -421,6 +422,9 @@ func (ma *managedApp) superviseInstance(ctx context.Context, c collaborators, in
 // "a deploy already replaced it" and the watchdog stands down.
 func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *instance, kind failureKind) bool {
 	var spec *appSpec // (re)read from the live snapshot in the loop below
+	// Deploys that end from here on, leaving inst current, ended over
+	// it: the backoff below is not waited out after one.
+	deploys := ma.deploysEnded.Load()
 	if !c.runner.Alive(inst.handle) {
 		// Never route to a dead port while pacing the restart: a fast
 		// clean 5xx beats dialing it, and the freed port could be
@@ -470,8 +474,12 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 	d := ma.wd.nextBackoff()
 	ma.wd.setState(wdStateBackoff)
 	deadline := c.clock.Now().Add(d)
-	deploys := ma.deploysEnded.Load()
-	for {
+	// Once a deploy has ended since the failure was found and left this
+	// instance current — it failed, or was refused before it began —
+	// the dead instance has waited through it, the throttle included:
+	// restart now rather than at the end of the step. The step is not
+	// refunded: the next failure waits longer, as after any restart.
+	for ma.deploysEnded.Load() == deploys {
 		wait := deadline.Sub(c.clock.Now())
 		if wait <= 0 {
 			break
@@ -494,15 +502,7 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 				ma.wd.refundBudget()
 				return true // reload turned the watchdog off mid-wait
 			}
-			if ma.deploysEnded.Load() != deploys {
-				// A deploy ended and left this instance current: it
-				// failed, and the dead instance has waited through it.
-				// Restart now rather than at the end of the step. The
-				// step is not refunded: the next failure waits longer,
-				// as after any restart.
-				deadline = c.clock.Now()
-			}
-			continue // otherwise a config nudge: keep waiting out the backoff
+			continue // a deploy's end is read above; anything else is a config nudge: keep waiting out the backoff
 		case <-c.clock.After(wait):
 		}
 	}
