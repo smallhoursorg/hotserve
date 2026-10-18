@@ -30,7 +30,7 @@ func TestApplyDefaults(t *testing.T) {
 	}
 	if cfg.HealthInterval != caddy.Duration(5*time.Second) ||
 		cfg.HealthTimeout != caddy.Duration(2*time.Second) ||
-		cfg.Soak != caddy.Duration(15*time.Second) ||
+		cfg.Soak == nil || *cfg.Soak != caddy.Duration(15*time.Second) ||
 		cfg.Deadline != caddy.Duration(5*time.Minute) ||
 		cfg.Drain != caddy.Duration(5*time.Second) ||
 		cfg.Grace != caddy.Duration(10*time.Second) {
@@ -52,12 +52,23 @@ func TestApplyDefaultsKeepsExplicitValues(t *testing.T) {
 	cfg := &AppConfig{
 		Command:    []string{"x"},
 		HealthPath: "off",
-		Soak:       caddy.Duration(time.Second),
+		Soak:       durationPtr(time.Second),
 	}
 	cfg.applyDefaults(caddy.NewReplacer())
-	if cfg.HealthPath != "off" || cfg.Soak != caddy.Duration(time.Second) {
+	if cfg.HealthPath != "off" || *cfg.Soak != caddy.Duration(time.Second) {
 		t.Fatalf("explicit values overwritten: %+v", cfg)
 	}
+	// soak 0 is a setting (no soak), not unset.
+	cfg = &AppConfig{Command: []string{"x"}, Soak: durationPtr(0)}
+	cfg.applyDefaults(caddy.NewReplacer())
+	if *cfg.Soak != 0 {
+		t.Fatalf("soak 0 replaced by %v", time.Duration(*cfg.Soak))
+	}
+}
+
+func durationPtr(d time.Duration) *caddy.Duration {
+	c := caddy.Duration(d)
+	return &c
 }
 
 func TestBuildSpecTranslatesConfig(t *testing.T) {
@@ -134,7 +145,11 @@ func TestValidate(t *testing.T) {
 		{"no deploy_trust anywhere", func(a *App) { a.DeployTrust = nil }, "no deploy_trust"},
 		{"bad health path", func(a *App) { a.Apps["blog"].HealthPath = "health" }, "health_path must start with /"},
 		{"zero interval", func(a *App) { a.Apps["blog"].HealthInterval = 0 }, "health_interval must be positive"},
-		{"negative soak", func(a *App) { a.Apps["blog"].Soak = caddy.Duration(-time.Second) }, "soak and drain"},
+		{"negative soak", func(a *App) { a.Apps["blog"].Soak = durationPtr(-time.Second) }, "soak and drain"},
+		// With no probe and no soak the gate would look once, straight
+		// after the start, and an app that crashed a moment later
+		// would take traffic.
+		{"soak 0 with health_path off", func(a *App) { a.Apps["blog"].Soak = durationPtr(0); a.Apps["blog"].HealthPath = "off" }, "soak 0 needs a health_path"},
 		{"zero keep", func(a *App) { a.Apps["blog"].Keep = 0 }, "keep must be at least 1"},
 		{"zero size", func(a *App) { a.Apps["blog"].MaxArtifactSize = 0 }, "max_artifact_size must be positive"},
 		{"zero entries", func(a *App) { a.Apps["blog"].MaxArtifactEntries = 0 }, "max_artifact_entries must be positive"},
@@ -143,7 +158,7 @@ func TestValidate(t *testing.T) {
 		{"bad watchdog value", func(a *App) { a.Apps["blog"].Watchdog = "auto" }, "watchdog must be"},
 		{"zero watchdog failures", func(a *App) { a.Apps["blog"].WatchdogFailures = -1 }, "watchdog_failures must be at least 1"},
 		{"zero watchdog restarts", func(a *App) { a.Apps["blog"].WatchdogRestarts = -1 }, "watchdog_restarts must be at least 1"},
-		{"soak beyond deadline", func(a *App) { a.Apps["blog"].Soak = a.Apps["blog"].Deadline + caddy.Duration(time.Second) }, "soak (5m1s) must not exceed deadline (5m0s)"},
+		{"soak beyond deadline", func(a *App) { a.Apps["blog"].Soak = durationPtr(time.Duration(a.Apps["blog"].Deadline) + time.Second) }, "soak (5m1s) must not exceed deadline (5m0s)"},
 		{"negative watchdog grace", func(a *App) { a.Apps["blog"].WatchdogGrace = caddy.Duration(-time.Second) }, "watchdog_grace must not be negative"},
 		{"negative watchdog window", func(a *App) { a.Apps["blog"].WatchdogWindow = caddy.Duration(-time.Second) }, "watchdog_window must be positive"},
 		{"bad env key", func(a *App) { a.Apps["blog"].Env = map[string]string{"my-var": "1"} }, `env key "my-var"`},

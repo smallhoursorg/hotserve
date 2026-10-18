@@ -486,11 +486,16 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 		// (invariant 5): reconcile by name rather than guess.
 		return r.reconcileStart(u, fmt.Errorf("starting unit %s: %w", u.Name, err))
 	}
+	// The reads below get a context of their own, as reconcileStart's
+	// do: the job's may have ended with its result already in
+	// (jobResult takes the result then), and a read on it would fail.
+	readCtx, readCancel := context.WithTimeout(r.ctx, pollTimeout)
+	defer readCancel()
 	if res != "done" {
-		st := r.reapFailed(ctx, u.Name)
+		st := r.reapFailed(readCtx, u.Name)
 		return nil, startExit(st.exitString(), u.Name, res, st.ExecMainPID)
 	}
-	return r.adopt(ctx, u.Name, time.Now(), u.StopTimeout), nil
+	return r.adopt(readCtx, u.Name, time.Now(), u.StopTimeout), nil
 }
 
 // adopt builds a watched handle for a unit known to be running.

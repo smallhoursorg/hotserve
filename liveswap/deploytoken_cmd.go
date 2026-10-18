@@ -15,6 +15,8 @@ import (
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 )
 
 // These commands provide the non-CI ("local") deploy path: an operator
@@ -50,14 +52,19 @@ stdout. Use it as the deploy bearer:
     curl -H "Authorization: Bearer $(hotserve deploy-token --key deploy.key --audience hotserve)" ...
 
 The token's audience and any --claims must match the app's
-'deploy_trust local' block for the deploy to be authorized.`,
+'deploy_trust local' block for the deploy to be authorized.
+
+The token lives for --ttl from now. Whoever holds it can deploy until
+then, so mint one per deploy: a box refuses a token that lives longer
+than its block's max_token_ttl (24h unless the block sets one), and
+this command warns on stderr above 1h.`,
 		Flags: func() *flag.FlagSet {
 			fs := flag.NewFlagSet("deploy-token", flag.ExitOnError)
 			fs.String("key", "deploy.key", "private key path (PKCS#8 PEM ed25519)")
 			fs.String("audience", "", "token audience (required; must match deploy_trust)")
 			fs.String("subject", "", "token subject (sub claim)")
 			fs.String("claims", "", "extra claims as k=v,k2=v2")
-			fs.Duration("ttl", 5*time.Minute, "token lifetime")
+			fs.Duration("ttl", 5*time.Minute, "token lifetime; a box refuses one over its max_token_ttl (24h by default), and over 1h this warns")
 			return fs
 		}(),
 		Func: cmdDeployToken,
@@ -134,7 +141,8 @@ func cmdDeployToken(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
-	now := time.Now()
+	ttl := fl.Duration("ttl")
+	iat, exp := tokenTimes(time.Now(), ttl)
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
 		return caddy1, err
@@ -144,8 +152,8 @@ func cmdDeployToken(fl caddycmd.Flags) (int, error) {
 	// combined here.
 	payload := map[string]any{
 		"aud": audience,
-		"iat": jwt.NewNumericDate(now),
-		"exp": jwt.NewNumericDate(now.Add(fl.Duration("ttl"))),
+		"iat": iat,
+		"exp": exp,
 		"jti": hex.EncodeToString(jti),
 	}
 	if sub := fl.String("subject"); sub != "" {
@@ -158,8 +166,40 @@ func cmdDeployToken(fl caddycmd.Flags) (int, error) {
 	if err != nil {
 		return caddy1, err
 	}
+	if warning := ttlWarning(ttl); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	fmt.Println(token)
 	return 0, nil
+}
+
+// tokenTimes is the iat and exp of a token minted at now to live ttl.
+// A NumericDate keeps whole seconds, truncating each, so now is
+// truncated first: exp - iat is then ttl rounded down, never up, and a
+// --ttl equal to a box's max_token_ttl verifies however fractional
+// either is.
+func tokenTimes(now time.Time, ttl time.Duration) (iat, exp *jwt.NumericDate) {
+	now = now.Truncate(time.Second)
+	return jwt.NewNumericDate(now), jwt.NewNumericDate(now.Add(ttl))
+}
+
+// warnTTL is the --ttl above which deploy-token warns. A box's bound
+// is its max_token_ttl, 24h by default: this is lower, because the
+// command's own default is minutes and a longer token is a bearer
+// credential for whoever reads it from a log, a shell history or a CI
+// variable until it expires.
+const warnTTL = time.Hour
+
+// ttlWarning is what deploy-token says on stderr for a ttl over
+// warnTTL, and empty for one within it. A warning, not a refusal: the
+// box's max_token_ttl is the bound, and its operator may have raised
+// it.
+func ttlWarning(ttl time.Duration) string {
+	if ttl <= warnTTL {
+		return ""
+	}
+	return fmt.Sprintf("warning: --ttl %v is over %v: whoever holds the token can deploy until it expires. A box refuses one that lives longer than its deploy_trust local block's max_token_ttl (%v unless the block sets one).",
+		ttl, warnTTL, deploytrust.DefaultMaxTokenTTL)
 }
 
 // caddy1 is the conventional generic failure exit code in Caddy's

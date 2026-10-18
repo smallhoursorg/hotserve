@@ -681,6 +681,77 @@ func TestDeployPreStartFailureKeepsOldServing(t *testing.T) {
 	}
 }
 
+// migrationRunner is a fakeRunner whose pre_start runs until the test
+// releases it, the way a migration takes its time. Like the real
+// runner it stops the unit when its context ends first, and says so.
+type migrationRunner struct {
+	*fakeRunner
+	entered   chan context.Context
+	release   chan struct{}
+	completed atomic.Bool
+}
+
+func (r *migrationRunner) RunOnce(ctx context.Context, spec startSpec) error {
+	r.entered <- ctx
+	select {
+	case <-r.release:
+		r.completed.Store(true)
+		return r.fakeRunner.RunOnce(ctx, spec)
+	case <-ctx.Done():
+		return ctx.Err() // the unit stopped mid-migration
+	}
+}
+
+// Promise: a client that hangs up mid-pre_start does not stop the
+// migration. pre_start runs under deadline, not under the request; it
+// finishes, and the deploy then fails at the health gate, which reads
+// the request's context as it does for any deploy whose client left.
+// The old instance serves throughout, and the record names the gate,
+// not the migration.
+func TestDeployPreStartOutlivesTheRequest(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
+	sockV1 := rig.ma.activeSocket.Load()
+
+	runner := &migrationRunner{fakeRunner: rig.runner, entered: make(chan context.Context), release: make(chan struct{})}
+	rig.ma.runner = runner
+	rig.ma.prober = &httpProber{clock: rig.clock} // the real gate: it is what reads the request after pre_start
+	rig.spec.preStart = []string{"./migrate"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() { errc <- rig.ma.Deploy(ctx, deployRequest{url: "https://x/2", version: "v2"}) }()
+
+	var preCtx context.Context
+	select {
+	case preCtx = <-runner.entered:
+	case err := <-errc:
+		t.Fatalf("the deploy ended before pre_start ran: %v", err)
+	}
+	cancel() // the CI job is cancelled mid-migration
+	if err := preCtx.Err(); err != nil {
+		t.Fatalf("pre_start's context ended with the request's: %v", err)
+	}
+	if dl, ok := preCtx.Deadline(); !ok || time.Until(dl) > rig.spec.deadline {
+		t.Fatalf("pre_start must still be bounded by deadline (%v): deadline %v, set %v", rig.spec.deadline, dl, ok)
+	}
+	close(runner.release)
+
+	err := <-errc
+	if !runner.completed.Load() {
+		t.Fatal("the migration did not run to completion")
+	}
+	if err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "health gate") || strings.Contains(err.Error(), "pre_start") {
+		t.Fatalf("want the health gate to fail the deploy on the cancelled request, got %v", err)
+	}
+	if rig.ma.activeSocket.Load() != sockV1 {
+		t.Fatal("the old instance must keep serving")
+	}
+	if got := rig.ma.status().LastDeploy; got.Status != "failed" || got.Phase != "soaking" || strings.Contains(got.Error, "pre_start") {
+		t.Fatalf("the record must name the gate, not the migration: %+v", got)
+	}
+}
+
 func TestDeployHealthFailureStopsNewKeepsOld(t *testing.T) {
 	rig := newTestRig(t)
 	ctx := context.Background()

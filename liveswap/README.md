@@ -275,7 +275,7 @@ resolved at config load.
 | `env`, `env_file` | — | Extra environment |
 | `health_path` | `/health` | 2xx = healthy; `off` = process-liveness only |
 | `health_interval` / `health_timeout` | `5s` / `2s` | Probe cadence |
-| `soak` | `15s` | Continuous health required before cutover |
+| `soak` | `15s` | Continuous health required before cutover. `0` is no soak: traffic moves on the first healthy probe. Refused with `health_path off`, where nothing is probed and the gate would look once, straight after the process starts (#305 tracks allowing it once the gate checks the socket) |
 | `deadline` | `5m` | Bound on pre_start and, separately, on the health gate (soak included, so `soak` cannot exceed it). The gate is judged once per `health_interval`, so it can run over by one interval plus two `health_timeout`s (the probe before the last tick and the one on it); a soak that falls due on that first tick past the deadline still passes |
 | `drain` | `5s` | In-flight grace after cutover, before SIGTERM |
 | `grace` | `10s` | SIGTERM → SIGKILL window |
@@ -288,6 +288,11 @@ resolved at config load.
 | `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
+
+Every duration, count and size above must be more than `0`, except `soak`
+and `deploy_log_lines`, where `0` is a setting. A `0` elsewhere is
+refused when the config loads, naming the option and its minimum;
+leave an option out to get its default.
 
 Both caps are cliffs an app can grow into, so each successful deploy
 logs the artifact's entry count and decompressed size and, past **75%**
@@ -706,7 +711,16 @@ unaudienced token; for `local`, the name of this box, see below),
 `ref`, `environment`, etc.; a claim named `@id` is refused, because
 Caddy deletes that key from the config before hotserve reads it),
 `subject` (sugar for `claim sub`),
-`issuer` (oidc/gitlab), `public_key` (local).
+`issuer` (oidc/gitlab), `public_key` and `max_token_ttl` (local).
+
+A `local` token is a bearer credential for as long as it lives, and
+nothing on the box revokes one short of removing its key. So a
+`local` block accepts a token only while its lifetime, `exp - iat`, is
+at most `max_token_ttl <duration>` (default `24h`): a token without
+`iat`, or minted to live longer, is refused, and the journal's
+`refused` names the directive. `hotserve deploy-token` mints for
+`--ttl` (default `5m`) and warns above an hour. Mint one per deploy;
+a job that cannot raises the bound on its block.
 
 The OIDC presets also **require an identity claim** — one of
 `repository`/`repository_id`/… (github), `project_path`/`project_id`/…
@@ -803,8 +817,9 @@ repository can mint a token for audience `hotserve`, so an answer that
 named the failed check would tell them which apps exist and what each
 block pins. The `webhook auth failed` line carries `refused`: one
 entry per source, in config order, each the source's label and what
-it refused — the signature, `exp`, the audience, or a `claim` that did
-not match, with the identity the token presented:
+it refused — the signature, `exp`, a local token's lifetime over
+`max_token_ttl`, the audience, or a `claim` that did not match, with
+the identity the token presented:
 
 ```
 "refused":"oidc:https://token.actions.githubusercontent.com: claim \"repository\" mismatch, presented repository=your-org/other ref=refs/heads/main actor=alice; local:/etc/hotserve/alice.pub: go-jose/go-jose: error in cryptographic primitive"
@@ -814,9 +829,22 @@ A request with no bearer token says so instead, as does an app with
 no source at all. The box failing to consult the issuer — OIDC
 discovery on first use, or fetching its signing keys — lands here as
 well: still a 401 to the caller, with the network error in the
-journal. Each entry's reason is one line, cut at 300 bytes plus an
-ellipsis — an issuer's error quotes what the token carried, and a
-presented identity can be anything the issuer signed; the reason
+journal. An OIDC source fetches the issuer's keys only for a token
+signed under a key it does not hold yet, and at most once a minute:
+within a minute of its last fetch such a token is refused, with that
+fetch's error if it failed. So the first deploy after the issuer
+rotates its key, or comes back from an outage, can be refused for up
+to a minute; its retry goes through. A forged token under a key the
+box does hold costs it no request to the issuer, which is also why an
+issuer that replaces a key but keeps its kid is not picked up: tokens
+under the new key are refused, with `signature does not match the key
+held for kid "<kid>"; if the issuer replaced that key, systemctl
+reload hotserve` in `refused`, until the source fetches for another
+kid or that reload starts every source with an empty key set. Each
+entry's reason
+is one line, cut at 300 bytes plus an ellipsis — an issuer's error
+quotes what the token carried, and a presented identity can be
+anything the issuer signed; the reason
 comes before the identity, so the cut never takes it — after the
 source's label, which is your config and is not cut. The line count
 is bounded by the throttle below: past an address's ten failures a
@@ -931,7 +959,17 @@ gate is judged once per interval, and the tick that completes the soak
 still probes), plus drain and grace — and a second `deadline` when
 `pre_start` is configured, since the pre_start step gets a full
 `deadline` of its own before the health gate starts. Expect a
-concurrent deploy to 409 until the first one finishes.
+concurrent deploy to 409 until the first one finishes. A client that
+hangs up (a cancelled job, a step timeout) does not stop a running
+`pre_start`: a migration stopped midway would leave the app's data
+half-changed, so it runs to its end, still bounded by `deadline`, and
+the deploy then fails before any traffic moves. Until then a retry,
+a rollback included, gets the 409. To end a migration that hangs
+sooner than its `deadline`, stop its unit yourself; it is named
+`hotserve-<app>.<version>.<nonce>.prestart.service`. For example:
+`sudo -u hotserve XDG_RUNTIME_DIR=/run/user/$(id -u hotserve)
+systemctl --user stop 'hotserve-blog.*.prestart.service'`. The deploy
+then fails as a failed `pre_start`.
 
 **A failed deploy says why, from the app's side.** The 5xx body's
 `status.last_deploy` carries the phase it stopped in, `phases` — each
@@ -1331,9 +1369,11 @@ the defaults and a `pre_start`, plus the artifact's transfer: the
 one `health_interval` and two `health_timeout`s (9s) + `drain` (5s) +
 `grace` (10s) = 10m24s, which leaves 4m36s for the download. Raise it
 with any of those settings. A curl that gives up before the cutover
-fails the deploy, and the old version keeps serving — and a `pre_start`
-still running is stopped where it is, mid-migration; one that gives up
-after the cutover turns red a deploy the box completed.
+fails the deploy, and the old version keeps serving. A `pre_start`
+still running is not stopped: it runs to its end, and the deploy lock
+is held until then, so a retry gets the 409. Stopping its `.prestart`
+unit ends it sooner (see [Webhook API](#webhook-api)). A curl that
+gives up after the cutover turns red a deploy the box completed.
 
 ## Server layout
 

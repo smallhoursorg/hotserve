@@ -43,9 +43,20 @@ Concept map from the Nomad-era stack:
 - The webhook MUST authenticate every request by verifying an
   `Authorization: Bearer <JWT>` against the app's `deploy_trust`
   sources (OIDC against an issuer's public JWKS, or a local public
-  key), and MUST NOT reveal whether an app exists to unauthenticated
-  callers (unknown apps verify against the global trust sources, then
-  404). No shared secret is stored on the box.
+  key), and its answer MUST NOT reveal whether an app exists to
+  unauthenticated callers (unknown apps verify against the global trust
+  sources, then 404; a refused token gets the same 401 either way). Its
+  timing can, within a bound (DESIGN-threat-model.md, "Webhook
+  endpoint", the residual; owed: #306): a token is checked against
+  each source a name resolves to in turn, the signature before the
+  issuer, so an OIDC source refuses a forged token after a local
+  signature check when it holds the token's kid, and, when it does
+  not, after a fetch of its issuer's keys that it makes at most once a
+  minute, whatever issuer the token names. A name that does not exist
+  goes to the global sources: it is refused at once when they hold no
+  OIDC source, and otherwise pays the same on their own key sets.
+  The fetch window is per app, not shared across apps that trust the
+  same issuer. No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
   sources.
 - Config load and every launch MUST warn when an app's `env_file` is
@@ -136,14 +147,19 @@ Concept map from the Nomad-era stack:
   are and whether or not another source then accepted the token, so
   an issuer outage never leaves the journal quiet.
 - `pre_start` (if configured) MUST run to completion in the release dir
-  before the new instance starts; non-zero exit aborts the deploy.
+  before the new instance starts; non-zero exit aborts the deploy. It
+  runs under `deadline`, not under the request: a client that hangs up
+  MUST NOT stop it midway (a half-applied migration harms the app's
+  data); the health gate then fails the deploy on the cancelled
+  request, before any traffic moves.
 - The new instance MUST be continuously healthy for `soak` before any
-  traffic moves, and MUST be stopped and the deploy failed if not
-  healthy within `deadline`. A flapping health check resets the soak.
-  The gate is judged once per `health_interval`, so it ends within
-  `deadline` plus one `health_interval` and two `health_timeout`s; a
-  soak that falls due on the first tick past `deadline` still passes
-  if that tick's probe does.
+  traffic moves (`soak 0`: the first healthy probe), and MUST be
+  stopped and the deploy failed if not healthy within `deadline`. A
+  flapping health check resets the soak. The gate is judged once per
+  `health_interval`, so it ends within `deadline` plus one
+  `health_interval` and two `health_timeout`s; a soak that falls due
+  on the first tick past `deadline` still passes if that tick's probe
+  does.
 - Any failure before the promote step MUST leave the old version
   serving, untouched. The webhook response MUST be synchronous and MUST
   carry a 5xx on failure: as its status (CI turns red; `curl
@@ -405,7 +421,7 @@ backwards edges reappearing *despite* this table.
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
 | `appdirs.go` | `appDirs`: the on-disk layout for one app. Pure path arithmetic — no state, no lock |
 | `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed at the name, no FIFO held, size-bounded — shared by the deploy records and `state.json` |
-| `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them |
+| `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them, reading a zero field as unset, so a value below an option's minimum (0 included) is refused here, named; `soak` and `deploy_log_lines`, whose 0 is a setting, are pointers |
 | `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
 | `deploytrust/` | leaf package: deploy auth — the `deploy_trust` grammar (`Parse`), its sources and verifiers (OIDC + local-key JWT verification), the webhook preamble (`Limiter.Authenticate`) and what a failed attempt costs the journal (`Limiter`, on an injected clock). Imports nothing of liveswap's; the box webhook authenticates through it too. `trusttest/` beside it mints tokens and runs an issuer for tests |
 | `internal/dispenser/` | leaf package: the one Caddyfile rule the parsers here and `deploytrust.Parse` apply alike — a repeated subdirective is refused — in one place so the two cannot drift |
@@ -590,7 +606,10 @@ severity × occurrence × detection, then the fix's size and risk.
 |---|---|---|---|---|---|---|---|
 | A relaunch of the running version starts a second instance of the same release in the same release dir, bound read-write (`sandbox.go`), for the overlap — `soak`, then `drain` and the old instance's stop. An app that keeps mutable state in its release dir rather than under `HOME` (its shared dir) may see its two instances contend there. | `deployLocked`, relaunch | 3 | 5 | 3 | 45 | size 3, risk 2 (a copy per instance, or a stop-then-start branch) | Scores to fix; accepted by decision (#234, 2026-10-16). Both fixes cost what the feature exists to avoid: stop-then-start drops every request for the launch time, which the watchdog's restart already does and a deploy never does; a copy per instance doubles the disk of each relaunch and makes two paths to one release (`{release_dir}`, status, GC). The shared dir is already shared by both versions in every deploy, so an app's state there meets the same overlap today; the release dir is the app's code, and nothing of hotserve's writes under it during a relaunch. An app that conflicts fails the health gate or crashes in the watchdog's view, red and named; the silent case needs state the app chose to keep where every deploy already discards it. |
 | A relaunch matches the request's digest against the version's record, not the release's bytes (`recordedPin`'s known limit: a version release GC pruned, deployed again, whose record write then failed). A request carrying the old digest then relaunches the bytes on disk. | `relaunchRefusal` | 3 | 1 | 3 | 9 | size 3 (a pin kept with the release) | The relaunch introduces no bytes: whatever the match decides, what runs is the release that was already serving. Closing it is the same fix the known limit names for rollbacks. |
+| A request cancelled before or during `pre_start` does not stop it: the migration runs to its end, then the deploy starts the new instance and the health gate fails it on the cancelled request (phase `soaking`, `deploy canceled while waiting for health`). The new instance runs its startup for that moment, the release is removed, and a retry runs `pre_start` again, as it does after any gate failure that follows a `pre_start`. | `deployLocked`, after `pre_start` | 3 | 3 | 1 | 9 | size 2, risk 1 (a request check before the start); size 3, risk 3 (run the rest of the deploy detached) | Rule 2 holds (it ends red, the cause named); under rule 3 the product is under 20 and neither fix is size 1, risk 1. The shape is the owner's decision (#295, 2026-10-17): the gate aborts the deploy as it does for any client that left. The old instance serves throughout, and a migration that cannot run twice already meets the same retry after any gate failure. |
+| A `pre_start` that exits within milliseconds of `deadline` can still read as timed out: `jobResult` prefers a job result already received when the context ends, but not one whose signal is still in flight. The deploy fails red naming the deadline, and the release of a migration that ran is removed. | `jobResult` | 2 | 3 | 1 | 6 | size 3 (a second completion source: a oneshot's transient unit is unloaded on success, so no `Result` is left to ask for) | Rule 2 holds (red, named); under rule 3 the product is under 20. A migration that ends on its deadline has used its whole budget; raising `deadline` is the remedy. |
 | A Debian 13 host that passes the tutorial's step 2 (apt's `systemd (>= 257)` floor, `systemd-detect-virt --container`) but whose kernel or container refuses the sandbox's namespaces installs and serves the starter config, and first fails at step 3: `hotserve init`'s reload is liveswap's first start. That reload is refused, the probe's error names the cause, and the starter keeps serving; the box's repository, signer and workflow carry over to a fixed or new host. | `probeSandboxCapability`, from `App.Start` | 2 | 5 | 1 | 10 | size 3, risk 1 (a sandbox-check subcommand that step 2 runs as the hotserve user) | Rule 2 holds (it ends red and named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#274, 2026-10-17; #225 scored the same case at occurrence 3, but a host is the operator's choice, so it scores as input). The probe needs the hotserve user and its lingering manager, which the package's postinst creates, so the earliest any check could run is the end of `apt install`, minutes before step 3, with the same refusal and the same fix. A check in postinst could only warn, since a failed postinst leaves the package half-configured: one line in apt's output, after up to two 30-second probe budgets inside dpkg. And liveswap with no apps runs no probe (`len(a.managed) > 0` in `App.Start`), so the starter config cannot carry one. |
+| `max_token_ttl {env.NAME}` in a `deploy_trust local` block is refused at config load (`invalid max_token_ttl "{env.NAME}"`), though the README says `{env.*}` placeholders are resolved at config load: the duration is parsed when the Caddyfile is, before placeholders are. | `deploytrust.Parse` | 2 | 5 | 1 | 10 | size 2, risk 2 (a string field, resolved in `ResolvePlaceholders` and parsed in `Build`) | Rule 2 holds (refused and named, before anything runs); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#296, 2026-10-17). Every liveswap duration directive (`health_interval`, `deadline`, …) parses the same way, so this one matches them; the Caddyfile's own `{$NAME}`, substituted when the file is read, works for all of them. |
 | An app dir, or one of its fixed subdirs, that is a link to a sibling's (`<root>/blog -> shop`, `blog/releases -> ../shop/releases`) is followed by everything but the socket prune and the record store. blog's deploys stage in shop's `tmp/` and extract into shop's `releases/`; when both apps deploy one version at the same moment they share its `.extract-<version>` staging dir, and blog's cleanup can remove the release shop has just promoted. Until a refused blog deploy's cleanup runs, its release sits among shop's: a shop deploy's GC in that window counts it toward `keep` and removes one more of shop's own releases. If the cleanup fails (EIO), the release stays: shop's status lists it, shop's own deploy of that version is refused as existing, and a shop rollback to it runs blog's artifact with shop's shared dir and `env_file`. Lesser effects: blog's pins land in shop's `proxy/` through a linked one, where shop's sweep removes them, so blog (not shop) goes unreachable; a blog deploy of a version shop has is refused as already existing; blog's status lists shop's releases; and blog's recovery reads shop's `state.json` and retries its refused relaunch, backing off to once a minute. | `deployLocked`, `deployPush`, `releaseFetcher.fetch`, `ensureRunning`, `status` | 5 | 5 | 5 | 125 | size 3, risk 2 (one check at every entry point, #300) | Scores to fix (rule 1); held by decision (#300, 2026-10-17) until a box runs a link under the root, or renaming or aliasing an app becomes a feature. No box does. Launch refuses a linked app dir, `releases/`, `shared/` or `run/` (`resolveBindSources`), so a single deploy or recovery through one ends red, naming where the path resolves, and removes what it extracted; nothing writes shop's `state.json`, since a save follows a launch. The socket prune never follows a link (`linkAt`), so no sibling loses its socket and pin that way. The severity-5 cases need two apps that share a directory to deploy one version at once, or a refused deploy's cleanup to fail and shop's operator to roll back to the version it left. |
 
 ## Non-goals

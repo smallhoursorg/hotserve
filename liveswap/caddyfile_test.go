@@ -1,11 +1,13 @@
 package liveswap
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 )
 
@@ -92,7 +94,7 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	if blog.HealthPath != "/healthz" ||
 		blog.HealthInterval != caddy.Duration(3*time.Second) ||
 		blog.HealthTimeout != caddy.Duration(time.Second) ||
-		blog.Soak != caddy.Duration(10*time.Second) ||
+		blog.Soak == nil || *blog.Soak != caddy.Duration(10*time.Second) ||
 		blog.Deadline != caddy.Duration(2*time.Minute) ||
 		blog.Drain != caddy.Duration(2*time.Second) ||
 		blog.Grace != caddy.Duration(20*time.Second) {
@@ -131,7 +133,7 @@ func TestCaddyfileUnmarshalEmptyAppBlockLeavesDefaultsToProvision(t *testing.T) 
 		t.Fatalf("unmarshal: %v", err)
 	}
 	blog := a.Apps["blog"]
-	if blog.HealthPath != "" || blog.HealthInterval != 0 || blog.Soak != 0 ||
+	if blog.HealthPath != "" || blog.HealthInterval != 0 || blog.Soak != nil ||
 		blog.Deadline != 0 || blog.Drain != 0 || blog.Grace != 0 ||
 		blog.Keep != 0 || blog.MaxArtifactSize != 0 || blog.MaxArtifactEntries != 0 || len(blog.DeployTrust) != 0 ||
 		blog.DeployLogLines != nil {
@@ -143,6 +145,79 @@ func TestCaddyfileUnmarshalEmptyAppBlockLeavesDefaultsToProvision(t *testing.T) 
 	}
 	if a.Root != "" {
 		t.Fatalf("root should be zero, got %q", a.Root)
+	}
+}
+
+// Provision reads a zero field as unset and puts the default in its
+// place, so an explicit 0 written in the Caddyfile used to become the
+// default without a word: `keep 0` kept five releases, `drain 0`
+// drained for five seconds. Every option whose 0 means nothing else is
+// refused where it is parsed, naming the option and its minimum; a
+// value below the minimum is refused the same way.
+func TestCaddyfileRefusesZeroWhereItWouldReadAsUnset(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"health_interval 0", "health_interval must be more than 0, got 0"},
+		{"health_timeout 0s", "health_timeout must be more than 0, got 0s"},
+		{"deadline 0", "deadline must be more than 0"},
+		{"drain 0ms", "drain must be more than 0"},
+		{"grace 0", "grace must be more than 0"},
+		{"watchdog_grace 0", "watchdog_grace must be more than 0"},
+		{"watchdog_window 0d", "watchdog_window must be more than 0"},
+		{"watchdog_failures 0", "watchdog_failures must be at least 1, got 0"},
+		{"watchdog_restarts 0", "watchdog_restarts must be at least 1, got 0"},
+		{"keep 0", "keep must be at least 1, got 0"},
+		{"max_artifact_entries 0", "max_artifact_entries must be at least 1, got 0"},
+		{"max_artifact_size 0", "max_artifact_size must be at least 1 byte, got 0"},
+		{"max_artifact_size 0MB", "max_artifact_size must be at least 1 byte, got 0MB"},
+		{"drain -1s", "drain must be more than 0, got -1s"},
+		{"keep -2", "keep must be at least 1, got -2"},
+		// The two whose 0 is a setting still refuse what is below it.
+		{"soak -1s", "soak must be 0 or more, got -1s"},
+		{"deploy_log_lines -1", "deploy_log_lines must be at least 0, got -1"},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			var a App
+			err := a.UnmarshalCaddyfile(caddyfile.NewTestDispenser("liveswap {\n\tapp a {\n\t\tcommand x\n\t\t" + tc.line + "\n\t}\n}"))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// soak 0 is a setting, not unset: no soak, so traffic moves on the
+// first healthy probe. It reaches the spec as 0 through the JSON the
+// Caddyfile adapter hands Caddy and through Provision's defaults, and
+// the config validates. Left out, soak is still the default.
+func TestCaddyfileSoakZeroIsNoSoak(t *testing.T) {
+	var parsed App
+	if err := parsed.UnmarshalCaddyfile(caddyfile.NewTestDispenser("liveswap {\n\tapp a {\n\t\tcommand x\n\t\tsoak 0\n\t}\n\tapp b {\n\t\tcommand x\n\t}\n}")); err != nil {
+		t.Fatal(err)
+	}
+	var a App
+	if err := json.Unmarshal(caddyconfig.JSON(&parsed, nil), &a); err != nil {
+		t.Fatal(err)
+	}
+	a.Root = "/var/lib/liveswap"
+	a.ArtifactAllowlist = []string{"github.com/smallhoursorg/"}
+	a.DeployTrust = githubTrust()
+	var err error
+	if a.allowlist, err = parseAllowlist(a.ArtifactAllowlist); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]time.Duration{"a": 0, "b": 15 * time.Second} {
+		cfg := a.Apps[name]
+		cfg.applyDefaults(caddy.NewReplacer())
+		spec, err := a.buildSpec(name, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spec.soak != want {
+			t.Fatalf("app %s: soak = %v, want %v", name, spec.soak, want)
+		}
+	}
+	if err := a.Validate(); err != nil {
+		t.Fatalf("soak 0 must validate: %v", err)
 	}
 }
 

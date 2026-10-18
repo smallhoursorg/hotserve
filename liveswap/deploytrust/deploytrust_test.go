@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +32,7 @@ import (
 // localTrust is a local source for a test public key, built directly:
 // the label is the key's name, as an operator's is its path.
 func localTrust(pub ed25519.PublicKey, audience string) Source {
-	return Source{kind: "local", audience: audience, pubKey: pub, keyPath: "test-key", attribution: attributionClaims["local"]}
+	return Source{kind: "local", audience: audience, pubKey: pub, keyPath: "test-key", maxTTL: DefaultMaxTokenTTL, attribution: attributionClaims["local"]}
 }
 
 func TestLocalVerifier(t *testing.T) {
@@ -39,7 +40,7 @@ func TestLocalVerifier(t *testing.T) {
 	_, otherPub := trusttest.GenerateKey()
 	want := map[string]string{"repository": "org/app"}
 	base := func() *localVerifier {
-		return &localVerifier{audience: "aud1", pub: pub, claims: want}
+		return &localVerifier{audience: "aud1", pub: pub, claims: want, maxTTL: DefaultMaxTokenTTL}
 	}
 	ctx := context.Background()
 
@@ -171,9 +172,136 @@ func TestLocalTokenRequiresExp(t *testing.T) {
 	noExp := trusttest.SignEdDSA(t, priv, map[string]any{
 		"aud": "a", "iat": jwt.NewNumericDate(time.Now()),
 	})
-	v := &localVerifier{audience: "a", pub: pub}
+	v := &localVerifier{audience: "a", pub: pub, maxTTL: DefaultMaxTokenTTL}
 	if _, err := v.verify(context.Background(), noExp); err == nil {
 		t.Fatal("local token without exp must be rejected")
+	}
+}
+
+// max_token_ttl is measured from iat, so a local token must carry one:
+// without it the refusal names the claim.
+func TestLocalTokenRequiresIat(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	noIat := trusttest.SignEdDSA(t, priv, map[string]any{
+		"aud": "a", "exp": jwt.NewNumericDate(time.Now().Add(5 * time.Minute)),
+	})
+	v := &localVerifier{audience: "a", pub: pub, maxTTL: DefaultMaxTokenTTL}
+	if _, err := v.verify(context.Background(), noIat); err == nil || !strings.Contains(err.Error(), "no iat claim") {
+		t.Fatalf("local token without iat: err = %v, want a refusal naming iat", err)
+	}
+}
+
+// A local token is accepted while exp - iat is at most its source's
+// max_token_ttl, to the second, and refused one second past it — with
+// the reason, which the journal's refused field carries, naming the
+// directive.
+func TestLocalTokenLifetimeBound(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	now := time.Now()
+	lives := func(d time.Duration) string {
+		return trusttest.SignEdDSA(t, priv, trusttest.Claims("", "a", now, now.Add(d), nil))
+	}
+	for _, limit := range []time.Duration{DefaultMaxTokenTTL, 2 * time.Hour} {
+		src := localTrust(pub, "a")
+		src.maxTTL = limit
+		vs := Verifiers([]Source{src}, nil)
+		if _, _, err := authorize(context.Background(), vs, lives(limit)); err != nil {
+			t.Errorf("max_token_ttl %v: a token that lives exactly that long was refused: %v", limit, err)
+		}
+		_, _, err := authorize(context.Background(), vs, lives(limit+time.Second))
+		if err == nil || !strings.Contains(err.Error(), "max_token_ttl "+limit.String()+" after its iat") {
+			t.Errorf("max_token_ttl %v: a token a second longer: err = %v, want a refusal naming max_token_ttl", limit, err)
+		}
+	}
+
+	// At the largest bound a duration holds (~292 years), exp - iat
+	// would saturate at the bound itself; a token minted to outlive it
+	// is still refused, and one inside it accepted.
+	src := localTrust(pub, "a")
+	src.maxTTL = time.Duration(math.MaxInt64)
+	vs := Verifiers([]Source{src}, nil)
+	inside := trusttest.SignEdDSA(t, priv, trusttest.Claims("", "a", now, now.AddDate(292, 0, 0), nil))
+	if _, _, err := authorize(context.Background(), vs, inside); err != nil {
+		t.Errorf("largest max_token_ttl: a token inside it was refused: %v", err)
+	}
+	beyond := trusttest.SignEdDSA(t, priv, trusttest.Claims("", "a", now, now.AddDate(974, 0, 0), nil))
+	if _, _, err := authorize(context.Background(), vs, beyond); err == nil || !strings.Contains(err.Error(), "max_token_ttl") {
+		t.Errorf("largest max_token_ttl: a token that outlives it: err = %v, want a refusal naming max_token_ttl", err)
+	}
+}
+
+// max_token_ttl is the local source's: unset is DefaultMaxTokenTTL, a
+// positive one is the bound, zero or negative is refused at config
+// load, and an OIDC preset refuses it (the issuer sets its tokens'
+// lifetime).
+func TestMaxTokenTTLConfig(t *testing.T) {
+	_, pub := trusttest.GenerateKey()
+	key := trusttest.KeyFile(t, pub)
+	ttl := func(d time.Duration) *caddy.Duration {
+		c := caddy.Duration(d)
+		return &c
+	}
+	for _, tc := range []struct {
+		name string
+		set  *caddy.Duration
+		want time.Duration
+	}{
+		{"unset", nil, 24 * time.Hour},
+		{"set", ttl(2 * time.Hour), 2 * time.Hour},
+		{"over the default", ttl(87600 * time.Hour), 87600 * time.Hour},
+	} {
+		srcs, err := Build([]TrustConfig{{Kind: "local", PublicKey: key, MaxTokenTTL: tc.set}}, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if srcs[0].maxTTL != tc.want {
+			t.Errorf("%s: max_token_ttl = %v, want %v", tc.name, srcs[0].maxTTL, tc.want)
+		}
+	}
+	for name, set := range map[string]*caddy.Duration{"zero": ttl(0), "negative": ttl(-time.Hour)} {
+		if _, err := Build([]TrustConfig{{Kind: "local", PublicKey: key, MaxTokenTTL: set}}, nil); err == nil || !strings.Contains(err.Error(), "max_token_ttl must be positive") {
+			t.Errorf("%s max_token_ttl: err = %v, want a refusal", name, err)
+		}
+	}
+	gh := TrustConfig{Kind: "github", Audience: "a", Claims: map[string]string{"repository": "o/r"}, MaxTokenTTL: ttl(time.Hour)}
+	if _, err := Build([]TrustConfig{gh}, nil); err == nil || !strings.Contains(err.Error(), "does not take a max_token_ttl") {
+		t.Errorf("github with max_token_ttl: err = %v, want a refusal", err)
+	}
+}
+
+// max_token_ttl parses from the Caddyfile as a Caddy duration, and
+// from JSON as one (a string) or as nanoseconds (what the Caddyfile
+// adapter writes); an explicit zero survives the JSON, for Build to
+// refuse rather than to read as unset.
+func TestMaxTokenTTLParses(t *testing.T) {
+	parse := func(block string) (TrustConfig, error) {
+		d := caddyfile.NewTestDispenser("deploy_trust local {\n\tpublic_key /k.pub\n" + block + "}")
+		d.Next()
+		return Parse(d)
+	}
+	for in, want := range map[string]time.Duration{"2h": 2 * time.Hour, "1d": 24 * time.Hour, "0": 0, "-1h": -time.Hour} {
+		tc, err := parse("\tmax_token_ttl " + in + "\n")
+		if err != nil || tc.MaxTokenTTL == nil || time.Duration(*tc.MaxTokenTTL) != want {
+			t.Errorf("max_token_ttl %s: %+v, %v; want %v", in, tc.MaxTokenTTL, err, want)
+			continue
+		}
+		raw, err := json.Marshal(tc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back TrustConfig
+		if err := json.Unmarshal(raw, &back); err != nil || back.MaxTokenTTL == nil || *back.MaxTokenTTL != *tc.MaxTokenTTL {
+			t.Errorf("max_token_ttl %s: JSON %s read back as %+v, %v", in, raw, back.MaxTokenTTL, err)
+		}
+	}
+	for _, bad := range []string{"\tmax_token_ttl\n", "\tmax_token_ttl soon\n", "\tmax_token_ttl 1h\n\tmax_token_ttl 2h\n"} {
+		if _, err := parse(bad); err == nil {
+			t.Errorf("%q: parsed, want an error", bad)
+		}
+	}
+	var tc TrustConfig
+	if err := json.Unmarshal([]byte(`{"kind":"local","public_key":"/k.pub","max_token_ttl":"36h"}`), &tc); err != nil || tc.MaxTokenTTL == nil || time.Duration(*tc.MaxTokenTTL) != 36*time.Hour {
+		t.Errorf("JSON max_token_ttl \"36h\": %+v, %v", tc.MaxTokenTTL, err)
 	}
 }
 
@@ -318,32 +446,16 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 	}
 }
 
-// eventually retries check for a short while. go-oidc's key set
-// signals a finished fetch to its waiters before it records the
-// result under its lock, so the verify right after an issuer's state
-// changed can still see the previous fetch; a bounded retry keeps the
-// property under test (recovery without a restart) honest.
-func eventually(t *testing.T, what string, check func() error) {
-	t.Helper()
-	var err error
-	for range 40 {
-		if err = check(); err == nil {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("%s: %v", what, err)
-}
-
 // TestOIDCVerifierIssuerDown pins what an issuer the box cannot get
 // what it needs from looks like to the caller of verify: an
 // unavailable, not a refusal — the token was never judged — for both
-// discovery and the key fetch. The key-fetch case holds keyFetchFailed
+// discovery and the key fetch, and a failed fetch stands until the
+// refetch interval has passed. The key-fetch case holds keyFetchFailed
 // against the pinned go-oidc (the text is the only handle on it). It
 // also pins what is NOT an outage: a token the cached keys verify
-// still deploys, a malformed token is its own refusal, a caller that
-// went away is its own failure, and an issuer answering as someone
-// else is the config's.
+// still deploys, a malformed token and a bad signature under a kid the
+// box holds are refusals of their own, a caller that went away is its
+// own failure, and an issuer answering as someone else is the config's.
 func TestOIDCVerifierIssuerDown(t *testing.T) {
 	iss := trusttest.NewIssuer(t)
 	want := map[string]string{"repository": "org/app"}
@@ -391,7 +503,9 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	iss.DiscoveredAs.Store("")
 
 	iss.JWKSDown.Store(true)
+	c := trusttest.NewClock()
 	v := fresh()
+	v.clock = c
 	_, err = v.verify(ctx, valid())
 	u = wantDown(t, err, "JWKS 503 on first use")
 	if !strings.HasPrefix(u.Error(), keyFetchFailed) {
@@ -400,29 +514,46 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	_, err = v.verify(gone, valid())
 	wantPlain(t, err, "key fetch with the caller gone")
 
-	// Recovery needs no restart: the provider is cached, the key set
-	// fetches again.
+	// Recovery needs no restart: the provider is cached, and the key
+	// set fetches again once the interval since the failed fetch has
+	// passed. Until then the failure stands, without a fetch per token.
 	iss.JWKSDown.Store(false)
-	eventually(t, "issuer back: valid token rejected", func() error {
-		_, err := v.verify(ctx, valid())
-		return err
-	})
+	_, err = v.verify(ctx, valid())
+	_ = wantDown(t, err, "issuer back within the interval")
+	c.Advance(KeyRefetchInterval)
+	if _, err := v.verify(ctx, valid()); err != nil {
+		t.Fatalf("issuer back past the interval: valid token rejected: %v", err)
+	}
 
 	// Down again, keys cached: a token those keys verify still deploys
 	// — an outage only reaches tokens the box has no key for.
 	iss.JWKSDown.Store(true)
+	before := iss.JWKSFetches.Load()
 	if _, err := v.verify(ctx, valid()); err != nil {
 		t.Fatalf("issuer down with keys cached: valid token rejected: %v", err)
 	}
 	// A malformed token never reaches the fetch: a refusal of its own.
 	_, err = v.verify(ctx, "not-a-jwt")
 	wantPlain(t, err, "malformed token during an outage")
-	// A bad signature under a known kid refetches (go-oidc's rotation
-	// strategy), so during an outage it cannot be told from a rotated
-	// key: unavailable, deliberately.
+	// So is a bad signature under a kid the box holds: refused on the
+	// spot, with no fetch to fail.
 	other, _ := rsa.GenerateKey(rand.Reader, 2048)
 	_, err = v.verify(ctx, iss.Mint(t, other, "hotserve", want, time.Now().Add(5*time.Minute)))
-	_ = wantDown(t, err, "bad signature during an outage")
+	wantPlain(t, err, "bad signature under a held kid during an outage")
+	if n := iss.JWKSFetches.Load(); n != before {
+		t.Fatalf("issuer down with keys cached: %d fetches, want none", n-before)
+	}
+	// A token whose kid the box holds no key for is the outage's: its
+	// fetch fails, and the next such token within the interval gets that
+	// failure without fetching again.
+	c.Advance(KeyRefetchInterval)
+	for range 2 {
+		_, err = v.verify(ctx, iss.MintKID(t, other, "unknown", "hotserve", want, time.Now().Add(5*time.Minute)))
+		_ = wantDown(t, err, "unknown kid during an outage")
+	}
+	if n := iss.JWKSFetches.Load(); n != before+1 {
+		t.Fatalf("unknown kids during an outage: %d fetches, want one", n-before)
+	}
 }
 
 // TestAuthorizeNamesEverySourceItCouldNotConsult: down lists the
@@ -434,7 +565,7 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 	iss := trusttest.NewIssuer(t)
 	iss.DiscoveryDown.Store(true)
 	priv, pub := trusttest.GenerateKey()
-	local := &localVerifier{audience: "hotserve", pub: pub, keyPath: "/k.pem"}
+	local := &localVerifier{audience: "hotserve", pub: pub, keyPath: "/k.pem", maxTTL: DefaultMaxTokenTTL}
 	down := &oidcVerifier{issuer: iss.URL, audience: "hotserve", client: iss.Client}
 	labels := func(down []unavailable) string {
 		var out []string
@@ -598,7 +729,8 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		{"garbage", local, "not-a-jwt", []string{"local:test-key: "}},
 		{"wrong audience", local, trusttest.Mint(t, priv, "other", nil), []string{"local:test-key: ", "aud"}},
 		{"expired", local, trusttest.MintExpired(t, priv, "aud1", nil), []string{"local:test-key: ", "exp"}},
-		{"unknown signer", gh, iss.Mint(t, otherRSA, "hotserve", nil, time.Now().Add(time.Minute)), []string{"oidc:" + iss.URL + ": "}},
+		{"bad signature under a held kid names the reload", gh, iss.Mint(t, otherRSA, "hotserve", nil, time.Now().Add(time.Minute)),
+			[]string{"oidc:" + iss.URL + ": ", `kid "` + iss.KID + `"; if the issuer replaced that key, systemctl reload hotserve`}},
 		{"claim mismatch names who tried", gh,
 			mint("hotserve", map[string]string{"repository": "org/other", "ref": "refs/heads/main", "actor": "alice"}),
 			[]string{"oidc:" + iss.URL + ": claim \"repository\" mismatch, presented repository=org/other ref=refs/heads/main actor=alice"}},
