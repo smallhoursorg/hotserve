@@ -161,7 +161,7 @@ func pruneSockets(d appDirs, keep []string, logger *zap.Logger) {
 	if p, why := d.linkAt(d.run, d.proxy); p != "" {
 		logger.Warn("not pruning instance sockets: the app dir, run/ or proxy/ is not the directory it names",
 			zap.String("app_dir", d.app), zap.String("path", p), zap.Error(why),
-			zap.String("fix", "if a link or a file stands here, replace it with a real directory (to keep its contents on another disk, bind-mount that location at this path); if Lstat failed, the error says why, and nothing here needs replacing"))
+			zap.String("fix", notOwnDirFix))
 		return
 	}
 	kept := map[string]bool{}

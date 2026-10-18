@@ -222,6 +222,16 @@ func (h *Handler) deployPush(w http.ResponseWriter, r *http.Request, ma *managed
 	// the upload can't stage under one spec and extract under another.
 	c := ma.snapshot()
 	spec := c.spec
+	// The upload is the push's first write, so the pipeline's refusal
+	// of an app dir that is not the directory it names comes first
+	// here: a linked tmp/ would stage the upload wherever it points.
+	if err := spec.dirs.writeRefusal(); err != nil {
+		// Who asked, as the authorized line further on would say: the
+		// refusal comes before it.
+		c.logger.Error("deploy failed", zap.String("version", version), zap.String("via", by),
+			zap.String("source", "push"), zap.String("remote", r.RemoteAddr), zap.Error(err))
+		return h.mapDeployResult(w, ma, err)
+	}
 	archive, digest, err := stageUpload(r.Body, spec.dirs.tmp, spec.maxArtifactSize)
 	var stgErr *stagingError
 	switch {
