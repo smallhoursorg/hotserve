@@ -391,7 +391,7 @@ either delivers it or hotserve does not start with an app configured:
 | PID namespace (`PrivatePIDs=`) — supervisor, user manager and siblings **invisible and unsignalable** |
 | Deny-by-default filesystem: the whole host filesystem replaced by an empty read-only tmpfs, only named paths bound back |
 | hotserve's keys and sockets, other apps, and every path nothing named — **absent**, not merely unreadable |
-| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only, no nested namespaces |
+| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter less `io_uring_setup`, the native syscall ABI only, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only for `socket()` (`socketpair()` is not filtered: #315), no nested namespaces |
 
 `PrivatePIDs=` needs systemd 257, which Debian 13 — the supported
 host — ships, and the `.deb` refuses to install on anything older.
@@ -463,7 +463,9 @@ view is refused before the unit is even created — at the deploy's
 pre-flight, as a 422 — with a message that says where the runtime has
 to live, rather than failing as a bare `203/EXEC`. The same pre-flight
 refuses an executable built for another machine (an x86-64 tarball
-pushed to an arm64 box) naming the `runs-on` to build on. Every
+pushed to an arm64 box) naming the `runs-on` to build on, and a 32-bit
+executable, which a unit cannot run: units allow the box's native
+system-call ABI only (`SystemCallArchitectures=native`). Every
 relaunch — boot recovery, a watchdog restart, a rollback — runs it
 too, and stops at a refusal rather than retrying it (see
 [Watchdog](#watchdog)).
@@ -996,7 +998,7 @@ The response is synchronous:
 | 405 | A method other than `GET` or `POST` |
 | 409 | A deploy is already running for this app (retry) |
 | 413 | Pushed upload exceeded `max_artifact_size`, or a JSON body exceeded 64 KiB |
-| 422 | Bad request — missing/invalid version, the running version asked for again without a matching digest (see [Relaunching the running version](#relaunching-the-running-version)), **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, a pre-flight refusal (the command or `pre_start` does not resolve inside the sandbox view, or is an executable built for another machine — the body names the box's architecture and the `runs-on` to build on), or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
+| 422 | Bad request — missing/invalid version, the running version asked for again without a matching digest (see [Relaunching the running version](#relaunching-the-running-version)), **version already exists** (versions are immutable — deploy a new version or roll back to relaunch it), a rollback target no longer on disk, a pre-flight refusal (the command or `pre_start` does not resolve inside the sandbox view, or is an executable built for another machine — the body names the box's architecture and the `runs-on` to build on — or a 32-bit one, which names the architecture to build for), or (URL path) an artifact url refused by `artifact_allowlist` (host, path, port, or an undeclared query parameter; the body names exactly what tripped and how the entry would declare it) |
 | 5xx | Deploy failed — **the old version, if there was one, is still serving**; body says why. An artifact over `max_artifact_entries` or the decompressed byte cap fails here, before anything is written |
 
 Because the response is synchronous through the whole pipeline, the

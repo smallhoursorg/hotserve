@@ -342,7 +342,9 @@ type runner interface {
 `command[0]` resolves (`resolveInView`, shared with `unitFor`) to a
 file inside the sandbox view, and an ELF built for another 64-bit
 machine is refused naming the box's architecture and the `runs-on`
-to build on (`elf.go`, twenty bytes of header, no dependency). The
+to build on, and a 32-bit ELF naming the architecture to build for,
+since units allow the native system-call ABI only (`elf.go`, twenty
+bytes of header, no dependency). The
 deploy runs it for the command and the `pre_start` in phase
 `preparing` and reports a refusal as a 422; every relaunch
 (`launchVersion`: recovery and the watchdog) runs it for the command

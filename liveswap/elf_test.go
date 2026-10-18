@@ -1,9 +1,11 @@
 package liveswap
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -44,7 +46,10 @@ func TestElfMachine(t *testing.T) {
 		{"arm64 little-endian", elfHeader(2, false, 183), "arm64"},
 		{"arm64 big-endian header", elfHeader(2, true, 183), "arm64"},
 		{"riscv64", elfHeader(2, false, 243), "riscv64"},
-		{"32-bit x86 is the kernel's call", elfHeader(1, false, 3), ""},
+		{"32-bit x86", elfHeader(1, false, 3), elf32},
+		{"32-bit ARM", elfHeader(1, false, 40), elf32},
+		{"x32: 32-bit class, x86-64 machine", elfHeader(1, false, 62), elf32},
+		{"a class ELF does not define", elfHeader(3, false, 62), ""},
 		{"an unknown 64-bit machine", elfHeader(2, false, 22), ""},
 		{"an encoding ELF does not define", func() []byte { h := elfHeader(2, false, 62); h[5] = 0; return h }(), ""},
 		{"a shell script", []byte("#!/bin/sh\nexec ./server-bin \"$@\"\n"), ""},
@@ -127,5 +132,34 @@ func TestCheckMachine(t *testing.T) {
 	}
 	if runtime.GOARCH == "amd64" && !strings.Contains(err.Error(), "runs-on: ubuntu-24.04)") {
 		t.Errorf("an amd64 box names its hosted runner: %v", err)
+	}
+}
+
+// A 32-bit executable is refused on a 64-bit box, whatever its
+// machine: app units run the native system-call ABI only
+// (SystemCallArchitectures=native), where its first system call would
+// kill it with SIGSYS. Refused at the deploy's pre-flight instead,
+// naming the setting and the architecture to build for.
+func TestCheckMachineRefusesA32BitExecutable(t *testing.T) {
+	if strconv.IntSize != 64 {
+		t.Skip("on a 32-bit box a 32-bit executable is native")
+	}
+	for _, machine := range []uint16{3, 40, 62} { // x86, ARM, x32
+		p := writeFile(t, "elf32", elfHeader(1, false, machine))
+		err := checkMachine(p)
+		var pe *preflightError
+		if !errors.As(err, &pe) {
+			t.Fatalf("machine %d: a 32-bit executable must be a pre-flight refusal (a 422), got %v", machine, err)
+		}
+		for _, want := range []string{p, "32-bit", "SystemCallArchitectures=native", "build it for " + runtime.GOARCH} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("machine %d: refusal %q lacks %q", machine, err, want)
+			}
+		}
+		// The fix is the build target, not the runner: a runs-on hint
+		// would send the deployer to the wrong knob.
+		if strings.Contains(err.Error(), "runs-on") {
+			t.Errorf("machine %d: refusal %q names a runner; a 32-bit build is fixed by its target", machine, err)
+		}
 	}
 }

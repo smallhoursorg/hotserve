@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"runtime"
+	"strconv"
 	"syscall"
 )
 
@@ -18,10 +19,12 @@ import (
 // asks before any unit exists, and the refusal names the fix.
 //
 // Only the 64-bit machine families a box can be are known here: a
-// file for any other machine, and any file that is not ELF (a script,
-// a shim), passes — the check exists to name one mistake, not to
-// second-guess what the kernel will run (a 32-bit executable under a
-// compat kernel, say).
+// file for any other 64-bit machine, and any file that is not ELF (a
+// script, a shim), passes — the check exists to name mistakes, not to
+// second-guess what the kernel will run. A 32-bit executable is one of
+// them: app units run the native system-call ABI only
+// (SystemCallArchitectures=native, systemd_dbus.go), so on a 64-bit
+// box it would be killed at its first system call.
 
 // preflightError is a refusal the deployer can act on — the release
 // or the box's runtime layout as given — which the deploy reports as
@@ -40,9 +43,13 @@ var elfMachines = map[uint16]struct{ goarch, name string }{
 	243: {"riscv64", "RISC-V 64"},
 }
 
+// elf32 is elfMachine's goarch for any 32-bit (ELFCLASS32) executable,
+// whatever its machine.
+const elf32 = "elf32"
+
 // elfMachine reads path's ELF header and returns the Go architecture
-// name of the machine it was built for. Both "" when the file is not
-// ELF or is for a machine this check does not know.
+// name of the machine it was built for, or elf32. Both "" when the
+// file is not ELF or is for a 64-bit machine this check does not know.
 func elfMachine(path string) (goarch, name string, err error) {
 	// Non-blocking, then checked: a FIFO where the command should be —
 	// a release dir is the app's to write, and a rollback relaunches
@@ -84,8 +91,12 @@ func elfMachine(path string) (goarch, name string, err error) {
 	default:
 		return "", "", nil // not an encoding ELF defines: unclassified
 	}
-	if hdr[4] != 2 { // EI_CLASS: not ELFCLASS64 — a 32-bit file is the kernel's call
-		return "", "", nil
+	switch hdr[4] { // EI_CLASS
+	case 1:
+		return elf32, "32-bit", nil
+	case 2: // ELFCLASS64: the machine, below, decides
+	default:
+		return "", "", nil // not a class ELF defines: unclassified
 	}
 	m, ok := elfMachines[order.Uint16(hdr[18:20])]
 	if !ok {
@@ -95,13 +106,17 @@ func elfMachine(path string) (goarch, name string, err error) {
 }
 
 // checkMachine refuses an executable built for a 64-bit machine that
-// is not this box's, in the words the deployer can act on.
+// is not this box's, and on a 64-bit box a 32-bit one, in the words
+// the deployer can act on.
 func checkMachine(path string) error {
 	goarch, name, err := elfMachine(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
-	if goarch == "" || goarch == runtime.GOARCH {
+	if goarch == elf32 && strconv.IntSize == 64 {
+		return &preflightError{fmt.Sprintf("%s is a 32-bit executable, and an app on this box runs the native %s system-call ABI only (SystemCallArchitectures=native): build it for %s", path, runtime.GOARCH, runtime.GOARCH)}
+	}
+	if goarch == "" || goarch == elf32 || goarch == runtime.GOARCH {
 		return nil
 	}
 	if _, known := elfMachines[machineFor(runtime.GOARCH)]; !known {

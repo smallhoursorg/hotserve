@@ -22,7 +22,7 @@ var sandboxPropertyNames = []string{
 	"PrivateUsers", "PrivatePIDs", "PrivateTmp", "PrivateDevices",
 	"ProtectControlGroups", "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs",
 	"RestrictNamespaces", "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
-	"RestrictAddressFamilies", "SystemCallFilter", "SystemCallErrorNumber", "CapabilityBoundingSet",
+	"RestrictAddressFamilies", "SystemCallFilter", "SystemCallErrorNumber", "SystemCallArchitectures", "CapabilityBoundingSet",
 	"TemporaryFileSystem", "BindPaths", "BindReadOnlyPaths", "UnsetEnvironment",
 }
 
@@ -38,6 +38,20 @@ func propMap(u unitSpec) map[string]any {
 		got[p.Name] = p.Value.Value()
 	}
 	return got
+}
+
+// propValues is every value one property is given, in the order the
+// manager reads them. SystemCallFilter= is emitted twice, an allow
+// list and then a deny entry that edits it, and propMap keeps only
+// the last.
+func propValues(u unitSpec, name string) []any {
+	var vs []any
+	for _, p := range unitProperties(u) {
+		if p.Name == name {
+			vs = append(vs, p.Value.Value())
+		}
+	}
+	return vs
 }
 
 // Promise: the unit owns its socket file for as long as it runs — the
@@ -102,8 +116,14 @@ func TestSandboxPropertiesEveryUnit(t *testing.T) {
 	if fam, _ := got["RestrictAddressFamilies"].(allowList); !fam.AllowList || !reflect.DeepEqual(fam.Names, []string{"AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"}) {
 		t.Errorf("RestrictAddressFamilies = %+v", got["RestrictAddressFamilies"])
 	}
-	if f, _ := got["SystemCallFilter"].(allowList); !f.AllowList || !reflect.DeepEqual(f.Names, []string{"@system-service"}) {
-		t.Errorf("SystemCallFilter = %+v", got["SystemCallFilter"])
+	if f := propValues(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: spec}, "SystemCallFilter"); !reflect.DeepEqual(f, []any{
+		allowList{true, []string{"@system-service"}},
+		allowList{false, []string{"io_uring_setup"}},
+	}) {
+		t.Errorf("SystemCallFilter = %+v", f)
+	}
+	if a, _ := got["SystemCallArchitectures"].([]string); !reflect.DeepEqual(a, []string{"native"}) {
+		t.Errorf("SystemCallArchitectures = %+v", got["SystemCallArchitectures"])
 	}
 	// The whole filesystem, not just the liveswap root: this one line is
 	// the difference between "these paths are hidden" and "only these

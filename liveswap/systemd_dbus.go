@@ -406,6 +406,11 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		{Name: "PrivateUsers", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateTmp", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateDevices", Value: godbus.MakeVariant(true)},
+		// No PrivateIPC=: on systemd 257's user manager each process of
+		// a unit gets a user namespace of its own, so only the first can
+		// make the IPC namespace, and the unit's ExecStopPost
+		// (unitProperties) then fails 226/NAMESPACE on its /dev/mqueue
+		// mount (measured; #311).
 		// Read-only cgroupfs: the delegated subtree is owned by the
 		// app's own uid, so resource caps are otherwise rewritable.
 		{Name: "ProtectControlGroups", Value: godbus.MakeVariant(true)},
@@ -423,7 +428,19 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		// netlink cannot change anything.
 		{Name: "RestrictAddressFamilies", Value: godbus.MakeVariant(allowList{true, []string{"AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"}})},
 		{Name: "SystemCallFilter", Value: godbus.MakeVariant(allowList{true, []string{"@system-service"}})},
+		// Less io_uring_setup, which @system-service admits through @aio.
+		// A ring's IORING_OP_SOCKET (kernel 5.19+) opens a socket of any
+		// family without calling socket(2), and socket(2) is the only
+		// call RestrictAddressFamilies= filters. With no ring, the other
+		// two io_uring calls have nothing to act on. A deny entry after
+		// the allow list takes names out of it, as
+		// SystemCallFilter=~io_uring_setup does on a second unit-file line.
+		{Name: "SystemCallFilter", Value: godbus.MakeVariant(allowList{false, []string{"io_uring_setup"}})},
 		{Name: "SystemCallErrorNumber", Value: godbus.MakeVariant(errnoEPERM)},
+		// The native syscall ABI only. On amd64 the x86-32 ABI reaches
+		// socket(2) through socketcall(), and systemd does not apply
+		// RestrictAddressFamilies= to that ABI at all.
+		{Name: "SystemCallArchitectures", Value: godbus.MakeVariant([]string{"native"})},
 		{Name: "CapabilityBoundingSet", Value: godbus.MakeVariant(uint64(0))},
 		// Start from nothing. The two bind properties appended below
 		// put back the OS the app needs to run and the app's own

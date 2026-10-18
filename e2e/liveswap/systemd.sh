@@ -329,13 +329,25 @@ curl -fsS --max-time 5 http://127.0.0.1:8080/ | grep -q "probe" \
 	|| fail "the sandboxed release does not serve"
 # And the unit carries the properties the runner set.
 sunit=$(json_str "$(status)" unit)
-props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,InaccessiblePaths,LimitCORE,LimitCORESoft)
-for want in "PrivatePIDs=yes" "PrivateUsers=yes" "ProtectControlGroups=yes" "TemporaryFileSystem=/:ro" "LimitCORE=0" "LimitCORESoft=0"; do
+props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,InaccessiblePaths,LimitCORE,LimitCORESoft,SystemCallArchitectures)
+for want in "PrivatePIDs=yes" "PrivateUsers=yes" "ProtectControlGroups=yes" "TemporaryFileSystem=/:ro" "LimitCORE=0" "LimitCORESoft=0" "SystemCallArchitectures=native"; do
 	case "$props" in
 	*"$want"*) pass "unit property $want" ;;
 	*) fail "unit lacks $want: $props" ;;
 	esac
 done
+# The syscall filter the manager built: an allow list (no leading ~)
+# that still holds io_uring_enter, the rest of @aio, and not
+# io_uring_setup, whose ring would open sockets RestrictAddressFamilies=
+# never sees. Every app in this suite — Node, Deno, the demo — has been
+# starting under it, and under SystemCallArchitectures=native above.
+filter=" $(user_systemctl show -p SystemCallFilter --value "$sunit") "
+case "$filter" in
+" ~"*) fail "SystemCallFilter is a deny list: $filter" ;;
+*" io_uring_setup "*) fail "SystemCallFilter still allows io_uring_setup" ;;
+*" io_uring_enter "*) pass "SystemCallFilter is @system-service less io_uring_setup" ;;
+*) fail "SystemCallFilter holds no io_uring_enter, so @aio is missing and io_uring_setup's absence proves nothing: $filter" ;;
+esac
 # And the app saw the core-dump limit as 0/0 from inside.
 expect_probe core_soft 0
 expect_probe core_hard 0

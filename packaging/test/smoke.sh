@@ -784,6 +784,20 @@ varliblist=$(probe_val varlib_listing)
 	|| die "/var/lib inside the unit is '$varliblist', want only 'liveswap': anything else is a path nothing named"
 echo "in-unit base view: /bin/sh, /usr/bin/env, /usr/bin/hotserve, /etc/ssl/certs, /etc/resolv.conf; /etc=$etclist /var/lib=$varliblist"
 [ "$(user_systemctl show -p PrivateUsers --value "$unit")" = "yes" ] || die "unit lacks PrivateUsers=yes"
+[ "$(user_systemctl show -p SystemCallArchitectures --value "$unit")" = "native" ] \
+	|| die "unit lacks SystemCallArchitectures=native: on amd64 the x86-32 ABI's socketcall() opens any address family"
+# The syscall filter the manager built: an allow list (no leading ~)
+# that still holds io_uring_enter, the rest of @aio, and not
+# io_uring_setup, whose ring would open sockets RestrictAddressFamilies=
+# never sees.
+filter=" $(user_systemctl show -p SystemCallFilter --value "$unit") " \
+	|| die "could not read the unit's SystemCallFilter"
+case "$filter" in
+" ~"*) die "SystemCallFilter is a deny list: $filter" ;;
+*" io_uring_setup "*) die "SystemCallFilter still allows io_uring_setup" ;;
+*" io_uring_enter "*) ;;
+*) die "SystemCallFilter holds no io_uring_enter, so @aio is missing and io_uring_setup's absence proves nothing: $filter" ;;
+esac
 [ "$(user_systemctl show -p TemporaryFileSystem --value "$unit")" = "/:ro" ] || die "unit lacks TemporaryFileSystem=/:ro — the view is not deny-by-default"
 # The retired half of the old model, read back off the live unit. Both
 # properties still exist on every service, so test the value rather
@@ -792,7 +806,7 @@ echo "in-unit base view: /bin/sh, /usr/bin/env, /usr/bin/hotserve, /etc/ssl/cert
 case "$(user_systemctl show -p InaccessiblePaths --value "$unit")" in
 */*) die "unit still masks a list with InaccessiblePaths=" ;;
 esac
-echo "sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $(probe_val pid), $app_nprocs pids visible, /var/lib/hotserve $(probe_val hotserve_lib)"
+echo "sandbox (systemd $sd_version): uid_map range $app_uidmap, pid $(probe_val pid), $app_nprocs pids visible, native syscall ABI only, io_uring_setup filtered, /var/lib/hotserve $(probe_val hotserve_lib)"
 
 # `hotserve validate` provisions and cleans up without starting: run
 # as root (no user manager for uid 0) and as the hotserve user (the
