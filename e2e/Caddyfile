@@ -38,7 +38,10 @@
 		}
 
 		app demo {
-			command ./server
+			# The two words are for the app, not the shell or systemd:
+			# the server ignores them and reports them on /argv, where
+			# scenario 3 checks they arrived as written.
+			command ./server $HOME $$
 			# A secret the crash scenario's release prints: the failed
 			# deploy's response must carry the line with it redacted.
 			env_file /etc/hotserve/demo.env

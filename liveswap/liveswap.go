@@ -288,9 +288,11 @@ func (a *App) Provision(ctx caddy.Context) error {
 	}
 	// Global trust sources back the unknown-app path: a request for an
 	// app that does not exist is still authenticated (against the
-	// global sources) before its 404, so app names never leak to
-	// unauthenticated callers. The same wiring serves the box webhook
-	// (New).
+	// global sources) before its 404, so the status never leaks app
+	// names to unauthenticated callers; the time to the 401 still can,
+	// within the bound DESIGN-threat-model.md states ("Webhook
+	// endpoint", the residual; owed: #306). The same wiring serves the
+	// box webhook (New).
 	if a.globalVerifiers, err = deploytrust.Resolve(repl, a.DeployTrust, clients.jwks); err != nil {
 		return err
 	}
@@ -342,7 +344,7 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// known app does not pay the discovery round trip an unknown one
 	// would not. Warm leaves each key set empty, so the first token after
 	// a reload still waits on a key fetch (DESIGN-threat-model.md's
-	// timing residual). The objects warmed here are the ones Start
+	// timing residual; owed: #306). The objects warmed here are the ones Start
 	// installs (appVerifiers): resolving again at Start would hand the
 	// handler a cold set.
 	a.appVerifiers = make(map[string][]deploytrust.Verifier, len(specs))

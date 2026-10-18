@@ -83,21 +83,22 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 `deploy_trust` sources verify the token's signature and standard claims
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
-*global* trust sources, so no answer tells a caller which app names
-exist (`Handler.ServeHTTP`, liveswap/handler.go). **Residual: timing
-can** (S3 × O5 × D5 = 75, as #296 scored it; owed, #306). A token is
-checked against each source a name resolves to in turn, the signature
-before the issuer, so an OIDC source refuses a forged token after a
-local signature check when it holds the token's kid, and, when it does
-not, after a fetch of its issuer's keys that it makes at most once a
-minute (`keySet`, liveswap/deploytrust/jwks.go), whatever issuer the
-token names. A name that does not exist goes to the global sources: it
-is refused at once when they hold no OIDC source, and otherwise pays
-the same on their own key sets. The fetch
-window is per app, not shared across apps that trust the same issuer:
-each app's sources keep their own key set, so one unknown-kid token per
-app per minute can wait on an issuer round trip that one to a missing
-name, sent just before, did not. Config load refuses an app
+*global* trust sources, so its refusal is the same 401 as a known
+app's (`Handler.ServeHTTP`, liveswap/handler.go). The time to that 401
+need not be, and that is the **residual** (S3 × O5 × D5 = 75, as #296
+scored it; owed: #306). A token is checked against each source a name
+resolves to in turn, the signature before the issuer, so an OIDC
+source refuses a forged token after a local signature check when it
+holds the token's kid, and, when it does not, after a fetch of its
+issuer's keys that it makes at most once a minute (`keySet`,
+liveswap/deploytrust/jwks.go), whatever issuer the token names. A name
+that does not exist goes to the global sources: it is refused at once
+when they hold no OIDC source, and otherwise pays the same on their own
+key sets. The fetch window is per app, not shared across apps that
+trust the same issuer: each app's sources keep their own key set, so
+one unknown-kid token per app per minute can wait on an issuer round
+trip that one to a missing name, sent just before, did not, and an app
+name can be confirmed by timing. Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.
@@ -223,15 +224,17 @@ Properties that matter to the model:
   pool, a proxy without `trusted_proxies` or a unix-socket listener all
   collapse clients onto one key, and the throttle must never be a
   deploy-denial primitive for whoever shares it. Verification cost is
-  therefore not bounded by the throttle: a signature check, comparable
-  to the TLS handshake the request already paid, and, for a token under
-  a kid an OIDC source holds no key for, a fetch of the issuer's keys
-  that each source makes at most once a minute, every other such token
-  meanwhile waiting on that fetch or answered from its outcome (`keySet`,
-  liveswap/deploytrust/jwks.go). So the throttle is not what bounds
-  CPU, and once a source's discovery has succeeded, traffic does not
-  set how often the box fetches its issuer's keys; while discovery
-  fails, each verification tries it again (`oidcVerifier.ensure`,
+  therefore not bounded by the throttle. Against a local key it is one
+  signature check, comparable to the TLS handshake the request already
+  paid; against an OIDC source it is the same for a token under a kid
+  the source holds a key for, and, for one under a kid it does not, a
+  fetch of the issuer's keys that each source makes at most once a
+  minute, every other such token meanwhile waiting on that fetch or
+  answered from its outcome (`keySet`, liveswap/deploytrust/jwks.go;
+  the wait is owed: #306). So the throttle is not what bounds CPU, and
+  once a source's discovery has succeeded, traffic does not set how
+  often the box fetches its issuer's keys; while discovery fails, each
+  verification tries it again (`oidcVerifier.ensure`,
   liveswap/deploytrust/deploytrust.go), one at a time per source.
   One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
@@ -311,8 +314,13 @@ closed-by-default.
 `https` only unless `allow_insecure_http` (`downloadArtifact`,
 liveswap/download.go), re-enforced on **every redirect hop** by the
 `CheckRedirect` closure in `newDownloadClient` — closing Go's default
-https→http downgrade. `auth_header` is stripped by stdlib on cross-host
-redirects but **not** same-host (also `downloadArtifact`). Size:
+https→http downgrade. `auth_header` is set on the first request only
+(also `downloadArtifact`), and Go's client carries it across a redirect
+only while the hop's host is the first hop's or a subdomain of it, on
+any port (`shouldCopyHeaderOnRedirect` in net/http); from the first hop
+outside that domain it is dropped for good. So the credential reaches
+the allowlisted host and its subdomains, and nothing past a redirect
+off them: GitHub's asset redirect to its storage host drops it. Size:
 Content-Length pre-check plus streaming `LimitReader`, default 100 MB
 (`downloadArtifact`; the default is set in `AppConfig.applyDefaults`,
 liveswap/liveswap.go).
@@ -938,16 +946,20 @@ or a minimal privileged helper, never as a system-manager transient
 grant.
 
 **The property set**, on every unit — `unitProperties` renders the
-lifecycle properties and appends `sandboxProperties` for the rest
-(liveswap/systemd_dbus.go):
+lifecycle properties and appends `sandboxProperties` for the rest, and
+`userManagerClient.StartTransientUnit` adds `LimitNOFILE=`
+(liveswap/systemd_dbus.go). The capability probe's unit (below) is a
+`oneshot` run from `/`, with no `BindPaths=` and no `ExecStopPost=`:
+it binds nothing of an app's and has no socket.
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
   `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app
   cannot create further namespaces).
 - View: `TemporaryFileSystem=/:ro` replaces the whole filesystem with
   an empty read-only tmpfs; `BindReadOnlyPaths=` puts back a named OS
-  base view and `BindPaths=` the app's release and `shared/` dirs.
-  Nothing else exists inside. There is no `InaccessiblePaths=` and no
+  base view and `BindPaths=` the release being started, the app's
+  `shared/` and the instance's own `run/<nonce>/`. Nothing else exists
+  inside. There is no `InaccessiblePaths=` and no
   `ProtectSystem=` because there is nothing left for either to act on
   — an unnamed path is absent, not merely unreadable. The view is
   deny-by-default, so nothing is derived from the running
@@ -960,14 +972,24 @@ lifecycle properties and appends `sandboxProperties` for the rest
   `LockPersonality=`, `NoNewPrivileges=`, `CapabilityBoundingSet=`
   (empty), `SystemCallFilter=@system-service` with
   `SystemCallErrorNumber=EPERM`, `RestrictAddressFamilies=AF_INET
-  AF_INET6 AF_UNIX AF_NETLINK` (netlink stays read-only for
-  `getifaddrs()`, which Node and Go frameworks call at startup).
+  AF_INET6 AF_UNIX AF_NETLINK` (netlink for `getifaddrs()`, which Node
+  and Go frameworks call at startup; the socket itself is not
+  read-only, but changing a link, an address or a route needs
+  `CAP_NET_ADMIN`, which nothing in the unit holds).
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
   restarter of apps; hotserve.service itself is restarted by systemd
   after a crash, never after a refused start), `KillMode=control-group`,
+  `TimeoutStopSec=` (the app's `grace`), `ExecStopPost=` (removes the
+  instance's socket once the unit stops, however it stopped),
   `LimitCORE=0` on both limits (no core dump of an app; "Where
-  `env_file` values sit", above),
+  `env_file` values sit", above), `LimitNOFILE=` on both limits at the
+  user manager's `DefaultLimitNOFILE` when the manager reports one (the
+  package raises it with a `user@<uid>.service.d` drop-in),
   `UnsetEnvironment=XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS`.
+- What it runs: `Type=simple` (`oneshot` for a `pre_start`),
+  `ExecStart=`, `WorkingDirectory=` (the release dir), `Environment=`,
+  `Description=`, `SyslogIdentifier=hotserve-<app>`,
+  `StandardOutput=journal`, `StandardError=journal`.
 
 **The probe stays.** At `App.Start` — every config activation —
 hotserve starts a real transient unit with this property set and reads

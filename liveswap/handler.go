@@ -53,7 +53,10 @@ func loggedAppName(name string) string {
 // Responses are synchronous — the POST returns when the deploy has
 // fully succeeded (200) or failed (5xx with the old version, if there
 // was one, still serving), so `curl --fail-with-body` makes CI red exactly when it
-// should be, with the reason in the body.
+// should be, with the reason in the body. A POST that asks for the
+// stream (Accept: application/x-ndjson) is the exception: once its
+// first phase line is out the status is 200 whatever the outcome, and
+// the last line's http_status carries the 5xx (deployStream).
 type Handler struct {
 	app     *App
 	logger  *zap.Logger
@@ -90,9 +93,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 
 	// Authenticate before revealing whether the app exists. For an
 	// unknown app the token is verified against the global trust
-	// sources, so timing and status never leak valid app names to
+	// sources, so the status never leaks valid app names to
 	// unauthenticated callers (with no global trust configured, an
-	// unknown app is simply unauthenticable → 401, still no leak).
+	// unknown app is simply unauthenticable → 401). The time to the
+	// 401 still can, within the bound DESIGN-threat-model.md states
+	// ("Webhook endpoint", the residual; owed: #306).
 	verifiers := h.app.globalVerifiers
 	if ma != nil {
 		verifiers = ma.currentVerifiers()

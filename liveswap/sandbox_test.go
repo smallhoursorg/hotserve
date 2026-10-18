@@ -282,15 +282,15 @@ func TestSandboxProbeCommand(t *testing.T) {
 	if full[0] != "/bin/sh" || full[1] != "-c" || len(full) != 3 {
 		t.Fatalf("probe must be a single sh -c script, got %v", full)
 	}
-	// systemd turns "$$" into "$" in ExecStart arguments, so the shell
-	// pid must be spelled "$$$$" and a bare "$$" must never appear.
-	if !strings.Contains(full[2], "uid_map") || !strings.Contains(full[2], `"$$$$" = 1`) {
+	// The unit's argv reaches the shell byte for byte (ExecStartEx with
+	// no-env-expand), so the shell's pid is spelled "$$" — and "$$$$",
+	// the spelling systemd's substitution once needed, would now reach
+	// the shell as the pid twice and fail the check on every host.
+	if !strings.Contains(full[2], "uid_map") || !strings.Contains(full[2], `"$$" = 1`) {
 		t.Fatalf("full probe checks both namespaces: %q", full[2])
 	}
-	for _, s := range []string{full[2]} {
-		if strings.Contains(strings.ReplaceAll(s, "$$$$", ""), "$$") {
-			t.Fatalf("a bare $$ would reach the shell as $: %q", s)
-		}
+	if strings.Contains(full[2], "$$$$") {
+		t.Fatalf("$$$$ reaches the shell as the pid twice: %q", full[2])
 	}
 }
 

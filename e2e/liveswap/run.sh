@@ -90,6 +90,13 @@ case "$b" in
 "hello v1"*) pass "proxy serves v1: '$b'" ;;
 *) fail "expected 'hello v1 ...', got '$b'" ;;
 esac
+# The command's words reach the app byte for byte (e2e/Caddyfile: `./server
+# $HOME $$`). With systemd's environment substitution on, the unit would
+# have run the server with HOME's value and a single "$".
+a=$(curl -s --max-time 5 "$PROXY/argv")
+[ "$a" = '["$HOME" "$$"]' ] \
+	&& pass "the command's words reach the app as written: $a" \
+	|| fail "the app got other words than the command's \$HOME \$\$: '$a'"
 
 echo "=== scenario 4: zero-downtime cutover to v2 under continuous traffic ==="
 traffic_start /tmp/codes-cutover

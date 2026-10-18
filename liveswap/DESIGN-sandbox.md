@@ -131,8 +131,8 @@ below as a contract the sandbox path must keep.
   fails `203/EXEC` — measured, and exactly what the capability probe
   (which has no directories of its own) would otherwise do. Empty list
   properties MUST NOT be emitted.
-- An app's mandatory binds — the release being started and `shared/` —
-  MUST resolve to the directories they name, and a launch whose bind
+- An app's mandatory binds — the release being started, `shared/` and
+  the instance's `run/<nonce>/` — MUST resolve to the directories they name, and a launch whose bind
   source resolves anywhere else MUST be refused. The only permitted
   difference is one an alias on the liveswap root itself explains.
   Resolution to a path outside the root is unsound: the app's own
@@ -257,9 +257,9 @@ below as a contract the sandbox path must keep.
 
 ## Config surface
 
-There is none. The view is exactly `sandboxBaseView` plus the app's
-own release and `shared/` dirs, and nothing in the Caddyfile widens or
-disables it; a config naming `sandbox` fails to load
+There is none. The view is the one listed above — `sandboxBaseView`
+plus the app's own release, `shared/` and `run/<nonce>/` dirs — and
+nothing in the Caddyfile widens or disables it; a config naming `sandbox` fails to load
 (`TestRetiredSandboxConfigIsRejected`). Raw unit directives are
 deliberately not exposed — hand-rolled flag soup is the "looks
 configured, quietly weaker" failure mode. See "`extra_path` — rules
@@ -371,8 +371,8 @@ the manager; a namespace policy changed underneath a running hotserve
 There is deliberately no uncached preflight: the cache is what keeps a
 throwaway unit off Caddy's reload path.
 
-Nothing here is destructive: the release and `shared/` are
-bind-mounted at their real paths and everything else is simply absent
+Nothing here is destructive: the release, `shared/` and the
+instance's `run/<nonce>/` are bind-mounted at their real paths and everything else is simply absent
 from the unit's view — `state.json` included, which the supervisor
 still reads and writes as itself. hotserve itself is never sandboxed.
 

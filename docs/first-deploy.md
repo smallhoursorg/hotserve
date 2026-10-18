@@ -88,11 +88,12 @@ systemctl enable --now hotserve
 <summary><b>To install a release candidate</b></summary>
 
 A release candidate's `.deb` has a dot where its tag has a hyphen —
-`hotserve_0.3.0.rc2_arm64.deb` under `v0.3.0-rc2` — so the block above
-does not fit it as it stands. This one does:
+`hotserve_X.Y.Z.rcN_arm64.deb` under `vX.Y.Z-rcN` — so the block above
+does not fit it as it stands. This one does, with `<tag>` replaced by
+the tag the maintainer announced, without its `v`:
 
 ```sh
-v=0.3.0-rc2                         # the candidate's tag, without the v
+v='<tag>'                           # the announced tag, without the v
 arch=$(dpkg --print-architecture)   # amd64 or arm64
 deb=hotserve_$(echo "$v" | tr - .)_${arch}.deb
 base=https://github.com/smallhoursorg/hotserve/releases/download/v$v
@@ -104,7 +105,7 @@ systemctl enable --now hotserve
 ```
 
 The box's repository (step 3) then needs its Actions variable
-`HOTSERVE_VERSION` set to the same version, `0.3.0-rc2`: its workflow
+`HOTSERVE_VERSION` set to the same `<tag>`: its workflow
 checks with the latest stable release unless told otherwise, and a
 release candidate is never that. (With more than one box, a
 `HOTSERVE_VERSION` file beside this box's Caddyfile pins this box
