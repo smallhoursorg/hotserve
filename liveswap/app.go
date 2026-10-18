@@ -730,6 +730,12 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		}
 	}()
 
+	// Before anything is read or written through the app's dirs: one
+	// that is not the directory it names would have this deploy write
+	// into whatever it points at (writeRefusal).
+	if err := spec.dirs.writeRefusal(); err != nil {
+		return err
+	}
 	old := ma.currentInstance()
 	if old != nil && old.version == req.version && c.runner.Alive(old.handle) {
 		// The version that is running, asked for again: relaunched from
