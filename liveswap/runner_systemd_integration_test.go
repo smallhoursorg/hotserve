@@ -5,7 +5,6 @@ package liveswap
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	sddbus "github.com/coreos/go-systemd/v22/dbus"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
@@ -713,60 +713,82 @@ func TestIntegrationSystemdSandboxProbe(t *testing.T) {
 	}
 }
 
-// TestIntegrationSandboxProbeRefusesAnUnfilteredUnit runs the probe's
-// own script in two units with the same namespaces, one with a syscall
-// filter and one without: the script must pass the first and fail the
-// second, on its seccomp check. That is the host where the manager
-// skips SystemCallFilter= (no seccomp), which
-// TestIntegrationSystemdSandboxProbe cannot stand in for, since this
-// kernel has seccomp. The units come from systemd-run rather than the
-// runner, which only builds the full sandbox. Oneshot, so the start
-// job fails when the script does; --expand-environment=no, so "$$"
-// reaches the shell as the runner's units pass it; --collect, so the
-// failed unit does not stay loaded.
+// TestIntegrationSandboxProbeRefusesAnUnfilteredUnit starts the
+// capability probe's own unit, built as probeSandboxCapability builds
+// it (probeStartSpec, unitFor, unitProperties), three times: whole;
+// without RestrictNamespaces=, where the mode still reads 2 as it
+// would from a filter the manager inherited and the unshare check must
+// fail it; and without any seccomp-backed setting, which is what the
+// manager runs where seccomp is unavailable to it, and where the mode
+// check must fail it. Each failure must be the one the probe's journal
+// line names. TestIntegrationSystemdSandboxProbe cannot stand in for
+// the last two, since this host delivers the whole set.
 func TestIntegrationSandboxProbeRefusesAnUnfilteredUnit(t *testing.T) {
-	if err := userManager.probe(); err != nil {
-		t.Fatalf("no systemd user manager (run via `make test-integration`): %v", err)
+	r := integrationRunner(t)
+	conn, err := userManager.get()
+	if err != nil {
+		t.Fatal(err)
 	}
-	script := sandboxProbeCommand()[2]
-	probe := func(ident string, filtered bool) error {
-		args := []string{"--user", "--quiet", "--collect", "--service-type=oneshot", "--expand-environment=no",
-			"-p", "PrivateUsers=yes", "-p", "PrivatePIDs=yes", "-p", "SyslogIdentifier=" + ident}
-		if filtered {
-			args = append(args, "-p", "SystemCallFilter=@system-service")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "systemd-run", append(args, "/bin/sh", "-c", script)...)
-		// systemd-run --user wants a bus; the manager's private socket
-		// is one, and the only one this container has.
-		cmd.Env = append(os.Environ(), "DBUS_SESSION_BUS_ADDRESS=unix:path="+userManagerSocket())
-		out, err := cmd.CombinedOutput()
+	probe := func(drop ...string) (result, line string) {
+		t.Helper()
+		nonce, err := newNonce()
 		if err != nil {
-			return fmt.Errorf("%w: %s", err, out)
+			t.Fatal(err)
 		}
-		return nil
-	}
-	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
-	if err := probe("itest-probe-filtered-"+nonce, true); err != nil {
-		t.Fatalf("with a filter and both namespaces the probe must pass, or the refusal below proves nothing: %v", err)
-	}
-	ident := "itest-probe-unfiltered-" + nonce
-	if err := probe(ident, false); err == nil {
-		t.Fatal("the probe passed in a unit with no syscall filter: a host whose manager skips SystemCallFilter= would start apps unfiltered (or this container runs under a seccomp filter of its own)")
-	}
-	// Refused on its seccomp check, not on anything else that differs:
-	// the probe's own journal line names the mode it saw.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		line := run(t, "journalctl", "--no-pager", "-o", "cat", "-t", ident)
-		if strings.Contains(line, ", seccomp 0") {
-			break
+		u, err := r.unitFor(probeStartSpec(nonce), true)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the unfiltered probe failed, but its journal line does not say seccomp 0: %q", line)
+		var props []sddbus.Property
+		for _, p := range unitProperties(u) {
+			if !slices.Contains(drop, p.Name) {
+				props = append(props, p)
+			}
 		}
-		time.Sleep(100 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
+		defer cancel()
+		ch := make(chan string, 1)
+		if _, err := conn.StartTransientUnitContext(ctx, u.Name, "fail", props, ch); err != nil {
+			t.Fatalf("starting %s: %v", u.Name, err)
+		}
+		if result, err = jobResult(ctx, ch); err != nil {
+			t.Fatalf("waiting for %s: %v", u.Name, err)
+		}
+		_ = conn.ResetFailedUnitContext(ctx, u.Name)
+		// The probe's own line names what it saw; the journal may take
+		// a moment to have it.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			out, _ := exec.Command("journalctl", "--no-pager", "-o", "cat", "_SYSTEMD_USER_UNIT="+u.Name).CombinedOutput()
+			if line = string(out); strings.Contains(line, "sandbox probe:") || time.Now().After(deadline) {
+				return result, line
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	// Every setting the manager applies through seccomp, and so skips
+	// together where seccomp is unavailable to it. A new one added to
+	// sandboxProperties without being listed here leaves the mode at 2,
+	// and the last case below fails, naming it.
+	seccompBacked := []string{"SystemCallFilter", "SystemCallErrorNumber", "SystemCallArchitectures",
+		"RestrictAddressFamilies", "RestrictNamespaces", "RestrictRealtime", "RestrictSUIDSGID",
+		"LockPersonality", "ProtectKernelModules", "ProtectKernelLogs", "ProtectKernelTunables", "PrivateDevices"}
+	for _, c := range []struct {
+		name, want string
+		pass       bool
+		drop       []string
+	}{
+		{"whole", ", seccomp 2, unshare refused", true, nil},
+		{"no RestrictNamespaces", ", seccomp 2, unshare allowed", false, []string{"RestrictNamespaces"}},
+		{"no seccomp-backed setting", ", seccomp 0, unshare allowed", false, seccompBacked},
+	} {
+		result, line := probe(c.drop...)
+		if (result == "done") != c.pass {
+			t.Errorf("%s: the probe unit's job is %q, want passed=%v: %q", c.name, result, c.pass, line)
+		}
+		if !strings.Contains(line, c.want) {
+			t.Errorf("%s: the probe's journal line does not say %q: %q", c.name, c.want, line)
+		}
 	}
 }
 

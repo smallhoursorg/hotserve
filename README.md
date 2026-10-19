@@ -69,8 +69,13 @@ pushed from a box repository, the root applier's units
 (`hotserve-box.tmpfiles`) and the box's key (`hotserve box key`, as
 root). The sandbox applies here too, so the host
 needs systemd 257 or newer and has to deliver both namespaces (many
-container and LXC hosts cannot) and a seccomp filter, and hotserve
-refuses to start rather than run your apps unprotected.
+container and LXC hosts cannot) and seccomp. hotserve checks both from
+inside a test unit at start and refuses to start rather than run your
+apps without them. One case passes that check: a container host whose
+existing seccomp rules leave the kernel no room for the app units'
+system-call filter
+([liveswap/DESIGN-sandbox.md](liveswap/DESIGN-sandbox.md), "What this
+does NOT stop").
 
 **systemd is not optional.** liveswap runs your apps as transient
 units on your user's systemd manager and there is no fallback runner,

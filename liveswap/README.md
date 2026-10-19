@@ -617,11 +617,20 @@ host and why the package ships no LSM policy of its own. Some kernels
 refuse them — an LSM restriction on unprivileged user namespaces, or a
 container or LXC host with them off entirely. hotserve does not work around
 that: it probes, and a host that cannot deliver the namespaces refuses
-to start rather than running apps bare. A kernel without seccomp,
-where systemd skips the syscall filter, is refused the same way. `journalctl -t
-hotserve-sandbox-probe` says why it refused. The fix is the host's:
-permit unprivileged user namespaces for hotserve's user manager, or
-move to Debian 13. There is no way to run there without the sandbox.
+to start rather than running apps bare. So does a host where systemd
+skips the units' seccomp settings: a kernel without seccomp,
+`SYSTEMD_SECCOMP=0` in the user manager's environment, or a container
+whose own filter stops systemd installing one. The probe reads the
+seccomp mode inside its unit and checks that `RestrictNamespaces=`
+refuses it a user namespace. `journalctl -t hotserve-sandbox-probe`
+says why it refused (`seccomp 0`, `unshare allowed`). The fix is the
+host's: permit unprivileged user namespaces and seccomp for hotserve's
+user manager, or move to Debian 13. There is no way to run there
+without the sandbox. One case the probe cannot see: a container host
+whose existing seccomp rules leave the kernel no room for the units'
+system-call filter, which then does not load while the rest of the
+sandbox does ([DESIGN-sandbox.md](DESIGN-sandbox.md), "What this does
+NOT stop").
 
 ## Runtime permissions (Deno, Node)
 

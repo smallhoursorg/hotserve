@@ -309,12 +309,20 @@ func TestSandboxProbeCommand(t *testing.T) {
 	if !strings.Contains(full[2], "uid_map") || !strings.Contains(full[2], `"$$" = 1`) {
 		t.Fatalf("full probe checks both namespaces: %q", full[2])
 	}
-	// And the syscall filter: the manager skips SystemCallFilter= where
-	// seccomp is unavailable, so the probe requires the filter mode in
-	// its own status, read by the shell (the unit's PATH is no promise
-	// that grep or sed is there).
+	// And seccomp: the manager skips every seccomp-backed setting where
+	// seccomp is unavailable to it, so the probe requires the filter
+	// mode in its own status, read by the shell itself.
 	if !strings.Contains(full[2], "< /proc/self/status") || !strings.Contains(full[2], `[ "$s" = 2 ]`) {
 		t.Fatalf("full probe checks the syscall filter is in force: %q", full[2])
+	}
+	// And that the unit's own seccomp set is there, not a mode inherited
+	// from the manager: RestrictNamespaces= refuses a user namespace with
+	// EPERM, and is skipped exactly when the whole set is. Refused means
+	// EPERM, never just a non-zero exit (a missing unshare must not pass).
+	for _, clause := range []string{"unshare -U true", `*"Operation not permitted"*) u=refused`, `[ "$u" = refused ]`} {
+		if !strings.Contains(full[2], clause) {
+			t.Fatalf("full probe lacks %q: %q", clause, full[2])
+		}
 	}
 	if strings.Contains(full[2], "$$$$") {
 		t.Fatalf("$$$$ reaches the shell as the pid twice: %q", full[2])
@@ -548,6 +556,13 @@ func TestProbeSandboxCapability(t *testing.T) {
 				}
 				if !reflect.DeepEqual(s.command, sandboxProbeCommand()) {
 					t.Errorf("probe command mismatch: %v", s.command)
+				}
+				// The script matches unshare's English EPERM text, and a
+				// unit gets the manager's default environment (LANG
+				// included) under its own: without LC_ALL=C a translated
+				// strerror would refuse a capable host.
+				if !slices.Contains(s.env, "LC_ALL=C") {
+					t.Errorf("probe env %v lacks LC_ALL=C", s.env)
 				}
 				if !s.probe {
 					t.Error("the probe unit must be marked as one, or a sweep can mistake it for an app's")

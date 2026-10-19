@@ -39,13 +39,36 @@ What this does NOT stop, stated honestly: theft of the compromised
 app's own secrets (its env is its env), network exfiltration (netns is
 shared by design), resource exhaustion (caps are unset until an app
 needs them — #71), install-time supply-chain attacks (those run in
-CI, not on the box), and IPC between siblings: every app shares the
-user manager's SysV IPC and POSIX message queues, and the host's
+CI, not on the box), a syscall filter the kernel refused on a host
+that already filters the user manager, and IPC between siblings:
+every app shares the user manager's SysV IPC and POSIX message
+queues, and the host's
 `/dev/shm`, where POSIX shared memory and named semaphores live, which
 `PrivateDevices=` binds into every unit. `PrivateIPC=` would cover the
 first two, but on systemd 257's user manager it fails every unit's
 `ExecStopPost=` with 226/NAMESPACE, and it does not cover `/dev/shm`
 (#311, owed: S3 × O3 × D5 = 45).
+
+The refused filter is the one route around the syscall filter that the
+capability probe cannot see. Each seccomp filter on a process counts
+against one kernel budget of 32768 instructions for the whole chain.
+On a host whose user manager already runs under a long outer chain (a
+container runtime's profile, say), the kernel can refuse the unit's
+`SystemCallFilter=`, which the manager loads after its other seccomp
+settings. The kernel refuses with `ENOMEM`; libseccomp 2.6 hands that
+back as `ECANCELED` unless a filter asks for raw errors
+(`sys_filter_load`, `SCMP_FLTATR_API_SYSRAWRC`), which systemd 257's
+do not; and systemd counts only `EPERM`, `EACCES`, `ENOMEM` and
+`EFAULT` as fatal (`ERRNO_IS_NEG_SECCOMP_FATAL`), so it logs the
+failure at debug level and starts the unit anyway, its other filters
+in force, without the allow list and the `io_uring_setup` deny. Such a
+unit reads `Seccomp: 2` and refuses `unshare -U` like any other, so
+nothing the probe reads tells it apart (S5 × O5 × D5 = 125: scores to
+fix; accepted by decision, user, 2026-10-19). A second probe unit
+could: one with every seccomp setting but `SystemCallFilter=`, whose
+`Seccomp_filters:` count the whole unit must exceed. That is not
+built (the same decision); it would be a second throwaway unit inside
+the start budget that `TimeoutStartSec=` is sized on.
 
 The mount namespace alone does not close the threat model: the
 attacker just described dumps `process.env` first, and a stolen ACME
@@ -331,11 +354,20 @@ spec without a sandbox.
 **The probe.** At `App.Start` — every config activation —
 `probeSandboxCapability` starts a throwaway unit with the same property
 set whose script reads `/proc/self/uid_map`, its own pid and the
-`Seccomp:` line of `/proc/self/status`, and passes only if the uid range
-is not the host's, the pid is 1 and the mode is 2 — both namespaces
-engaged and seccomp in force, which the manager otherwise skips for
-every seccomp-backed setting at once. The mode does not say whose
-filter it is: one the manager itself runs under also reads 2. One attempt, one retry on timeout only (the shape a
+`Seccomp:` line of `/proc/self/status`, and tries `unshare -U true`. It
+passes only if the uid range is not the host's, the pid is 1, the mode
+is 2 and the unshare is refused with EPERM — both namespaces engaged
+and the unit's seccomp set in force. Where seccomp is unavailable to
+it (no seccomp in the kernel, `SYSTEMD_SECCOMP=0` in its environment,
+or an outer filter that refuses it one), the manager skips every
+seccomp-backed setting at once, with a debug line. The mode alone says
+neither whose filter is loaded (one the manager itself runs under
+reads 2 as well) nor which of the unit's several; the refused unshare
+is `RestrictNamespaces=`, skipped exactly when the whole set is. One
+case passes both checks: `SystemCallFilter=` alone not loading while
+the rest do ("What this does NOT stop").
+
+One attempt, one retry on timeout only (the shape a
 capable host under boot load produces; a refused start exits 1, which
 hotserve.service deliberately never retries, so without it one slow
 attempt keeps a capable box down until someone starts it by hand),

@@ -1002,8 +1002,9 @@ it binds nothing of an app's and has no socket.
 
 **The probe stays.** At `App.Start` — every config activation —
 hotserve starts a real transient unit with this property set and reads
-back from inside it that both namespaces engaged and that seccomp is in
-force (`Seccomp: 2`). The verdict is
+back from inside it that both namespaces engaged and that the unit's
+own seccomp set is in force (`Seccomp: 2`, and a user namespace
+`RestrictNamespaces=` refuses it). The verdict is
 cached against the manager connection's generation
 (`userManagerClient.cachedSandboxCapability`): later activations on
 the same connection read the cache, and a redial (a manager restart,
@@ -1151,6 +1152,15 @@ does not isolate the runtime.
   of a unit gets its own user namespace, so the unit's `ExecStopPost=`
   cannot join the IPC namespace its main process made and fails
   226/NAMESPACE (measured), and it would leave `/dev/shm` shared.
+- **A syscall filter the kernel refused** — accepted by decision (user,
+  2026-10-19; S5 × O5 × D5 = 125, scores to fix). On a host whose user
+  manager already runs under a long outer seccomp chain, the kernel can
+  refuse the unit's `SystemCallFilter=` over its 32768-instruction
+  budget, and systemd starts the unit without it, with a debug line.
+  The unit's other filters still load, so the capability probe's
+  checks pass. The app then has its namespaces, view and empty
+  capability set, but not the allow list or the `io_uring_setup` deny
+  (liveswap/DESIGN-sandbox.md, "What this does NOT stop").
 - **The socket name is app-writable, and `connect(2)` follows
   symlinks.** The instance's `run/<nonce>/` is bound writable, so an
   app can replace its socket with a symlink to a socket outside its

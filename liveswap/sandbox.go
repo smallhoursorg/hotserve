@@ -397,24 +397,59 @@ func probeSandboxSpec() *sandboxSpec {
 // a unit built with probeSandboxSpec. It checks the namespaces and
 // seccomp are in effect — not merely that the manager accepted the
 // properties: the manager ignores PrivatePIDs= on a kernel without PID
-// namespaces, and where seccomp is unavailable to it skips
-// SystemCallFilter= with every other seccomp-backed setting at once,
-// while a user namespace the kernel or an LSM refuses fails the unit
-// outright. In a user namespace the process's own uid_map covers a
-// single id, not the 2^32-1 of the initial namespace; in a PID
-// namespace the executed process is PID 1; under a seccomp filter its
-// status reads `Seccomp: 2`. The mode does not say whose filter: one
-// the manager itself runs under reads 2 as well.
+// namespaces, and where seccomp is unavailable to it (no seccomp in
+// the kernel, SYSTEMD_SECCOMP=0 in its environment, or an outer filter
+// that refuses to let it install one) skips every seccomp-backed
+// setting at once with a debug line, while a user namespace the kernel
+// or an LSM refuses fails the unit outright. In a user namespace the
+// process's own uid_map covers a single id, not the 2^32-1 of the
+// initial namespace; in a PID namespace the executed process is PID 1.
+//
+// Two checks cover seccomp. `Seccomp: 2` in the process's status says
+// some filter is loaded, but neither whose — one the manager itself
+// runs under reads 2 as well — nor which of the unit's several. So
+// the probe also tries `unshare -U`, which RestrictNamespaces= (the
+// empty set, sandboxProperties) refuses with EPERM: that setting is
+// skipped exactly when the whole set is, so a namespace the probe can
+// make means the unit's own filters are not there, whatever mode it
+// inherited. An outer filter cannot refuse that unshare for the unit
+// either: the manager makes the same unshare(CLONE_NEWUSER) call for
+// PrivateUsers=, so such a filter fails the unit first. What neither
+// check can see is SystemCallFilter= alone not loading while the rest
+// do (DESIGN-sandbox.md, "What this does NOT stop").
 func sandboxProbeCommand() []string {
 	// The echo lands in the journal under the probe unit's identifier
 	// (hotserve-sandbox-probe), so a refused host can be diagnosed
 	// from `journalctl -t hotserve-sandbox-probe`. The argv reaches the
 	// shell byte for byte, as every unit's command does (no-env-expand,
 	// see unitProperties), so the script is spelled as a shell reads it.
-	// Builtins only: /proc/self/status is read by the shell itself, so
-	// the mode is the probe process's own, and a status with no
-	// Seccomp: line (a kernel without seccomp) reads `absent`.
-	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; s=absent; while read -r k v; do [ "$k" = Seccomp: ] && s=$v; done < /proc/self/status; echo "sandbox probe: uid_map range $n, pid $$, seccomp $s"; [ "$n" != 4294967295 ] && [ "$$" = 1 ] && [ "$s" = 2 ]`}
+	// /proc/self/status is read by the shell itself, so the mode is the
+	// probe process's own, and a status with no Seccomp: line (a kernel
+	// without seccomp) reads `absent`. unshare (util-linux, Essential on
+	// Debian) counts as refused only on EPERM's text, which LC_ALL=C
+	// (probeStartSpec) keeps in English: a missing binary or a namespace
+	// limit (ENOSPC) is a failure of its own, named on the journal line,
+	// not a pass.
+	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; s=absent; while read -r k v; do [ "$k" = Seccomp: ] && s=$v; done < /proc/self/status; e=$(unshare -U true 2>&1); case $?:$e in 0:*) u=allowed ;; *"Operation not permitted"*) u=refused ;; *) u="failed: $e" ;; esac; echo "sandbox probe: uid_map range $n, pid $$, seccomp $s, unshare $u"; [ "$n" != 4294967295 ] && [ "$$" = 1 ] && [ "$s" = 2 ] && [ "$u" = refused ]`}
+}
+
+// probeStartSpec is one probe unit's spec. LC_ALL=C because the
+// script reads unshare's error text, and a unit's environment is the
+// manager's defaults under the one given here (runner_systemd.go,
+// invariant 8): a host whose locale translates strerror would
+// otherwise turn a refusal into a failure, on a capable box.
+func probeStartSpec(nonce string) startSpec {
+	return startSpec{
+		app:     "sandbox-probe",
+		version: "probe",
+		nonce:   nonce,
+		command: sandboxProbeCommand(),
+		dir:     "/",
+		env:     []string{"PATH=/usr/bin:/bin", "LC_ALL=C"},
+		grace:   5 * time.Second,
+		sandbox: probeSandboxSpec(),
+		probe:   true,
+	}
 }
 
 // sandboxProbeTimeout bounds one probe unit: a shell that exits at
@@ -457,17 +492,7 @@ func probeSandboxCapability(r runner) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
 		defer cancel()
-		return r.RunOnce(ctx, startSpec{
-			app:     "sandbox-probe",
-			version: "probe",
-			nonce:   nonce,
-			command: sandboxProbeCommand(),
-			dir:     "/",
-			env:     []string{"PATH=/usr/bin:/bin"},
-			grace:   5 * time.Second,
-			sandbox: probeSandboxSpec(),
-			probe:   true,
-		})
+		return r.RunOnce(ctx, probeStartSpec(nonce))
 	}
 	err := attempt()
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -489,7 +514,7 @@ func probeSandboxCapability(r runner) error {
 		err = attempt()
 	}
 	if err != nil {
-		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13: PrivatePIDs= needs systemd 257, both namespaces need a kernel that permits them, and the syscall filter needs seccomp", err)
+		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13: PrivatePIDs= needs systemd 257, both namespaces need a kernel that permits them, and the syscall filter needs seccomp the user manager can apply to the unit (the probe's line says which check failed: \"seccomp 0\" or \"unshare allowed\" means the manager skipped the unit's seccomp settings)", err)
 	}
 	return nil
 }
