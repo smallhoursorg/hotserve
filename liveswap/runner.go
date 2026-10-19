@@ -91,8 +91,29 @@ type runner interface {
 	// is running: callers sweep before trusting their own view of an
 	// app (recovery) and before deleting any release (GC). nil means
 	// keep is now the only unit of the app; any error means something
-	// may still be running and nothing may be deleted.
+	// may still be running and nothing may be deleted. A running
+	// pre_start is left to finish, never stopped: the sweep reports it
+	// (migrationRunningError) and is unconfirmed until it has ended.
 	Sweep(app string, keep handle) error
+
+	// StopAll stops every unit of app, a running pre_start included:
+	// the app is going (a reload removed it), so nothing will wait for
+	// the migration's end. nil means no unit of the app is left.
+	StopAll(app string) error
+}
+
+// migrationRunningError is a sweep that found a pre_start still
+// running — a deploy's that no hotserve finished, since a deploy in
+// flight holds the lock every sweeping caller takes. Stopping it would
+// half-apply a migration, so the sweep leaves it to end on its own
+// clock (TimeoutStartSec=) and reports itself unconfirmed, naming it.
+type migrationRunningError struct {
+	unit    string
+	version string
+}
+
+func (e *migrationRunningError) Error() string {
+	return "pre_start of " + e.version + " (" + e.unit + ") is still running from a deploy hotserve did not finish; waiting for it to end"
 }
 
 // unitUnconfirmedError reports that a runner operation could not
@@ -126,6 +147,10 @@ type startSpec struct {
 	dir     string        // working directory (the release dir)
 	env     []string      // complete environment, KEY=VALUE form
 	grace   time.Duration // SIGTERM→SIGKILL budget applied when the instance is stopped
+	// startTimeout bounds a pre_start on the unit itself
+	// (TimeoutStartSec=), so it still ends on time when the hotserve
+	// that started it has stopped; 0 sets none.
+	startTimeout time.Duration
 	// sandbox is the per-unit sandbox to apply. Every unit has one;
 	// the runner refuses a spec without it rather than running the
 	// command with the floor only (unitFor).

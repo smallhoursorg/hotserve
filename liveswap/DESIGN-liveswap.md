@@ -161,7 +161,14 @@ Concept map from the Nomad-era stack:
   runs under `deadline`, not under the request: a client that hangs up
   MUST NOT stop it midway (a half-applied migration harms the app's
   data); the health gate then fails the deploy on the cancelled
-  request, before any traffic moves.
+  request, before any traffic moves. Its unit carries `deadline` as
+  its own `TimeoutStartSec=`, so it ends on time when no hotserve is
+  watching it. A hotserve stop or restart MUST NOT stop it midway
+  either: the manager runs it on past hotserve, and every sweep but
+  an app's removal leaves a running `pre_start` unit alone and
+  reports itself unconfirmed, naming it, so recovery, the watchdog
+  and the next deploy start and delete nothing until it has ended
+  (recovery retrying on its backoff).
 - The new instance MUST be continuously healthy for `soak` before any
   traffic moves (`soak 0`: the first healthy probe; refused at load
   with `health_path off`, where nothing is probed), and MUST be
@@ -232,6 +239,24 @@ Concept map from the Nomad-era stack:
   launch's sweep stops the stray unit) or the removal itself fails;
   either way release GC (after a later successful deploy) removes it
   once it falls outside the newest `keep`.
+- A URL or push deploy cut short by hotserve stopping (a crash, a
+  restart, an upgrade) MUST leave its version deployable, and MUST
+  NOT leave a release a rollback could launch without its
+  `pre_start`. Before it extracts, the deploy writes
+  `<app>/deploying.json` (its version and start time; outside every
+  view, through `ownfile.go`), and removes it once its record is
+  written, whatever it came to; a rollback or a relaunch writes none.
+  A marker found by the next recovery or the next deploy, each after
+  a confirmed sweep, is a deploy no hotserve finished: if it names
+  the version `state.json` names or the instance kept, that deploy
+  reached the cutover, and the marker is only removed; if the
+  version's record carries the marker's start time, that deploy was
+  recorded and the marker is stale, only removed; otherwise the
+  release is removed (refused through a link, `linkAt`), a failed
+  record names the restart, and then the marker goes. A removal that
+  fails keeps the marker for the next try. A marker that does not
+  prove itself one (it does not parse, or names no version) is
+  removed and acted on for nothing.
 - Config reloads MUST NOT restart running apps. Changed app definitions
   apply at the app's next launch: a deploy, a rollback, or a relaunch
   after a crash, a sustained health failure, or a reboot.
@@ -406,10 +431,12 @@ even that is impossible, reported as "may still be running" so the
 deploy keeps the release; and **the manager is the ledger** — every
 unit is named `hotserve-<app>.<version>.<nonce>.service` (the `.`
 after the app is the one character an app name cannot contain), and
-`Sweep(app, keep)` stops every other unit of the app. Recovery sweeps
-after reattach/relaunch, deploys sweep before GC, removing an app
-from the config sweeps all of it, and `App.Start` sweeps the units of
-any app the config no longer names — so nothing hotserve lost track
+`Sweep(app, keep)` stops every other unit of the app but a running
+`pre_start`, which it leaves to finish and names, unconfirmed.
+Recovery sweeps after reattach/relaunch, deploys sweep before a
+`pre_start`, a start and GC, removing an app from the config stops
+all of it (`StopAll`, sparing nothing), and `App.Start` stops the
+units of any app the config no longer names — so nothing hotserve lost track
 of (a failed `state.json` write, an unconfirmed stop, an app renamed
 while hotserve was down) survives the next start or the next deploy,
 and no release is deleted while the manager still runs something out
@@ -501,7 +528,7 @@ backwards edges reappearing *despite* this table.
 | `names.go` | the app-name and version alphabets, and the two helpers over them; shared by every layer |
 | `app.go` | `managedApp` state machine, Deploy pipeline, recovery, env building |
 | `appdirs.go` | `appDirs`: the on-disk layout for one app — path arithmetic, and the one check that a dir of it is the directory it names (`linkAt`, by Lstat), which every place hotserve writes or deletes in an app dir runs. No state, no lock |
-| `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed at the name, no FIFO held, size-bounded — shared by the deploy records and `state.json` |
+| `ownfile.go` | how a file hotserve keeps in an app dir is written and read — temp file + rename; no link followed at the name, no FIFO held, size-bounded — shared by the deploy records, `state.json` and the deploy marker |
 | `caddyfile.go` | all Caddyfile parsing (global option, directive, upstreams) but the `deploy_trust` block, which is `deploytrust.Parse`; NO defaults here — Provision owns them, reading a zero field as unset, so a value below an option's minimum (0 included) is refused here, named; `soak` and `deploy_log_lines`, whose 0 is a setting, are pointers |
 | `handler.go` | the webhook: payload validation, deploy dispatch, the status endpoint, and every body's filter (`RespondJSON`); authentication is `deploytrust`'s |
 | `redact.go` | the response filter (`Redactor`) that `RespondJSON` applies: known `env_file` values in their encoded forms, a safe list, shape rules, entropy; the four rules every writer of a body holds head the file |
@@ -521,6 +548,7 @@ backwards edges reappearing *despite* this table.
 | `journal.go` | the journal tail a failed deploy's response carries: `journalctl` run with argument lists built here, its output bounded |
 | `watchdog.go` | continuous crash/health supervision: per-app loop, restart budget, backoff, the wait for a deploy holding the lock |
 | `state.go` | `state.json` atomic persistence; the release order (deploy time) that keep-N GC and `available_versions` share |
+| `deploying.go` | the deploy marker, `<app>/deploying.json`: a URL or push deploy in flight, so the next start or deploy removes the release of one hotserve stopped during, and records it failed |
 | `deploys.go` | the deploy record store, `<app>/deploys/<version>.json`: written once through the filter, served back only through it, pruned with the releases; its four rules head the file |
 | `trustwarn.go` | the load-time pass that asks `deploytrust.WarnUnboundSource` about each `deploy_trust` block once, the global ones only when some app inherits them |
 | `deploytoken_cmd.go` | the `hotserve deploy-keygen` / `deploy-token` subcommands |

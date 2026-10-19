@@ -125,7 +125,7 @@ func sweepUnowned(ctx context.Context, r *systemdRunner, root, app string, logge
 	if !still() {
 		return nil
 	}
-	if err := r.sweep(ctx, app, nil, still); err != nil {
+	if err := r.sweep(ctx, app, nil, still, false); err != nil {
 		return err
 	}
 	if vetoed.Load() {

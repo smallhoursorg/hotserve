@@ -268,6 +268,9 @@ func (r *fakeRunner) Sweep(_ string, keep handle) error {
 	return r.sweepErr
 }
 
+// StopAll is recorded as a sweep keeping nothing.
+func (r *fakeRunner) StopAll(app string) error { return r.Sweep(app, nil) }
+
 func (r *fakeRunner) lastSweep() handle {
 	r.mu.Lock()
 	defer r.mu.Unlock()

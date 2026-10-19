@@ -616,6 +616,72 @@ func TestIntegrationSystemdSweepStopsStrays(t *testing.T) {
 	}
 }
 
+// A hotserve that stops during a deploy leaves the deploy's pre_start
+// running under the manager (#317). The next hotserve's sweep must
+// leave it to finish — reporting itself unconfirmed, naming it — and
+// confirm once it has ended: the migration runs to its end.
+func TestIntegrationSystemdSweepLeavesARunningPreStart(t *testing.T) {
+	r1 := integrationRunner(t)
+	spec := scriptApp(t, "sleep 3\necho migrated > done.txt\n")
+	spec.startTimeout = 30 * time.Second
+	unit, err := unitName(spec, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := make(chan error, 1)
+	go func() { ran <- r1.RunOnce(context.Background(), spec) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st, err := userManager.UnitStatus(context.Background(), unit)
+		if err == nil && st.running() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the pre_start never ran: %+v (%v)", st, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	r1.close() // the hotserve that started it is gone; the manager runs it on
+
+	r2 := newSystemdRunner(userManager, zap.NewNop())
+	t.Cleanup(r2.close)
+	err = r2.Sweep(spec.app, nil)
+	var mr *migrationRunningError
+	if !errors.As(err, &mr) || mr.unit != unit {
+		t.Fatalf("the sweep must leave the running pre_start and name it, got %v", err)
+	}
+	select {
+	case err := <-ran:
+		if err != nil {
+			t.Fatalf("the migration must run to its end, got %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the pre_start never ended")
+	}
+	if out, err := os.ReadFile(filepath.Join(spec.dir, "done.txt")); err != nil || strings.TrimSpace(string(out)) != "migrated" {
+		t.Fatalf("the migration was cut short: %q (%v)", out, err)
+	}
+	if err := r2.Sweep(spec.app, nil); err != nil {
+		t.Fatalf("once the pre_start has ended the sweep confirms, got %v", err)
+	}
+}
+
+// With no hotserve watching it, a pre_start's own TimeoutStartSec= is
+// what ends it: RunOnce here waits on no deadline of its own.
+func TestIntegrationSystemdPreStartEndsOnItsOwnDeadline(t *testing.T) {
+	r := integrationRunner(t)
+	spec := scriptApp(t, "sleep 300\n")
+	spec.startTimeout = time.Second
+	start := time.Now()
+	err := r.RunOnce(context.Background(), spec)
+	if err == nil {
+		t.Fatal("a pre_start past its deadline must fail")
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Fatalf("the unit's own deadline did not end it: took %s", took)
+	}
+}
+
 // managerPID is the user manager's own process, for the stall test.
 func managerPID(t *testing.T) int {
 	t.Helper()

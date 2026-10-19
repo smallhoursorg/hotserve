@@ -113,6 +113,7 @@ type unitSpec struct {
 	Environment      []string
 	Oneshot          bool // Type=oneshot (pre_start) instead of simple
 	StopTimeout      time.Duration
+	StartTimeout     time.Duration // TimeoutStartSec=; 0 sets none
 	Sandbox          *sandboxSpec
 	Socket           string // the app's socket, removed by the unit when it stops
 }
@@ -325,6 +326,16 @@ func unitApp(name string) (string, bool) {
 	return m[1], true
 }
 
+// unitPreStart reports whether name is one of our pre_start units,
+// and the version it prepares.
+func unitPreStart(name string) (string, bool) {
+	m := unitNameRe.FindStringSubmatch(name)
+	if m == nil || m[4] == "" {
+		return "", false
+	}
+	return m[2], true
+}
+
 // unitNonce extracts the instance nonce from one of our unit names.
 func unitNonce(name string) (string, bool) {
 	m := unitNameRe.FindStringSubmatch(name)
@@ -460,6 +471,7 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		Environment:      env,
 		Oneshot:          oneshot,
 		StopTimeout:      grace,
+		StartTimeout:     spec.startTimeout,
 		Sandbox:          spec.sandbox,
 		Socket:           spec.socket,
 	}, nil
@@ -835,7 +847,12 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 // leftovers are reset; running ones are stopped and confirmed gone.
 // nil only when, afterwards, keep is the only loaded unit of app.
 func (r *systemdRunner) Sweep(app string, keep handle) error {
-	return r.sweep(r.ctx, app, keep, nil)
+	return r.sweep(r.ctx, app, keep, nil, true)
+}
+
+// StopAll is a sweep that keeps nothing and spares nothing.
+func (r *systemdRunner) StopAll(app string) error {
+	return r.sweep(r.ctx, app, nil, nil, false)
 }
 
 // sweep is Sweep under a parent context. Listing and each reset are
@@ -844,8 +861,9 @@ func (r *systemdRunner) Sweep(app string, keep handle) error {
 // longest stray's TimeoutStopSec — never the sum, and never a flat cap
 // that would report a slow-draining unit unconfirmed. still, when
 // given, is consulted immediately before each stop; a false answer
-// means someone now owns the app and that stray is left alone.
-func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, still func() bool) error {
+// means someone now owns the app and that stray is left alone. spare
+// leaves a running pre_start to finish and reports it (Sweep).
+func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, still func() bool, spare bool) error {
 	keepUnit := ""
 	if kh, ok := keep.(*systemdHandle); ok {
 		keepUnit = kh.unit
@@ -903,6 +921,11 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 						record(rerr)
 					}
 				}
+				return
+			}
+			if version, ok := unitPreStart(u.Name); ok && spare {
+				r.log().Warn("leaving a pre_start no hotserve finished to end on its own", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
+				record(&migrationRunningError{unit: u.Name, version: version})
 				return
 			}
 			budget := u.stopBudget(0)

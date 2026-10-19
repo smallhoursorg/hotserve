@@ -22,33 +22,36 @@ import (
 //	<root>/<app>/proxy/<nonce>.sock    the same inode, hard-linked by hotserve; what it dials (not in any view)
 //	<root>/<app>/deploys/<version>.json  the latest deploy's outcome for that version, filtered (not in any view)
 //	<root>/<app>/state.json            current version + process handle
+//	<root>/<app>/deploying.json        a URL or push deploy in flight (deploying.go; not in any view)
 //	<root>/<app>/current -> releases/<version>   convenience symlink
 type appDirs struct {
-	root     string // the liveswap root every app lives under
-	app      string
-	releases string
-	shared   string
-	tmp      string
-	run      string
-	proxy    string
-	deploys  string
-	state    string
-	current  string
+	root      string // the liveswap root every app lives under
+	app       string
+	releases  string
+	shared    string
+	tmp       string
+	run       string
+	proxy     string
+	deploys   string
+	state     string
+	deploying string
+	current   string
 }
 
 func newAppDirs(root, name string) appDirs {
 	app := filepath.Join(root, name)
 	return appDirs{
-		root:     root,
-		app:      app,
-		releases: filepath.Join(app, "releases"),
-		shared:   filepath.Join(app, "shared"),
-		tmp:      filepath.Join(app, "tmp"),
-		run:      filepath.Join(app, "run"),
-		proxy:    filepath.Join(app, "proxy"),
-		deploys:  filepath.Join(app, "deploys"),
-		state:    filepath.Join(app, "state.json"),
-		current:  filepath.Join(app, "current"),
+		root:      root,
+		app:       app,
+		releases:  filepath.Join(app, "releases"),
+		shared:    filepath.Join(app, "shared"),
+		tmp:       filepath.Join(app, "tmp"),
+		run:       filepath.Join(app, "run"),
+		proxy:     filepath.Join(app, "proxy"),
+		deploys:   filepath.Join(app, "deploys"),
+		state:     filepath.Join(app, "state.json"),
+		deploying: filepath.Join(app, "deploying.json"),
+		current:   filepath.Join(app, "current"),
 	}
 }
 

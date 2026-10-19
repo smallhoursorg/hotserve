@@ -701,6 +701,19 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	launched := false        // a pre_start or Start was attempted: there are units to ask about
 	appExit := ""            // the app's exit, read before hotserve stops a failed instance
 	appPID := 0              // and its main process's pid (runner.Exit)
+	// marked: this deploy wrote the deploy marker (deploying.go).
+	// Declared before the record's defer, so it runs after it: the
+	// marker goes once the record is written, whatever the deploy came
+	// to.
+	marked := false
+	defer func() {
+		if !marked {
+			return
+		}
+		if err := clearDeployMarker(spec.dirs); err != nil {
+			logger.Warn("deploy marker not removed; the next start or deploy reads the record and clears it", zap.Error(err))
+		}
+	}()
 	defer func() {
 		finished := c.clock.Now()
 		result := deployResult{
@@ -781,6 +794,9 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	if err := spec.dirs.ensure(); err != nil {
 		return err
 	}
+	if err := ma.settleBeforeDeploy(c, old, req.version); err != nil {
+		return err
+	}
 	// Versions are immutable: a deploy (URL or push) never overwrites an
 	// existing on-disk release, so a version you can roll back to can't be
 	// silently replaced with different content. Rollback is exempt — it
@@ -814,6 +830,14 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// release is taken as it is — a stat, nothing written — so a
 	// relaunch is fetched as a rollback of the running version.
 	extracted := !req.rollback && !relaunch
+	if extracted {
+		// Before anything is extracted: a hotserve that stops from here
+		// on leaves the marker naming this release (deploying.go).
+		if err := saveDeployMarker(spec.dirs, deployMarker{Version: req.version, StartedAt: started}); err != nil {
+			return fmt.Errorf("writing the deploy marker: %w", err)
+		}
+		marked = true
+	}
 	fetchReq := req
 	fetchReq.rollback = !extracted
 	releaseDir, stats, err := c.fetch.fetch(ctx, spec, fetchReq, func(phase string) { ma.setPhase(c, phase) })
@@ -905,14 +929,18 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		return err
 	}
 	if len(spec.preStart) > 0 && extracted {
-		if err := preflightResult("pre-flight of pre_start", c.runner.Preflight(l.startSpec(spec, spec.preStart))); err != nil {
+		pre := l.startSpec(spec, spec.preStart)
+		// Bounded on the unit too: a hotserve that stops during it takes
+		// preCtx with it, and the migration runs on (DESIGN-liveswap.md).
+		pre.startTimeout = spec.deadline
+		if err := preflightResult("pre-flight of pre_start", c.runner.Preflight(pre)); err != nil {
 			return err
 		}
 		// A previous deploy's pre_start whose outcome could not be
 		// observed may still be running; settle the ledger before
 		// starting another migration beside it.
-		if !ma.sweep(c, old, l.nonce) {
-			return fmt.Errorf("%w; not running pre_start", errSweepUnconfirmed)
+		if err := ma.sweepOrWhy(c, old, l.nonce); err != nil {
+			return fmt.Errorf("%w; not running pre_start", err)
 		}
 		// Under deadline, not under the request: a client that hangs
 		// up (a cancelled CI job) must not stop a migration midway,
@@ -924,7 +952,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 		// Under the same sandbox as the app it precedes: a migration
 		// that writes where the app cannot read fails here, not at 3am.
 		launched = true
-		err := c.runner.RunOnce(preCtx, l.startSpec(spec, spec.preStart))
+		err := c.runner.RunOnce(preCtx, pre)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("pre_start failed: %w", err)
@@ -935,8 +963,8 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// No Start without a confirmed sweep (keeping the version that is
 	// serving): the new instance must not come up beside a unit the
 	// manager still holds for this app.
-	if !ma.sweep(c, old, l.nonce) {
-		return fmt.Errorf("%w; not starting", errSweepUnconfirmed)
+	if err := ma.sweepOrWhy(c, old, l.nonce); err != nil {
+		return fmt.Errorf("%w; not starting", err)
 	}
 	launched = true
 	newHandle, err = c.runner.Start(l.startSpec(spec, spec.command))
@@ -1100,9 +1128,10 @@ func (ma *managedApp) ensureRunning() error {
 	if inst := ma.currentInstance(); inst != nil && c.runner.Alive(inst.handle) {
 		// Reload, or a retry after an earlier sweep could not confirm:
 		// the instance is fine; the ledger must still be settled.
-		if !ma.sweep(c, inst, "") {
-			return &transientRecoveryError{fmt.Errorf("instance %s running; %w", inst.version, errSweepUnconfirmed)}
+		if err := ma.sweepOrWhy(c, inst, ""); err != nil {
+			return &transientRecoveryError{fmt.Errorf("instance %s running; %w", inst.version, err)}
 		}
+		ma.settleAfterRecovery(c, inst.version)
 		return nil
 	}
 	st, ok, err := c.store.load()
@@ -1113,9 +1142,10 @@ func (ma *managedApp) ensureRunning() error {
 		// Nothing recorded — but a deploy whose state write failed may
 		// have left a unit behind; the manager's ledger decides, not
 		// the absence of a file.
-		if !ma.sweep(c, nil, "") {
-			return &transientRecoveryError{errSweepUnconfirmed}
+		if err := ma.sweepOrWhy(c, nil, ""); err != nil {
+			return &transientRecoveryError{err}
 		}
+		ma.settleAfterRecovery(c, "")
 		ma.wd.setLastFailure("") // nothing to recover is nothing failing: an earlier reason is over
 		return nil
 	}
@@ -1202,11 +1232,12 @@ func (ma *managedApp) ensureRunning() error {
 		ma.wd.setLastFailure("") // a recovery that gave up, or a refusal, is over
 		c.logger.Info("reattached to running instance", zap.String("version", st.CurrentVersion))
 		ma.pokeWatchdog()
-		if !ma.sweep(c, inst, "") {
+		if err := ma.sweepOrWhy(c, inst, ""); err != nil {
 			// Serving, but the ledger is unsettled: recover() retries
 			// and the retry path above sweeps again.
-			return &transientRecoveryError{fmt.Errorf("reattached %s; %w", st.CurrentVersion, errSweepUnconfirmed)}
+			return &transientRecoveryError{fmt.Errorf("reattached %s; %w", st.CurrentVersion, err)}
 		}
+		ma.settleAfterRecovery(c, inst.version)
 		return nil
 	}
 
@@ -1231,6 +1262,7 @@ func (ma *managedApp) ensureRunning() error {
 	c.logger.Info("relaunched current version after restart",
 		zap.String("version", st.CurrentVersion), zap.String("socket", inst.socket))
 	ma.pokeWatchdog()
+	ma.settleAfterRecovery(c, inst.version) // launchVersion's sweep confirmed: inst is the app's one unit
 	return nil
 }
 
@@ -1317,6 +1349,13 @@ func (ma *managedApp) recover(ctx context.Context, logger *zap.Logger) {
 // leftovers — except the one being launched right after, named by
 // launching, whose run dir is already prepared.
 func (ma *managedApp) sweep(c collaborators, keep *instance, launching string) bool {
+	return ma.sweepOrWhy(c, keep, launching) == nil
+}
+
+// sweepOrWhy is sweep for a caller that says why it stops:
+// errSweepUnconfirmed, carrying the migration it waits for when that
+// is the reason (a deploy refused beside one names it).
+func (ma *managedApp) sweepOrWhy(c collaborators, keep *instance, launching string) error {
 	var keepHandle handle
 	keepNonces := []string{launching}
 	if keep != nil {
@@ -1324,11 +1363,15 @@ func (ma *managedApp) sweep(c collaborators, keep *instance, launching string) b
 		keepNonces = append(keepNonces, keep.nonce)
 	}
 	if err := c.runner.Sweep(ma.name, keepHandle); err != nil {
+		var mr *migrationRunningError
+		if errors.As(err, &mr) { // the runner logged it, naming the unit
+			return fmt.Errorf("%w: %w", errSweepUnconfirmed, mr)
+		}
 		c.logger.Error("sweeping stray instances", zap.Error(err))
-		return false
+		return errSweepUnconfirmed
 	}
 	pruneSockets(c.spec.dirs, keepNonces, c.logger)
-	return true
+	return nil
 }
 
 // launchVersion starts an already-on-disk version on a fresh socket
@@ -1355,9 +1398,9 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	// runs for this app (a unit an earlier hotserve lost track of, a
 	// stop that could not be confirmed) is settled first, or nothing
 	// is launched beside it.
-	if !ma.sweep(c, nil, l.nonce) {
+	if err := ma.sweepOrWhy(c, nil, l.nonce); err != nil {
 		l.sock.retire()
-		return nil, fmt.Errorf("%w; not launching", errSweepUnconfirmed)
+		return nil, fmt.Errorf("%w; not launching", err)
 	}
 	// The deploy's pre-flight, on the spec about to start: a release
 	// that cannot run on this box — built for another machine, its
@@ -1688,7 +1731,7 @@ func (ma *managedApp) Destruct() error {
 		stopErr = c.runner.Stop(inst.handle, c.spec.grace)
 		inst.sock.retire()
 	}
-	sweepErr := c.runner.Sweep(ma.name, nil)
+	sweepErr := c.runner.StopAll(ma.name)
 	if sweepErr == nil {
 		pruneSockets(c.spec.dirs, nil, c.logger)
 	}

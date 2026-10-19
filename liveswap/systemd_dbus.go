@@ -313,6 +313,12 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		{Name: "StandardOutput", Value: godbus.MakeVariant("journal")},
 		{Name: "StandardError", Value: godbus.MakeVariant("journal")},
 	}
+	if u.StartTimeout > 0 {
+		// 0 is no bound at all for a oneshot; a sub-microsecond
+		// timeout must not truncate into it.
+		startUSec := max(uint64(u.StartTimeout/time.Microsecond), 1) //nolint:gosec // a positive config duration
+		props = append(props, sddbus.Property{Name: "TimeoutStartUSec", Value: godbus.MakeVariant(startUSec)})
+	}
 	if u.Socket != "" {
 		// The unit owns its socket file for exactly as long as it runs:
 		// the manager removes it after the service stops, however it

@@ -993,7 +993,8 @@ existing on-disk release, so a version you can roll back to can't be
 silently replaced — re-deploying an existing version with other bytes
 is a `422`. Use a new version, or roll back to relaunch an existing
 one. (A deploy that *fails* before cutover is cleaned up, so that
-version stays retriable.) The running version is the one exception,
+version stays retriable — one a hotserve restart cuts short too, at
+the next start.) The running version is the one exception,
 relaunched rather than refused when the artifact is the same — see
 [Relaunching the running version](#relaunching-the-running-version).
 
@@ -1031,6 +1032,17 @@ sooner than its `deadline`, stop its unit yourself; it is named
 `sudo -u hotserve XDG_RUNTIME_DIR=/run/user/$(id -u hotserve)
 systemctl --user stop 'hotserve-blog.*.prestart.service'`. The deploy
 then fails as a failed `pre_start`.
+
+A hotserve stop or restart (a crash, `systemctl restart hotserve`, an
+upgrade) does not stop a running `pre_start` either: the manager runs
+it on, bounded by `deadline` on its unit, and the hotserve that comes
+back leaves it to finish. Until it has, that app takes no deploy (the
+refusal names the migration) and no relaunch; the running version
+serves on. The deploy itself ends with the hotserve that ran it (its
+client sees the connection drop): the next start, or the next deploy,
+removes the release it extracted and records it failed — `the deploy
+was cut short: hotserve stopped or restarted during it` — so the same
+version can be deployed again. Re-run the job.
 
 **A failed deploy says why, from the app's side.** The 5xx body's
 `status.last_deploy` carries the phase it stopped in, `phases` — each
@@ -1449,6 +1461,7 @@ gives up after the cutover turns red a deploy the box completed.
   current -> releases/v1.4.2   (convenience symlink; state.json is truth)
   shared/                 persistent data, survives deploys (the app's HOME)
   state.json              current version, nonce and unit name
+  deploying.json          a URL or push deploy in flight; gone when it ends
   deploys/v1.4.2.json     each version's latest deploy outcome (see Deploy records)
   tmp/                    download staging
 ```
