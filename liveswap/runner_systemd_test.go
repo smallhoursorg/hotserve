@@ -1056,8 +1056,8 @@ func TestSystemdRunnerSweepLeavesARunningPreStartToFinish(t *testing.T) {
 	if !errors.As(err, &mr) || mr.unit != migration || mr.version != "v2" {
 		t.Fatalf("a running pre_start must make the sweep unconfirmed, naming it; got %v", err)
 	}
-	if !strings.Contains(err.Error(), "pre_start of v2") {
-		t.Fatalf("the message must name the migration's version, got %q", err)
+	if !strings.Contains(err.Error(), "pre_start of v2") || !strings.Contains(err.Error(), "from an earlier deploy") {
+		t.Fatalf("the message must name the migration's version and say it is an earlier deploy's, got %q", err)
 	}
 	if stops := conn.stops(); len(stops) != 0 {
 		t.Fatalf("a running pre_start must not be stopped, got %v", stops)

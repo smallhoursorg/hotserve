@@ -924,7 +924,7 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 				return
 			}
 			if version, ok := unitPreStart(u.Name); ok && spare {
-				r.log().Warn("leaving a pre_start no hotserve finished to end on its own", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
+				r.log().Warn("leaving a running pre_start of an earlier deploy to end on its own", zap.String("unit", u.Name), zap.Int("pid", u.MainPID))
 				record(&migrationRunningError{unit: u.Name, version: version})
 				return
 			}

@@ -103,8 +103,9 @@ type runner interface {
 }
 
 // migrationRunningError is a sweep that found a pre_start still
-// running — a deploy's that no hotserve finished, since a deploy in
-// flight holds the lock every sweeping caller takes. Stopping it would
+// running — an earlier deploy's, since a deploy in flight holds the
+// lock every sweeping caller takes: one a hotserve stop cut short, or
+// one whose start and stop this hotserve could not observe. Stopping it would
 // half-apply a migration, so the sweep leaves it to end on its own
 // clock (TimeoutStartSec=) and reports itself unconfirmed, naming it.
 type migrationRunningError struct {
@@ -113,7 +114,7 @@ type migrationRunningError struct {
 }
 
 func (e *migrationRunningError) Error() string {
-	return "pre_start of " + e.version + " (" + e.unit + ") is still running from a deploy hotserve did not finish; waiting for it to end"
+	return "pre_start of " + e.version + " (" + e.unit + ") is still running from an earlier deploy; waiting for it to end"
 }
 
 // unitUnconfirmedError reports that a runner operation could not
