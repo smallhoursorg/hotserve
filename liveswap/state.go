@@ -95,17 +95,7 @@ func (s *fileStateStore) save(st appState) error {
 // effort: a leftover that cannot be removed costs a little disk, never
 // a save.
 func (s *fileStateStore) removeLeftovers() {
-	dir := filepath.Dir(s.path)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return // the write that follows reports a dir it cannot use
-	}
-	prefix, suffix, _ := strings.Cut(stateTempPattern, "*")
-	for _, e := range entries {
-		if n := e.Name(); !e.IsDir() && strings.HasPrefix(n, prefix) && strings.HasSuffix(n, suffix) {
-			_ = os.Remove(filepath.Join(dir, n)) // best effort, as above
-		}
-	}
+	removeOwnLeftovers(filepath.Dir(s.path), stateTempPattern)
 }
 
 var _ stateStore = (*fileStateStore)(nil)

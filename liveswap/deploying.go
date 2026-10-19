@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -31,11 +29,13 @@ import (
 //   - Settled (settleInterrupted) only after a confirmed sweep, by
 //     recovery and by the next deploy, each holding deployMu: nothing
 //     runs out of the release by then, and no deploy writes a marker
-//     meanwhile.
+//     meanwhile. Settling never refuses anything: what it cannot tell
+//     or cannot remove ends as a failed deploy's release left on disk
+//     does, and the marker goes either way, so one slot never holds
+//     two deploys.
 //
 // It lives beside state.json, outside every view, written and read
-// under ownfile.go's rules; a marker that does not prove itself one is
-// removed and acted on for nothing.
+// under ownfile.go's rules.
 type deployMarker struct {
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
@@ -56,12 +56,13 @@ func saveDeployMarker(d appDirs, m deployMarker) error {
 	if err != nil {
 		return err
 	}
-	removeMarkerLeftovers(d)
+	removeOwnLeftovers(d.app, deployMarkerTempPattern)
 	return writeOwnFile(d.deploying, deployMarkerTempPattern, data)
 }
 
 // loadDeployMarker reads the marker: fs.ErrNotExist when there is
-// none, errNotAMarker for one whose content is not a marker's.
+// none, errNotAMarker for one whose content is not a marker's, and
+// readOwnFile's refusal for anything but a regular file at its name.
 func loadDeployMarker(d appDirs) (deployMarker, error) {
 	var m deployMarker
 	data, _, err := readOwnFile(d.deploying, deployMarkerMaxBytes, "a deploy marker")
@@ -91,67 +92,57 @@ func clearDeployMarker(d appDirs) error {
 	return nil
 }
 
-// removeMarkerLeftovers removes the temp files an interrupted marker
-// write leaves, by its own pattern, as fileStateStore.removeLeftovers
-// does for state.json's. Best effort.
-func removeMarkerLeftovers(d appDirs) {
-	entries, err := os.ReadDir(d.app)
-	if err != nil {
-		return
-	}
-	prefix, suffix, _ := strings.Cut(deployMarkerTempPattern, "*")
-	for _, e := range entries {
-		if n := e.Name(); !e.IsDir() && strings.HasPrefix(n, prefix) && strings.HasSuffix(n, suffix) {
-			_ = os.Remove(filepath.Join(d.app, n))
-		}
-	}
-}
-
 // interruptedDeployError is what a deploy cut short by a hotserve stop
-// is recorded as.
-const interruptedDeployError = "the deploy was cut short: hotserve stopped or restarted during it; its release was removed, so this version can be deployed again"
+// is recorded as; a release that could not be removed adds why, in the
+// words a failed deploy's cleanup uses.
+const interruptedDeployError = "the deploy was cut short: hotserve stopped or restarted during it"
 
 // settleInterrupted settles a marker a deploy no hotserve finished
 // left, under the rules above. The caller holds deployMu and has just
 // confirmed a sweep keeping the instance of version keep ("" for
-// none). It returns the version a marker it could not settle names,
-// and why; the marker then stays for the next try.
-func (ma *managedApp) settleInterrupted(c collaborators, keep string) (string, error) {
+// none). The marker is gone afterwards unless removing it failed,
+// which is the error.
+func (ma *managedApp) settleInterrupted(c collaborators, keep string) error {
 	d := c.spec.dirs
 	m, err := loadDeployMarker(d)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return "", nil
-	case errors.Is(err, errNotAMarker):
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		// Not a marker: its content, or a link, FIFO or other non-file
+		// at its name. Acted on for nothing — a release it might have
+		// named stays, as before there were markers.
 		c.logger.Error("deploy marker removed: it is not one, so nothing is done for it", zap.String("path", d.deploying), zap.Error(err))
-		return "", ma.clearMarker(c)
-	case err != nil:
-		// Unreadable is not absent: kept, for the next try to read.
-		c.logger.Warn("deploy marker unreadable; leaving it for the next start or deploy", zap.String("path", d.deploying), zap.Error(err))
-		return "", nil
+		return ma.clearMarker(c)
 	}
 	logger := c.logger.With(zap.String("version", m.Version))
 	if m.Version == keep {
 		// That deploy reached the cutover: what it put there serves.
-		return "", ma.clearMarker(c)
+		return ma.clearMarker(c)
 	}
-	if recordedStart(d, m.Version).Equal(m.StartedAt) {
+	started, recorded, err := recordedStart(d, m.Version)
+	switch {
+	case err != nil:
+		// A record there that cannot be read may be that deploy's:
+		// nothing is removed or written over it.
+		logger.Error("deploy marker removed without acting: the version's deploy record cannot be read, so whether hotserve finished that deploy cannot be told; a release it left stays until GC", zap.Error(err))
+		return ma.clearMarker(c)
+	case recorded && started.Equal(m.StartedAt):
 		// That deploy was recorded; only its marker's removal failed.
-		return "", ma.clearMarker(c)
+		return ma.clearMarker(c)
 	}
-	if p, why := d.linkAt(d.releases); p != "" {
-		return m.Version, fmt.Errorf("release %s of a deploy hotserve did not finish not removed: %s is not the directory it names: %w (%s)", m.Version, p, why, notOwnDirFix)
-	}
-	if err := os.RemoveAll(d.release(m.Version)); err != nil {
-		return m.Version, fmt.Errorf("removing release %s of a deploy hotserve did not finish: %w", m.Version, err)
-	}
-	logger.Warn("removed the release of a deploy hotserve did not finish; the version can be deployed again")
 	result := deployResult{
 		Version:    m.Version,
 		Status:     "failed",
-		Error:      interruptedDeployError,
+		Error:      interruptedDeployError + "; its release was removed, so this version can be deployed again",
 		StartedAt:  m.StartedAt,
 		FinishedAt: c.clock.Now(),
+	}
+	if rmErr := removeRelease(d, m.Version); rmErr != nil {
+		result.Error = fmt.Sprintf("%s; release %s left on disk: cleanup of failed release %s: %v", interruptedDeployError, m.Version, m.Version, rmErr)
+		logger.Error("the release of a deploy hotserve did not finish could not be removed; it stays until GC", zap.Error(rmErr))
+	} else {
+		logger.Warn("removed the release of a deploy hotserve did not finish; the version can be deployed again")
 	}
 	ma.recordDeploy(c, result)
 	ma.mu.Lock()
@@ -159,7 +150,7 @@ func (ma *managedApp) settleInterrupted(c collaborators, keep string) (string, e
 		ma.lastDeploy = &result
 	}
 	ma.mu.Unlock()
-	return "", ma.clearMarker(c)
+	return ma.clearMarker(c)
 }
 
 func (ma *managedApp) clearMarker(c collaborators) error {
@@ -169,30 +160,40 @@ func (ma *managedApp) clearMarker(c collaborators) error {
 	return nil
 }
 
-// recordedStart is when the deploy version's record holds began; the
-// zero time when there is no record, or none that reads.
-func recordedStart(d appDirs, version string) time.Time {
+// removeRelease removes one release dir, never through a link at the
+// app dir or releases/ (linkAt), as GC removes one.
+func removeRelease(d appDirs, version string) error {
+	if p, why := d.linkAt(d.releases); p != "" {
+		return fmt.Errorf("%s is not the directory it names: %w (%s)", p, why, notOwnDirFix)
+	}
+	return os.RemoveAll(d.release(version))
+}
+
+// recordedStart is when the deploy version's record holds began, and
+// whether there is one; err is a record there that cannot be read,
+// which is not the same as none.
+func recordedStart(d appDirs, version string) (time.Time, bool, error) {
 	b, err := readDeployRecord(d, version)
+	if errors.Is(err, errNoDeployRecord) {
+		return time.Time{}, false, nil
+	}
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false, err
 	}
 	var r struct {
 		StartedAt time.Time `json:"started_at"`
 	}
-	if json.Unmarshal(b, &r) != nil {
-		return time.Time{}
+	if err := json.Unmarshal(b, &r); err != nil {
+		return time.Time{}, false, err
 	}
-	return r.StartedAt
+	return r.StartedAt, true, nil
 }
 
 // settleBeforeDeploy settles a marker before a deploy goes on, once a
 // sweep keeping old confirms: the deploy that left the marker may have
-// left its pre_start running too. Only a marker there costs that
-// sweep. One this cannot settle refuses the deploy only when it names
-// the version asked for, whose leftover release the deploy would
-// otherwise trip on; any other deploy goes on, and leaves it for the
-// next try.
-func (ma *managedApp) settleBeforeDeploy(c collaborators, old *instance, version string) error {
+// left its pre_start running too, and the deploy is refused, naming
+// it, until that has ended. Only a marker there costs the sweep.
+func (ma *managedApp) settleBeforeDeploy(c collaborators, old *instance) error {
 	if _, err := os.Lstat(c.spec.dirs.deploying); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -203,23 +204,20 @@ func (ma *managedApp) settleBeforeDeploy(c collaborators, old *instance, version
 	if old != nil {
 		keep = old.version
 	}
-	pending, err := ma.settleInterrupted(c, keep)
-	if err == nil {
-		return nil
+	// A marker that cannot be removed is overwritten by this deploy's
+	// own, which reports a write that fails.
+	if err := ma.settleInterrupted(c, keep); err != nil {
+		c.logger.Error("deploy marker not removed; deploying on", zap.Error(err))
 	}
-	if pending == version {
-		return err
-	}
-	c.logger.Error("deploy marker not settled; deploying on", zap.Error(err))
 	return nil
 }
 
 // settleAfterRecovery settles a marker once recovery's sweep has
-// confirmed, keeping the instance of version keep. One it cannot
-// settle is logged and kept: the app is up, and the next start or
-// deploy tries again.
+// confirmed, keeping the instance of version keep. A marker that
+// cannot be removed is logged: the app is up, and the next start or
+// deploy reads the record it was settled into and clears it.
 func (ma *managedApp) settleAfterRecovery(c collaborators, keep string) {
-	if _, err := ma.settleInterrupted(c, keep); err != nil {
-		c.logger.Error("deploy marker not settled; the next start or deploy tries again", zap.Error(err))
+	if err := ma.settleInterrupted(c, keep); err != nil {
+		c.logger.Error("deploy marker not removed; the next start or deploy clears it", zap.Error(err))
 	}
 }

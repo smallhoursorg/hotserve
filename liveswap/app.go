@@ -794,7 +794,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	if err := spec.dirs.ensure(); err != nil {
 		return err
 	}
-	if err := ma.settleBeforeDeploy(c, old, req.version); err != nil {
+	if err := ma.settleBeforeDeploy(c, old); err != nil {
 		return err
 	}
 	// Versions are immutable: a deploy (URL or push) never overwrites an
@@ -1363,11 +1363,11 @@ func (ma *managedApp) sweepOrWhy(c collaborators, keep *instance, launching stri
 		keepNonces = append(keepNonces, keep.nonce)
 	}
 	if err := c.runner.Sweep(ma.name, keepHandle); err != nil {
-		var mr *migrationRunningError
-		if errors.As(err, &mr) { // the runner logged it, naming the unit
-			return fmt.Errorf("%w: %w", errSweepUnconfirmed, mr)
-		}
 		c.logger.Error("sweeping stray instances", zap.Error(err))
+		var mr *migrationRunningError
+		if errors.As(err, &mr) {
+			return fmt.Errorf("%w: %w", errSweepUnconfirmed, err)
+		}
 		return errSweepUnconfirmed
 	}
 	pruneSockets(c.spec.dirs, keepNonces, c.logger)

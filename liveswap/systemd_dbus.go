@@ -316,7 +316,7 @@ func unitProperties(u unitSpec) []sddbus.Property {
 	if u.StartTimeout > 0 {
 		// 0 is no bound at all for a oneshot; a sub-microsecond
 		// timeout must not truncate into it.
-		startUSec := max(uint64(u.StartTimeout/time.Microsecond), 1) //nolint:gosec // a positive config duration
+		startUSec := max(uint64(u.StartTimeout/time.Microsecond), 1)
 		props = append(props, sddbus.Property{Name: "TimeoutStartUSec", Value: godbus.MakeVariant(startUSec)})
 	}
 	if u.Socket != "" {

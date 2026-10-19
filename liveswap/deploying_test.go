@@ -10,14 +10,14 @@ import (
 	"time"
 )
 
-// A deploy that a hotserve stop cut short (#318): what it left is a
-// marker naming its version and a release under that name. These are
-// what the dead deploy would have left on disk.
-func leaveInterruptedDeploy(t *testing.T, rig *testRig, version string, startedAt time.Time) {
+// A deploy of v2 that a hotserve stop cut short (#318): what it left
+// is a marker naming v2 and its start, and a release under that name.
+// These are what the dead deploy would have left on disk.
+func leaveInterruptedDeploy(t *testing.T, rig *testRig) {
 	t.Helper()
 	must(t, rig.spec.dirs.ensure())
-	must(t, os.MkdirAll(rig.spec.dirs.release(version), 0o755))
-	must(t, saveDeployMarker(rig.spec.dirs, deployMarker{Version: version, StartedAt: startedAt}))
+	must(t, os.MkdirAll(rig.spec.dirs.release("v2"), 0o755))
+	must(t, saveDeployMarker(rig.spec.dirs, deployMarker{Version: "v2", StartedAt: interruptedAt}))
 }
 
 func markerPresent(t *testing.T, rig *testRig) bool {
@@ -38,12 +38,12 @@ func releasePresent(t *testing.T, rig *testRig, version string) bool {
 	return err == nil
 }
 
-// recordOf is the version's deploy record as written.
-func recordOf(t *testing.T, rig *testRig, version string) deployResult {
+// recordOfV2 is v2's deploy record as written.
+func recordOfV2(t *testing.T, rig *testRig) deployResult {
 	t.Helper()
-	b, err := readDeployRecord(rig.spec.dirs, version)
+	b, err := readDeployRecord(rig.spec.dirs, "v2")
 	if err != nil {
-		t.Fatalf("record of %s: %v", version, err)
+		t.Fatalf("record of v2: %v", err)
 	}
 	var r deployResult
 	must(t, json.Unmarshal(b, &r))
@@ -118,7 +118,7 @@ func TestRecoveryRemovesTheReleaseOfADeployNoHotserveFinished(t *testing.T) {
 	rig.store.state = appState{CurrentVersion: "v1", Nonce: recordedNonce, Handle: handleState{PID: 1}}
 	rig.store.ok = true
 	must(t, os.MkdirAll(rig.spec.dirs.release("v1"), 0o755))
-	leaveInterruptedDeploy(t, rig, "v2", interruptedAt)
+	leaveInterruptedDeploy(t, rig)
 
 	must(t, rig.ma.ensureRunning())
 	if releasePresent(t, rig, "v2") {
@@ -130,7 +130,7 @@ func TestRecoveryRemovesTheReleaseOfADeployNoHotserveFinished(t *testing.T) {
 	if markerPresent(t, rig) {
 		t.Fatal("a settled marker must be removed")
 	}
-	rec := recordOf(t, rig, "v2")
+	rec := recordOfV2(t, rig)
 	if rec.Status != "failed" || !strings.Contains(rec.Error, "hotserve") || !rec.StartedAt.Equal(interruptedAt) {
 		t.Fatalf("the cut-short deploy must be recorded failed, naming why, at its own start: %+v", rec)
 	}
@@ -140,7 +140,7 @@ func TestRecoveryRemovesTheReleaseOfADeployNoHotserveFinished(t *testing.T) {
 
 	// The version is deployable again: no "already exists".
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}))
-	if rec := recordOf(t, rig, "v2"); rec.Status != "succeeded" {
+	if rec := recordOfV2(t, rig); rec.Status != "succeeded" {
 		t.Fatalf("the redeploy's record replaces the failed one: %+v", rec)
 	}
 }
@@ -151,7 +151,7 @@ func TestAMarkerForTheServingVersionIsOnlyCleared(t *testing.T) {
 	rig := newTestRig(t)
 	rig.store.state = appState{CurrentVersion: "v2", Nonce: recordedNonce, Handle: handleState{PID: 1}}
 	rig.store.ok = true
-	leaveInterruptedDeploy(t, rig, "v2", interruptedAt)
+	leaveInterruptedDeploy(t, rig)
 	must(t, rig.ma.ensureRunning())
 	if !releasePresent(t, rig, "v2") {
 		t.Fatal("the serving release must never be removed")
@@ -172,7 +172,7 @@ func TestAStaleMarkerOfARecordedDeployIsOnlyCleared(t *testing.T) {
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}))
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}))
-	must(t, saveDeployMarker(rig.spec.dirs, deployMarker{Version: "v2", StartedAt: recordOf(t, rig, "v2").StartedAt}))
+	must(t, saveDeployMarker(rig.spec.dirs, deployMarker{Version: "v2", StartedAt: recordOfV2(t, rig).StartedAt}))
 	must(t, rig.ma.ensureRunning())
 	if !releasePresent(t, rig, "v2") {
 		t.Fatal("a recorded release must not be removed for a stale marker")
@@ -180,7 +180,7 @@ func TestAStaleMarkerOfARecordedDeployIsOnlyCleared(t *testing.T) {
 	if markerPresent(t, rig) {
 		t.Fatal("the stale marker must be cleared")
 	}
-	if rec := recordOf(t, rig, "v2"); rec.Status != "succeeded" {
+	if rec := recordOfV2(t, rig); rec.Status != "succeeded" {
 		t.Fatalf("the record must be left as it was: %+v", rec)
 	}
 }
@@ -189,7 +189,7 @@ func TestAnUnconfirmedSweepRemovesNothingAMarkerNames(t *testing.T) {
 	// The dead deploy's pre_start, or its instance, may still run out
 	// of the release: nothing is removed until a sweep confirms.
 	rig := newTestRig(t)
-	leaveInterruptedDeploy(t, rig, "v2", interruptedAt)
+	leaveInterruptedDeploy(t, rig)
 	rig.runner.sweepErr = &migrationRunningError{unit: "hotserve-demo.v2.5555555555555555.prestart.service", version: "v2"}
 	err := rig.ma.ensureRunning()
 	if !transientRecovery(err) || !strings.Contains(err.Error(), "pre_start of v2") {
@@ -222,13 +222,73 @@ func TestADeploySettlesAMarkerFirst(t *testing.T) {
 	// the orphan's own version proceeds rather than 422.
 	rig := newTestRig(t)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
-	leaveInterruptedDeploy(t, rig, "v2", interruptedAt)
+	leaveInterruptedDeploy(t, rig)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"}))
-	if rec := recordOf(t, rig, "v2"); rec.Status != "succeeded" {
+	if rec := recordOfV2(t, rig); rec.Status != "succeeded" {
 		t.Fatalf("the redeploy must succeed and be recorded: %+v", rec)
 	}
 	if markerPresent(t, rig) {
 		t.Fatal("no marker may outlive the deploy")
+	}
+}
+
+func TestAReleaseThatCannotBeRemovedEndsAsAFailedDeploysLeftOnDisk(t *testing.T) {
+	// The marker has one slot: one the next deploy could overwrite must
+	// not stay waiting on a removal that fails. Settling records the
+	// release left on disk, in a failed deploy's words, and clears it.
+	rig := newTestRig(t)
+	leaveInterruptedDeploy(t, rig)
+	// releases/ moved aside behind a link: removal is refused (linkAt).
+	moved := rig.spec.dirs.releases + ".moved"
+	must(t, os.Rename(rig.spec.dirs.releases, moved))
+	must(t, os.Symlink(moved, rig.spec.dirs.releases))
+	must(t, rig.ma.settleInterrupted(rig.ma.snapshot(), ""))
+	if markerPresent(t, rig) {
+		t.Fatal("the marker must go even when the release stays")
+	}
+	if _, err := os.Stat(moved + "/v2"); err != nil {
+		t.Fatalf("nothing may be removed through the link: %v", err)
+	}
+	rec := recordOfV2(t, rig)
+	if rec.Status != "failed" || !strings.Contains(rec.Error, "release v2 left on disk") || !strings.Contains(rec.Error, "cut short") {
+		t.Fatalf("the record must name the restart and the release left: %+v", rec)
+	}
+}
+
+func TestARecordThatCannotBeReadIsNeitherReplacedNorActedOn(t *testing.T) {
+	// The record may be that deploy's own: nothing is written over it,
+	// and nothing removed on a guess.
+	rig := newTestRig(t)
+	leaveInterruptedDeploy(t, rig)
+	must(t, os.MkdirAll(rig.spec.dirs.deploys+"/v2.json", 0o700)) // not a regular file: unreadable
+	must(t, rig.ma.settleInterrupted(rig.ma.snapshot(), ""))
+	if markerPresent(t, rig) {
+		t.Fatal("the marker must be cleared")
+	}
+	if !releasePresent(t, rig, "v2") {
+		t.Fatal("nothing may be removed when the record cannot be read")
+	}
+	if fi, err := os.Lstat(rig.spec.dirs.deploys + "/v2.json"); err != nil || !fi.IsDir() {
+		t.Fatalf("the unreadable record must be left as it is: %v", err)
+	}
+}
+
+func TestAMarkerThatIsNotAFileIsRemovedAndActedOnForNothing(t *testing.T) {
+	rig := newTestRig(t)
+	must(t, rig.spec.dirs.ensure())
+	must(t, os.MkdirAll(rig.spec.dirs.release("v2"), 0o755))
+	elsewhere := t.TempDir() + "/marker.json"
+	must(t, os.WriteFile(elsewhere, []byte(`{"version":"v2","started_at":"2026-10-19T00:00:00Z"}`), 0o600))
+	must(t, os.Symlink(elsewhere, rig.spec.dirs.deploying))
+	must(t, rig.ma.ensureRunning())
+	if markerPresent(t, rig) {
+		t.Fatal("a link at the marker's name must be removed")
+	}
+	if _, err := os.Stat(elsewhere); err != nil {
+		t.Fatalf("never what the link points at: %v", err)
+	}
+	if !releasePresent(t, rig, "v2") {
+		t.Fatal("and nothing removed for it")
 	}
 }
 

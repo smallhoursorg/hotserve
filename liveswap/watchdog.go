@@ -568,6 +568,22 @@ func (ma *managedApp) handleFailure(ctx context.Context, c collaborators, inst *
 		}
 	}
 
+	// A pre_start a hotserve restart left running holds every launch
+	// until it ends (Sweep): stopping this instance first would turn
+	// an unhealthy app into a down one for that long. It is left
+	// serving, as while a deploy runs, and the restart is tried again
+	// on the next failure verdict. A dead instance has nothing to keep:
+	// its relaunch below waits on the migration instead.
+	if c.runner.Alive(inst.handle) {
+		var mr *migrationRunningError
+		if err := ma.sweepOrWhy(c, inst, ""); errors.As(err, &mr) {
+			ma.wd.refundBudget()
+			c.logger.Warn("watchdog: leaving the unhealthy instance serving until the pre_start has ended",
+				zap.String("version", inst.version), zap.Error(err))
+			return true
+		}
+	}
+
 	// Stop can block for the unit's own stop budget while deployMu is held, so a
 	// webhook landing in that window gets a 409 — the same contract as
 	// a deploy's own drain+stop-old phase (one lifecycle operation at

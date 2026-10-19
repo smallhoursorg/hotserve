@@ -268,8 +268,15 @@ func (r *fakeRunner) Sweep(_ string, keep handle) error {
 	return r.sweepErr
 }
 
-// StopAll is recorded as a sweep keeping nothing.
-func (r *fakeRunner) StopAll(app string) error { return r.Sweep(app, nil) }
+// StopAll is recorded as a sweep keeping nothing. It spares nothing,
+// as the real one: a scripted running migration is no error to it.
+func (r *fakeRunner) StopAll(app string) error {
+	err := r.Sweep(app, nil)
+	if mr := (*migrationRunningError)(nil); errors.As(err, &mr) {
+		return nil
+	}
+	return err
+}
 
 func (r *fakeRunner) lastSweep() handle {
 	r.mu.Lock()

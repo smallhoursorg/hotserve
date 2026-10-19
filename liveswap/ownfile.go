@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -59,6 +60,25 @@ func writeOwnFile(path, pattern string, data []byte) (err error) {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// removeOwnLeftovers removes the temp files an interrupted
+// writeOwnFile under pattern left in dir, by that pattern alone: the
+// stores in an app dir each have their own. os.Remove unlinks the
+// name, never what a link points at. Best effort: a leftover that
+// cannot be removed costs a little disk, never a write, and a dir that
+// cannot be listed is the following write's to report.
+func removeOwnLeftovers(dir, pattern string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix, suffix, _ := strings.Cut(pattern, "*")
+	for _, e := range entries {
+		if n := e.Name(); !e.IsDir() && strings.HasPrefix(n, prefix) && strings.HasSuffix(n, suffix) {
+			_ = os.Remove(filepath.Join(dir, n))
+		}
+	}
 }
 
 // readOwnFile reads path whole under the read rule above; the

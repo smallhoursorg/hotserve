@@ -298,6 +298,33 @@ func TestWatchdogRestartAbortsWhenSweepUnconfirmed(t *testing.T) {
 	})
 }
 
+// A pre_start a hotserve restart left running blocks every launch
+// until it ends. A health restart that stopped the instance first
+// would turn an unhealthy app into a down one for that long, so the
+// watchdog leaves it serving, as it does while a deploy runs, and
+// restarts it once the migration has ended.
+func TestWatchdogLeavesAnUnhealthyInstanceServingBesideAMigration(t *testing.T) {
+	rig := newTestRig(t)
+	rig.spec.wdGrace = 0
+	deployV1(t, rig)
+	rig.prober.setProbeErr(errors.New("health check returned 500"))
+	rig.runner.sweepErr = &migrationRunningError{unit: "hotserve-demo.v2.5555555555555555.prestart.service", version: "v2"}
+	rig.startWatchdogT(t)
+	advanceUntil(t, rig, rig.spec.healthInterval, "restart attempted (sweep called)", func() bool {
+		return rig.runner.sweepCount() >= 3 // 2 from the deploy, then the restart's
+	})
+	if rig.runner.stopCount() != 0 || rig.runner.startCount() != 1 {
+		t.Fatalf("the unhealthy instance must be left serving: stops=%d starts=%d", rig.runner.stopCount(), rig.runner.startCount())
+	}
+	if !rig.runner.Alive(rig.runner.handleAt(0)) {
+		t.Fatal("the instance must still run")
+	}
+	rig.runner.sweepErr = nil
+	advanceUntil(t, rig, rig.spec.healthInterval, "restart once the migration has ended", func() bool {
+		return rig.runner.startCount() == 2
+	})
+}
+
 func TestWatchdogSkipGraceIsScopedToTheHandle(t *testing.T) {
 	var w watchdogState
 	h1, h2 := &fakeHandle{id: "1"}, &fakeHandle{id: "2"}

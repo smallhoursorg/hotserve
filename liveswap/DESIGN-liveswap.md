@@ -253,10 +253,17 @@ Concept map from the Nomad-era stack:
   version's record carries the marker's start time, that deploy was
   recorded and the marker is stale, only removed; otherwise the
   release is removed (refused through a link, `linkAt`), a failed
-  record names the restart, and then the marker goes. A removal that
-  fails keeps the marker for the next try. A marker that does not
-  prove itself one (it does not parse, or names no version) is
-  removed and acted on for nothing.
+  record names the restart, and then the marker goes. Settling
+  refuses nothing and always ends with the marker gone, since the
+  next deploy's marker would overwrite it: a release that cannot be
+  removed is recorded as a failed deploy's left on disk is
+  (`cleanup of failed release`), and a record there that cannot be
+  read may be that deploy's, so nothing is removed or written over
+  it. A marker that does not prove itself one (it does not parse,
+  names no version or start, or is not a regular file) is removed and
+  acted on for nothing. While a running `pre_start` holds launches,
+  the watchdog leaves an unhealthy instance serving rather than stop
+  it, as while a deploy runs.
 - Config reloads MUST NOT restart running apps. Changed app definitions
   apply at the app's next launch: a deploy, a rollback, or a relaunch
   after a crash, a sustained health failure, or a reboot.
