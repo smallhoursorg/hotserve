@@ -104,6 +104,9 @@ const interruptedDeployError = "the deploy was cut short: hotserve stopped or re
 // which is the error.
 func (ma *managedApp) settleInterrupted(c collaborators, keep string) error {
 	d := c.spec.dirs
+	if _, err := os.Lstat(d.deploying); errors.Is(err, fs.ErrNotExist) {
+		return nil // the common case: nothing to settle, nothing to say
+	}
 	// Through a linked app dir the marker, and every release, are a
 	// sibling's, whose own deploy may hold that marker: nothing is
 	// read, removed or written (linkAt, as a deploy refuses).
@@ -130,13 +133,12 @@ func (ma *managedApp) settleInterrupted(c collaborators, keep string) error {
 	}
 	// So did one state.json names, though no instance of it is in
 	// memory yet: recovery runs in the background, and a deploy can
-	// take the lock before it has relaunched that version.
-	st, ok, err := c.store.load()
-	switch {
-	case err != nil:
-		logger.Error("deploy marker removed without acting: state.json cannot be read, so whether that deploy reached the cutover cannot be told; a release it left stays until GC", zap.Error(err))
-		return ma.clearMarker(c)
-	case ok && st.CurrentVersion == m.Version:
+	// take the lock before it has relaunched that version. A state
+	// that cannot be read vouches for nothing — recovery refuses it,
+	// so nothing serves from it — and the record decides below.
+	if st, ok, err := c.store.load(); err != nil {
+		logger.Warn("state.json cannot be read; settling the deploy marker by the version's record alone", zap.Error(err))
+	} else if ok && st.CurrentVersion == m.Version {
 		return ma.clearMarker(c)
 	}
 	started, recorded, err := recordedStart(d, m.Version)

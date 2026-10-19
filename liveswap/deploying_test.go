@@ -283,7 +283,7 @@ func TestNothingIsSettledThroughALinkedAppDir(t *testing.T) {
 	must(t, saveDeployMarker(shop, deployMarker{Version: "v2", StartedAt: interruptedAt}))
 	must(t, os.RemoveAll(rig.spec.dirs.app))
 	must(t, os.Symlink("shop", rig.spec.dirs.app))
-	must(t, rig.ma.settleInterrupted(rig.ma.snapshot(), ""))
+	must(t, rig.ma.ensureRunning())
 	if _, err := os.Stat(shop.deploying); err != nil {
 		t.Fatalf("the sibling's marker must be left alone: %v", err)
 	}
@@ -310,6 +310,22 @@ func TestADeployBeforeRecoveryKeepsTheReleaseStateNames(t *testing.T) {
 	}
 	if _, err := readDeployRecord(rig.spec.dirs, "v2"); !errors.Is(err, errNoDeployRecord) {
 		t.Fatalf("a deploy that reached the cutover must not be recorded cut short, got %v", err)
+	}
+}
+
+func TestAStateThatCannotBeReadVouchesForNothing(t *testing.T) {
+	// Only a deploy reaches a settle past an unreadable state.json
+	// (recovery refuses it first). Nothing serves from such a state,
+	// so the record decides: none, and the release is removed.
+	rig := newTestRig(t)
+	leaveInterruptedDeploy(t, rig)
+	rig.store.err = errTest
+	must(t, rig.ma.settleInterrupted(rig.ma.snapshot(), ""))
+	if releasePresent(t, rig, "v2") || markerPresent(t, rig) {
+		t.Fatal("the release of the cut-short deploy must be removed and the marker cleared")
+	}
+	if rec := recordOfV2(t, rig); rec.Status != "failed" || !strings.Contains(rec.Error, "cut short") {
+		t.Fatalf("the cut-short deploy must be recorded: %+v", rec)
 	}
 }
 
