@@ -163,7 +163,8 @@ Concept map from the Nomad-era stack:
   data); the health gate then fails the deploy on the cancelled
   request, before any traffic moves.
 - The new instance MUST be continuously healthy for `soak` before any
-  traffic moves (`soak 0`: the first healthy probe), and MUST be
+  traffic moves (`soak 0`: the first healthy probe; refused at load
+  with `health_path off`, where nothing is probed), and MUST be
   stopped and the deploy failed if not healthy within `deadline`. A
   flapping health check resets the soak. The gate is judged once per
   `health_interval`, so it ends within `deadline` plus one

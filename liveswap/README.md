@@ -275,7 +275,7 @@ resolved at config load.
 | `env`, `env_file` | — | Extra environment |
 | `health_path` | `/health` | 2xx = healthy; `off` = process-liveness only |
 | `health_interval` / `health_timeout` | `5s` / `2s` | Probe cadence |
-| `soak` | `15s` | Continuous health required before cutover. `0` is no soak: traffic moves on the first healthy probe. Refused with `health_path off`, where nothing is probed and the gate would look once, straight after the process starts (#305 tracks allowing it once the gate checks the socket) |
+| `soak` | `15s` | Continuous health required before cutover. `0` is no soak: traffic moves on the first healthy probe. Refused with `health_path off`, where nothing is probed and the gate would look once, straight after the process starts: set a `health_path`, or a `soak` above 0 |
 | `deadline` | `5m` | Bound on pre_start and, separately, on the health gate (soak included, so `soak` cannot exceed it). The gate is judged once per `health_interval`, so it can run over by one interval plus two `health_timeout`s (the probe before the last tick and the one on it); a soak that falls due on that first tick past the deadline still passes |
 | `drain` | `5s` | In-flight grace after cutover, before SIGTERM |
 | `grace` | `10s` | SIGTERM → SIGKILL window |
