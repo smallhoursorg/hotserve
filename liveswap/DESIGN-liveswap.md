@@ -257,9 +257,11 @@ Concept map from the Nomad-era stack:
   refuses nothing and always ends with the marker gone, since the
   next deploy's marker would overwrite it: a release that cannot be
   removed is recorded as a failed deploy's left on disk is
-  (`cleanup of failed release`), and a record there that cannot be
-  read may be that deploy's, so nothing is removed or written over
-  it. A marker that does not prove itself one (it does not parse,
+  (`cleanup of failed release`), and a record or a `state.json` there
+  that cannot be read may vouch for that deploy, so nothing is removed
+  or written over it. Through an app dir that is not the directory it
+  names (`linkAt`) nothing is settled, not even read: the marker and
+  the releases would be a sibling's, whose own deploy may hold it. A marker that does not prove itself one (it does not parse,
   names no version or start, or is not a regular file) is removed and
   acted on for nothing. While a running `pre_start` holds launches,
   the watchdog leaves an unhealthy instance serving rather than stop

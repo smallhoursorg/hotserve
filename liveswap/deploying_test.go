@@ -273,6 +273,46 @@ func TestARecordThatCannotBeReadIsNeitherReplacedNorActedOn(t *testing.T) {
 	}
 }
 
+func TestNothingIsSettledThroughALinkedAppDir(t *testing.T) {
+	// <root>/demo -> shop: demo's recovery must not read, remove or
+	// act on shop's marker, which shop's own deploy may be holding.
+	rig := newTestRig(t)
+	shop := newAppDirs(rig.spec.dirs.root, "shop")
+	must(t, shop.ensure())
+	must(t, os.MkdirAll(shop.release("v2"), 0o755))
+	must(t, saveDeployMarker(shop, deployMarker{Version: "v2", StartedAt: interruptedAt}))
+	must(t, os.RemoveAll(rig.spec.dirs.app))
+	must(t, os.Symlink("shop", rig.spec.dirs.app))
+	must(t, rig.ma.settleInterrupted(rig.ma.snapshot(), ""))
+	if _, err := os.Stat(shop.deploying); err != nil {
+		t.Fatalf("the sibling's marker must be left alone: %v", err)
+	}
+	if _, err := os.Stat(shop.release("v2")); err != nil {
+		t.Fatalf("the sibling's release must be left alone: %v", err)
+	}
+}
+
+func TestADeployBeforeRecoveryKeepsTheReleaseStateNames(t *testing.T) {
+	// Recovery runs in the background: a deploy can take the lock
+	// first, with no instance in memory. A marker for the version
+	// state.json names is a deploy that reached the cutover; its
+	// release is the one recovery is about to relaunch.
+	rig := newTestRig(t)
+	rig.store.state = appState{CurrentVersion: "v2", Nonce: recordedNonce, Handle: handleState{PID: 1}}
+	rig.store.ok = true
+	leaveInterruptedDeploy(t, rig)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/3", version: "v3"}))
+	if !releasePresent(t, rig, "v2") {
+		t.Fatal("the release state.json names must never be removed")
+	}
+	if markerPresent(t, rig) {
+		t.Fatal("the marker must be cleared")
+	}
+	if _, err := readDeployRecord(rig.spec.dirs, "v2"); !errors.Is(err, errNoDeployRecord) {
+		t.Fatalf("a deploy that reached the cutover must not be recorded cut short, got %v", err)
+	}
+}
+
 func TestAMarkerThatIsNotAFileIsRemovedAndActedOnForNothing(t *testing.T) {
 	rig := newTestRig(t)
 	must(t, rig.spec.dirs.ensure())
