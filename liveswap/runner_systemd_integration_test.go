@@ -739,6 +739,11 @@ func TestIntegrationSandboxProbeRefusesAnUnfilteredUnit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// An identifier of its own, matched below: journald can store a
+		// short-lived unit's lines with no unit field at all
+		// (TestIntegrationSystemdJournalTailWhenJournaldIsBehind), but
+		// the stream's identifier is on every one.
+		u.SyslogIdentifier = "itest-probe-" + nonce
 		var props []sddbus.Property
 		for _, p := range unitProperties(u) {
 			if !slices.Contains(drop, p.Name) {
@@ -759,7 +764,7 @@ func TestIntegrationSandboxProbeRefusesAnUnfilteredUnit(t *testing.T) {
 		// a moment to have it.
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			out, _ := exec.Command("journalctl", "--no-pager", "-o", "cat", "_SYSTEMD_USER_UNIT="+u.Name).CombinedOutput()
+			out, _ := exec.Command("journalctl", "--no-pager", "-o", "cat", "-t", u.SyslogIdentifier).CombinedOutput()
 			if line = string(out); strings.Contains(line, "sandbox probe:") || time.Now().After(deadline) {
 				return result, line
 			}
