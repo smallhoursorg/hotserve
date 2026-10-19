@@ -104,9 +104,6 @@ const interruptedDeployError = "the deploy was cut short: hotserve stopped or re
 // which is the error.
 func (ma *managedApp) settleInterrupted(c collaborators, keep string) error {
 	d := c.spec.dirs
-	if _, err := os.Lstat(d.deploying); errors.Is(err, fs.ErrNotExist) {
-		return nil // the common case: nothing to settle, nothing to say
-	}
 	// Through a linked app dir the marker, and every release, are a
 	// sibling's, whose own deploy may hold that marker: nothing is
 	// read, removed or written (linkAt, as a deploy refuses).
