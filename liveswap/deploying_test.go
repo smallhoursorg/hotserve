@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A deploy of v2 that a hotserve stop cut short (#318): what it left
@@ -346,6 +349,39 @@ func TestAMarkerThatIsNotAFileIsRemovedAndActedOnForNothing(t *testing.T) {
 	if !releasePresent(t, rig, "v2") {
 		t.Fatal("and nothing removed for it")
 	}
+}
+
+func TestADirectoryAtTheMarkerFailsExtractingDeploysNamingIt(t *testing.T) {
+	// Only root or the hotserve user by hand can put one there. It is
+	// never deleted (what it holds is not hotserve's): each extracting
+	// deploy fails naming the path, and the journal says what was and
+	// was not done, until it is removed by hand. Accepted residual.
+	rig := newTestRig(t)
+	core, logs := observer.New(zap.WarnLevel)
+	rig.ma.logger = zap.New(core)
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/1", version: "v1"}))
+	must(t, os.MkdirAll(rig.spec.dirs.deploying+"/kept", 0o700))
+
+	err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/2", version: "v2"})
+	if err == nil || !strings.Contains(err.Error(), "writing the deploy marker") || !strings.Contains(err.Error(), rig.spec.dirs.deploying) {
+		t.Fatalf("the deploy must fail naming the marker's path, got %v", err)
+	}
+	if _, err := os.Stat(rig.spec.dirs.deploying + "/kept"); err != nil {
+		t.Fatalf("what the directory holds must never be deleted: %v", err)
+	}
+	if releasePresent(t, rig, "v2") {
+		t.Fatal("nothing may be fetched past a marker the deploy could not write")
+	}
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "removed") && !strings.Contains(e.Message, "not removed") && !strings.Contains(e.Message, "where it can be") {
+			t.Errorf("a log line claims a removal that did not happen: %q", e.Message)
+		}
+		if strings.Contains(e.Message, "clears it") {
+			t.Errorf("a log line promises a clear nothing will make: %q", e.Message)
+		}
+	}
+	// A rollback writes no marker, so it still goes through.
+	must(t, rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}))
 }
 
 func TestAMarkerThatIsNotOneIsRemovedAndActedOnForNothing(t *testing.T) {

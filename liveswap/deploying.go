@@ -31,8 +31,8 @@ import (
 //     runs out of the release by then, and no deploy writes a marker
 //     meanwhile. Settling never refuses anything: what it cannot tell
 //     or cannot remove ends as a failed deploy's release left on disk
-//     does, and the marker goes either way, so one slot never holds
-//     two deploys.
+//     does, and the marker is removed either way (a removal that
+//     fails is logged), so one slot never holds two deploys.
 //
 // It lives beside state.json, outside every view, written and read
 // under ownfile.go's rules.
@@ -120,7 +120,7 @@ func (ma *managedApp) settleInterrupted(c collaborators, keep string) error {
 		// Not a marker: its content, or a link, FIFO or other non-file
 		// at its name. Acted on for nothing — a release it might have
 		// named stays, as before there were markers.
-		c.logger.Error("deploy marker removed: it is not one, so nothing is done for it", zap.String("path", d.deploying), zap.Error(err))
+		c.logger.Error("deploy marker is not one: nothing is done for it, and it is removed where it can be", zap.String("path", d.deploying), zap.Error(err))
 		return ma.clearMarker(c)
 	}
 	logger := c.logger.With(zap.String("version", m.Version))
@@ -222,8 +222,9 @@ func (ma *managedApp) settleBeforeDeploy(c collaborators, old *instance) error {
 	if old != nil {
 		keep = old.version
 	}
-	// A marker that cannot be removed is overwritten by this deploy's
-	// own, which reports a write that fails.
+	// A marker that cannot be removed is replaced by this deploy's own
+	// if it extracts, or fails that write, naming the path (a
+	// non-empty directory there: an accepted residual).
 	if err := ma.settleInterrupted(c, keep); err != nil {
 		c.logger.Error("deploy marker not removed; deploying on", zap.Error(err))
 	}
@@ -232,10 +233,12 @@ func (ma *managedApp) settleBeforeDeploy(c collaborators, old *instance) error {
 
 // settleAfterRecovery settles a marker once recovery's sweep has
 // confirmed, keeping the instance of version keep. A marker that
-// cannot be removed is logged: the app is up, and the next start or
-// deploy reads the record it was settled into and clears it.
+// cannot be removed is logged: the app is up, and each start and
+// deploy tries again (a file there: the record it was settled into
+// then says to clear it; a non-empty directory: never, until it is
+// removed by hand).
 func (ma *managedApp) settleAfterRecovery(c collaborators, keep string) {
 	if err := ma.settleInterrupted(c, keep); err != nil {
-		c.logger.Error("deploy marker not removed; the next start or deploy clears it", zap.Error(err))
+		c.logger.Error("deploy marker not removed; each start and deploy tries again", zap.Error(err))
 	}
 }
