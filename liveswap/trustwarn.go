@@ -23,7 +23,10 @@ import (
 // unknown-app path (verify, then 404), and with no app at all nothing
 // deploys. Runs after Validate, like the other load-time warnings, so
 // a rejected config warns about nothing, and after Provision's
-// defaults pass, so no app's config is nil.
+// defaults pass, so no app's config is nil. It also warns about a set
+// near deploytrust.MaxSources (deploytrust.WarnSourceCount), the
+// global one whether or not an app inherits it, since the unknown-app
+// path checks it too.
 func warnUnboundTrust(logger *zap.Logger, global []deploytrust.TrustConfig, apps map[string]*AppConfig) {
 	if logger == nil {
 		return
@@ -34,12 +37,16 @@ func warnUnboundTrust(logger *zap.Logger, global []deploytrust.TrustConfig, apps
 			inherited = true
 		}
 	}
+	// A set near deploytrust.MaxSources warns too, before one more
+	// source makes the config refuse to load.
+	deploytrust.WarnSourceCount(logger, len(global), zap.String("deploy_trust", "global"))
 	if inherited {
 		for i, tc := range global {
 			deploytrust.WarnUnboundSource(logger, tc, zap.Int("deploy_trust", i))
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(apps)) {
+		deploytrust.WarnSourceCount(logger, len(apps[name].DeployTrust), zap.String("app", name))
 		for i, tc := range apps[name].DeployTrust {
 			deploytrust.WarnUnboundSource(logger, tc, zap.String("app", name), zap.Int("deploy_trust", i))
 		}

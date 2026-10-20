@@ -3,6 +3,7 @@ package deploytrust
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,6 +85,13 @@ func (ks *keySet) VerifySignature(_ context.Context, raw string) ([]byte, error)
 		return nil, fmt.Errorf("%d signatures, want one", len(jws.Signatures))
 	}
 	kid := jws.Signatures[0].Header.KeyID
+	if kid == "" {
+		// Without a kid, go-oidc tries every key the set holds: as many
+		// signature checks as the issuer publishes keys, which no floor
+		// is sized for (RefusalFloor). GitHub's and GitLab's tokens name
+		// one.
+		return nil, errors.New("the token names no key (kid); a source checks one key per token")
+	}
 	ks.mu.Lock()
 	keys := ks.keys
 	ks.mu.Unlock()
@@ -110,21 +118,20 @@ func (ks *keySet) VerifySignature(_ context.Context, raw string) ([]byte, error)
 	return nil, fmt.Errorf("the issuer's keys hold none that verifies it (kid %q); they were fetched under a minute ago, so a token from %s on fetches them again, as does systemctl reload hotserve now", kid, next.UTC().Format(time.RFC3339))
 }
 
-// verifyWith is the payload of the first of keys that verifies jws —
-// one under the token's kid, or any, for a token that names none, as
-// go-oidc matches them — and whether the token names a kid that one
-// of keys carries.
+// verifyWith is the payload of jws when the first of keys under kid
+// verifies it, and whether one of keys carries kid: one signature check
+// per token, however many keys the issuer publishes under it.
 func verifyWith(jws *jose.JSONWebSignature, kid string, keys []jose.JSONWebKey) (payload []byte, held bool) {
 	for _, key := range keys {
-		if kid != "" && key.KeyID != kid {
+		if key.KeyID != kid {
 			continue
 		}
-		held = kid != ""
 		if p, err := jws.Verify(&key); err == nil {
-			return p, held
+			return p, true
 		}
+		return nil, true
 	}
-	return nil, held
+	return nil, false
 }
 
 // refresh begins a fetch when none is under way and either force (a

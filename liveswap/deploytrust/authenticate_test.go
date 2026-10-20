@@ -69,49 +69,89 @@ func answered(t *testing.T, ref *Refusal) (code int, body map[string]string) {
 	return code, body
 }
 
-// A refusal is answered no sooner than RefusalFloor after Authenticate
+// A refusal is answered no sooner than the floor after the webhook
 // began, whatever it took to reach (#306): a name with no source, which
-// checks nothing, and one whose source checks a signature, alike. A
-// caller that went away is not held.
+// checks nothing, and one whose source checks a signature, alike; and
+// a caller that went away all the same, since an HTTP/1.1 client can
+// half-close its side and still read the answer. A refusal whose
+// judging overran the floor is held to the next multiple of it, and
+// the overrun is logged once per window. Production's limiter holds to
+// RefusalFloor; a test's own (NewLimiter) holds nothing.
 func TestAuthenticateHoldsARefusalToTheFloor(t *testing.T) {
 	_, pub := trusttest.GenerateKey()
 	other, _ := trusttest.GenerateKey()
+	if Shared().floor != RefusalFloor || NewLimiter(trusttest.NewClock()).floor != 0 {
+		t.Fatalf("floors: Shared %v, NewLimiter %v; want %v and 0", Shared().floor, NewLimiter(trusttest.NewClock()).floor, RefusalFloor)
+	}
 	l := NewLimiter(trusttest.NewClock())
+	l.floor = RefusalFloor
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	overruns := func() int { return logs.FilterMessageSnippet("longer than the refusal floor").Len() }
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
 	for _, tc := range []struct {
 		name string
 		vs   []Verifier
+		req  *http.Request
 	}{
-		{"no source", nil},
-		{"a signature checked", Verifiers([]Source{localTrust(pub, "box")}, nil)},
+		{"no source", nil, request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil))},
+		{"a signature checked", Verifiers([]Source{localTrust(pub, "box")}, nil), request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil))},
+		{"the caller gone", nil, request("192.0.2.80:1", "not-a-jwt").WithContext(gone)},
 	} {
 		begun := time.Now()
-		if _, ref := l.Authenticate(request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil)), begun, tc.vs, zap.NewNop(), "", ""); ref == nil {
+		if _, ref := l.Authenticate(tc.req, begun, tc.vs, logger, "", ""); ref == nil {
 			t.Fatalf("%s: accepted, want a refusal", tc.name)
 		}
 		if took := time.Since(begun); took < RefusalFloor {
 			t.Errorf("%s: refused after %v, want no sooner than %v", tc.name, took, RefusalFloor)
 		}
 	}
-	// The floor runs from the start the webhook passes, taken before
-	// its own lookups: time the webhook already spent counts toward it.
-	called := time.Now()
-	if _, ref := l.Authenticate(request("192.0.2.80:1", "not-a-jwt"), called.Add(-time.Hour), nil, zap.NewNop(), "", ""); ref == nil {
-		t.Fatal("accepted, want a refusal")
+	if n := overruns(); n != 0 {
+		t.Fatalf("%d overrun lines for refusals within the floor, want none", n)
 	}
-	if took := time.Since(called); took > time.Second {
-		t.Errorf("a refusal whose start is long past was held %v, want no hold", took)
+	// Judging that took longer than the floor (here, time the webhook
+	// spent before calling) is held to the next multiple, and said once
+	// per window.
+	for range 2 {
+		start := time.Now().Add(-RefusalFloor - RefusalFloor/5)
+		if _, ref := l.Authenticate(request("192.0.2.80:1", "not-a-jwt"), start, nil, logger, "", ""); ref == nil {
+			t.Fatal("accepted, want a refusal")
+		}
+		if took := time.Since(start); took < 2*RefusalFloor {
+			t.Errorf("an overrun refusal answered %v after its start, want the next multiple, %v", took, 2*RefusalFloor)
+		}
 	}
-	gone, cancel := context.WithCancel(context.Background())
-	cancel()
-	held := make(chan struct{})
-	go func() {
-		defer close(held)
-		holdRefusal(gone, time.Now().Add(time.Hour))
-	}()
-	select {
-	case <-held:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a caller that went away was held")
+	if n := overruns(); n != 1 {
+		t.Fatalf("%d overrun lines for two overruns in one window, want one", n)
+	}
+}
+
+// An accepted token over three quarters of MaxTokenLen is logged, once
+// per window, with who it is and how long; one under it is not.
+func TestAuthenticateWarnsOfATokenNearTheLimit(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
+	l := NewLimiter(trusttest.NewClock())
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	near := func() int { return logs.FilterMessageSnippet("near the length limit").Len() }
+	if _, ref := l.Authenticate(request("192.0.2.81:1", trusttest.Mint(t, priv, "box", nil)), time.Now(), vs, logger, "", ""); ref != nil || near() != 0 {
+		t.Fatalf("a small token: refusal %+v, %d warnings; want accepted, none", ref, near())
+	}
+	// Three quarters of three quarters: base64 grows the claim by a
+	// third, so the token lands between the warning and the limit.
+	big := trusttest.Mint(t, priv, "box", map[string]string{"pad": strings.Repeat("a", MaxTokenLen*9/16)})
+	if len(big) <= MaxTokenLen*3/4 || len(big) > MaxTokenLen {
+		t.Fatalf("the padded token is %d bytes, want between %d and %d", len(big), MaxTokenLen*3/4, MaxTokenLen)
+	}
+	for range 2 {
+		if _, ref := l.Authenticate(request("192.0.2.81:1", big), time.Now(), vs, logger, "", ""); ref != nil {
+			t.Fatalf("a token near the limit: refused: %+v", ref)
+		}
+	}
+	if near() != 1 {
+		t.Fatalf("%d warnings for two tokens near the limit in one window, want one", near())
 	}
 }
 
@@ -164,6 +204,26 @@ func TestBuildRefusesMoreSourcesThanTheFloorCovers(t *testing.T) {
 		if want := "deploy_trust: " + strconv.Itoa(MaxSources+1) + " sources, at most " + strconv.Itoa(MaxSources); err == nil || !strings.HasPrefix(err.Error(), want) {
 			t.Fatalf("%s: err = %v, want it to begin %q", tc.name, err, want)
 		}
+	}
+}
+
+// WarnSourceCount warns about a set over three quarters of MaxSources,
+// naming the set, its count and the limit; one at three quarters is
+// quiet.
+func TestWarnSourceCountNearTheLimit(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	WarnSourceCount(logger, MaxSources*3/4, zap.String("app", "blog"))
+	if n := logs.Len(); n != 0 {
+		t.Fatalf("%d sources: %d warnings, want none", MaxSources*3/4, n)
+	}
+	WarnSourceCount(logger, MaxSources*3/4+1, zap.String("app", "blog"))
+	all := logs.TakeAll()
+	if len(all) != 1 {
+		t.Fatalf("%d sources: %d warnings, want one", MaxSources*3/4+1, len(all))
+	}
+	if f := all[0].ContextMap(); f["app"] != "blog" || f["sources"] != int64(MaxSources*3/4+1) || f["limit"] != int64(MaxSources) {
+		t.Fatalf("warning fields = %v, want the set, its count and the limit", f)
 	}
 }
 

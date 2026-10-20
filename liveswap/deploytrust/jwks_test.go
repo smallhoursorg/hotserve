@@ -101,6 +101,25 @@ func TestKeySetNeverFetchesForAKidItHolds(t *testing.T) {
 	fetches(t, iss, 1, "bad signatures under a held kid")
 }
 
+// A token that names no kid is refused before any key is tried, and
+// begins no fetch: without one, every key the issuer publishes would
+// be a signature check, which no refusal floor is sized for. Even one
+// signed with the issuer's own key.
+func TestKeySetRefusesATokenNamingNoKid(t *testing.T) {
+	iss := trusttest.NewIssuer(t)
+	c := trusttest.NewClock()
+	v := clocked(iss, c)
+	settled(t, v)
+	c.Advance(RefetchInterval)
+	_, err := v.verify(context.Background(), iss.MintKID(t, iss.Priv, "", "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute)))
+	refusedPlainly(t, err, "a token naming no kid")
+	if want := "the token names no key (kid); a source checks one key per token"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("a token naming no kid: reason = %q, want %q", err, want)
+	}
+	waited(t, v)
+	fetches(t, iss, 1, "a token naming no kid")
+}
+
 // A token whose kid the key set holds no key for begins a fetch, but
 // at most once per RefetchInterval, and is refused without waiting on
 // it: within the interval it is refused against what the last fetch

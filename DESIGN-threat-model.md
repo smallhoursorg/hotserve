@@ -99,11 +99,17 @@ local work still differs — each source a name resolves to parses the
 token and checks a signature, a name with no source does neither — so
 it is bounded and then hidden: a token longer than `MaxTokenLen` (8
 KiB) is refused before any source parses it, a name resolves to at
-most `MaxSources` (8; `Build` refuses more at config load), and every
-refusal is answered no sooner than `RefusalFloor` (25 ms) after the
-webhook began handling the request, before its app lookup and the
+most `MaxSources` (8; `Build` refuses more at config load), a source
+checks one key per token (a token naming no `kid` is refused, so an
+issuer's key count does not multiply the work: `verifyWith`), and
+every refusal is answered no sooner than `RefusalFloor` (25 ms) after
+the webhook began handling the request, before its app lookup and the
 lock a reload can hold there (`Handler.ServeHTTP`;
-liveswap/deploytrust/authenticate.go). Measured on an arm64 machine
+liveswap/deploytrust/authenticate.go), held even when the client has
+gone (an HTTP/1.1 half-close still reads the answer). A refusal that
+took longer anyway is held to the next multiple of the floor, so an
+overrun shows only in 25 ms steps, and the journal says so once per
+window. Measured on an arm64 machine
 (2026-10-20): an OIDC source refuses a 2 KiB token in 0.11 ms and a
 16 KiB one in 0.33 ms; a 1 MiB one, which the header limit allows,
 took 16 ms. The floor covers eight checks of an 8 KiB token on a box

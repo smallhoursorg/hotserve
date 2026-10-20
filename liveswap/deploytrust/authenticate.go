@@ -1,7 +1,6 @@
 package deploytrust
 
 import (
-	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -44,31 +43,56 @@ const unauthorizedMessage = "invalid or missing deploy token (Authorization: Bea
 // local source in a tenth of that; a 1 MiB token, which the header
 // limit allows, took 16 ms. The floor covers MaxSources checks of a
 // MaxTokenLen token on a box ten times slower (an estimate, not
-// measured); Build refuses a set of more, and authorize a longer
-// token. An accepted token is not held.
+// measured); Build refuses a set of more, authorize a longer token,
+// and a source checks one key per token (verifyWith). A refusal that
+// took longer anyway, on a loaded box, is held to the next multiple of
+// the floor and the overrun logged (holdRefusal). An accepted token is
+// not held.
 const RefusalFloor = 25 * time.Millisecond
 
 // MaxTokenLen is the longest bearer token judged; a longer one is
 // refused before any source parses it. A GitHub or GitLab OIDC token
-// is 1–2 KiB, a `hotserve deploy-token` one smaller.
+// is 1–2 KiB, a `hotserve deploy-token` one smaller. An accepted token
+// over three quarters of it is logged (nearTokenCapLabel), so one that
+// grows toward it is seen before it is refused.
 const MaxTokenLen = 8 << 10
 
 // MaxSources is the most deploy_trust sources one name resolves to
-// (Build).
+// (Build); more than three quarters of it warns at config load
+// (WarnSourceCount).
 const MaxSources = 8
 
-// holdRefusal returns once RefusalFloor has passed since start, or the
-// caller has gone away.
-func holdRefusal(ctx context.Context, start time.Time) {
-	wait := RefusalFloor - time.Since(start)
-	if wait <= 0 {
-		return
+// overrunLabel and nearTokenCapLabel key Authenticate's once-per-window
+// warnings in the limiter's outage table.
+const (
+	overrunLabel      = "refusal floor overrun"
+	nearTokenCapLabel = "token near MaxTokenLen"
+)
+
+// holdRefusal returns at the first multiple of floor after start that
+// judging has not passed: floor itself, unless judging took longer, so
+// an overrun shows only in floor-sized steps and is reported (overran).
+// A caller that went away is held all the same: an HTTP/1.1 client can
+// half-close its side, which ends the request's context, and still
+// read the answer. A floor of 0 holds nothing (a test's limiter).
+func holdRefusal(start time.Time, floor time.Duration) (took time.Duration, overran bool) {
+	if floor <= 0 {
+		return 0, false
 	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
-	select {
-	case <-t.C:
-	case <-ctx.Done():
+	took = time.Since(start)
+	steps := took/floor + 1
+	time.Sleep(time.Until(start.Add(steps * floor)))
+	return took, steps > 1
+}
+
+// WarnSourceCount warns, at config load, about a set of deploy_trust
+// sources over three quarters of MaxSources, before a config that adds
+// one more is refused. where names the set (an app, the global blocks,
+// the box).
+func WarnSourceCount(logger *zap.Logger, n int, where ...zap.Field) {
+	if n > MaxSources*3/4 {
+		logger.Warn("deploy_trust: many sources for one name; a config with more than the limit does not load",
+			append(where, zap.Int("sources", n), zap.Int("limit", MaxSources))...)
 	}
 }
 
@@ -116,10 +140,11 @@ func scopeField(fields []zap.Field, key, value string) []zap.Field {
 // address has one budget whichever webhook a flood aims at. start is
 // when the webhook began handling the request, before anything whose
 // time depends on what was asked for (liveswap's app lookup and the
-// lock a reload holds there): a refusal is returned no sooner than
-// RefusalFloor after it.
+// lock a reload holds there): a refusal is returned no sooner than the
+// limiter's floor after it (holdRefusal).
 func (l *Limiter) Authenticate(r *http.Request, start time.Time, verifiers []Verifier, logger *zap.Logger, scopeKey, scopeValue string) (Identity, *Refusal) {
-	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
+	token := bearerToken(r)
+	who, down, refused := authorize(r.Context(), verifiers, token)
 	key := clientKey(r)
 	// A source the box could not consult is named here once per window
 	// per source, whatever the budgets and whether or not another
@@ -153,8 +178,15 @@ func (l *Limiter) Authenticate(r *http.Request, start time.Time, verifiers []Ver
 			logger.Warn("webhook auth failures throttled process-wide: further ones are not logged",
 				zap.Int("failures", FailGlobalBudget), zap.Duration("window", FailWindow))
 		}
-		holdRefusal(r.Context(), start)
+		if took, overran := holdRefusal(start, l.floor); overran && l.outage(overrunLabel, scopeKey) {
+			logger.Warn("webhook auth: judging a refused token took longer than the refusal floor; its answer was held to the next multiple, so its timing may say how many sources checked it",
+				append(scopeField(nil, scopeKey, scopeValue), zap.Duration("took", took), zap.Duration("floor", l.floor))...)
+		}
 		return Identity{}, &Refusal{Status: http.StatusUnauthorized, Message: unauthorizedMessage}
+	}
+	if len(token) > MaxTokenLen*3/4 && l.outage(nearTokenCapLabel, scopeKey) {
+		logger.Warn("webhook auth: an accepted token is near the length limit; a longer one is refused",
+			append(scopeField(nil, scopeKey, scopeValue), zap.String("deployed_by", who.By), zap.Int("bytes", len(token)), zap.Int("limit", MaxTokenLen))...)
 	}
 	l.clear(key)
 	return who, nil

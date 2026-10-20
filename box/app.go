@@ -76,6 +76,7 @@ func (a *App) provision(logger *zap.Logger) error {
 		return fmt.Errorf("box: %w", err)
 	}
 	a.verifiers = vs
+	deploytrust.WarnSourceCount(logger, len(a.DeployTrust), zap.String("option", "box"))
 	// The warning reads a block as it will verify, placeholders
 	// resolved; New resolved its own copy, so this is another.
 	resolved := slices.Clone(a.DeployTrust)

@@ -55,7 +55,11 @@ const (
 // handler shares: a config reload must not hand a throttled address a
 // fresh budget, and two mounts must not double it. It has no goroutine
 // and so no lifecycle.
-var shared = NewLimiter(systemClock{})
+var shared = func() *Limiter {
+	l := NewLimiter(systemClock{})
+	l.floor = RefusalFloor
+	return l
+}()
 
 // Shared is the process-wide limiter: what liveswap's webhook and the
 // box's authenticate on (Limiter.Authenticate), so one address has one
@@ -82,6 +86,9 @@ type Limiter struct {
 	maxKeys      int
 	window       time.Duration
 	clock        Clock
+	// floor is the refusal floor Authenticate holds a refusal to:
+	// RefusalFloor on Shared, 0 on a test's own limiter (NewLimiter).
+	floor time.Duration
 
 	mu        sync.Mutex
 	keys      map[string]*failWindow
@@ -104,8 +111,10 @@ type failWindow struct {
 }
 
 // NewLimiter is a limiter on its own clock, with the production
-// budgets (FailBudget, FailGlobalBudget, FailWindow): for tests, which
-// advance the clock. Production authenticates on Shared.
+// budgets (FailBudget, FailGlobalBudget, FailWindow) and no refusal
+// floor: for tests, which advance the clock and would otherwise sleep
+// out RefusalFloor on every refusal. Production authenticates on
+// Shared, which holds refusals to it.
 func NewLimiter(c Clock) *Limiter {
 	return &Limiter{
 		budget: FailBudget, globalBudget: FailGlobalBudget, maxKeys: keysMax,
@@ -183,7 +192,9 @@ type outageKey struct{ label, scope string }
 // sees the outage whichever webhook met it first. It touches no
 // address; the request is charged by fail as usual. The table is swept
 // of drained entries on each write, which is O(entries) — configured
-// ones, not the caller's to grow.
+// ones, not the caller's to grow. Authenticate's other once-per-window
+// warnings (overrunLabel, nearTokenCapLabel) are kept here too, under
+// labels no source carries (a source's is oidc:… or local:…).
 func (l *Limiter) outage(label, scope string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
