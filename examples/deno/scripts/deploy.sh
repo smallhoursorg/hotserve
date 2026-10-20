@@ -238,7 +238,7 @@ boxrefused() {
 send() { # <curl args...>
 	stream "$@"
 	if [ -n "$minted" ] && boxrefused; then
-		printf '\nthe box refused the token; trying once more in 3s, in case it was fetching the issuer'"'"'s new signing key\n'
+		printf '\nthe box refused the token; sending it once more in 3s (a box refuses the first token under a new signing key while it fetches the key)\n'
 		sleep 3
 		stream "$@"
 	fi
@@ -271,8 +271,8 @@ refused() {
 		echo "  the audience, subject or claim it pins, against what hotserve deploy-token was given"
 	fi
 	echo "Or the URL's app name is not one the box knows: an unknown app answers the same 401."
-	echo "Or the box could not consult the token's issuer (an outage there): its journal says so, and a re-run"
-	echo "once the issuer is back goes through."
+	echo "Or the box could not consult the token's issuer (an outage there), or had fetched its keys in the"
+	echo "minute before the issuer changed them: its journal says which, and when a re-run goes through."
 	echo "Check the app's deploy_trust block in the box's Caddyfile. The box's journal"
 	echo "(journalctl -u hotserve, 'webhook auth failed') names the app asked for and the"
 	echo "check that refused it, unless the box's budget for logging failed authentications is spent."

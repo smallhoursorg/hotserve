@@ -1286,8 +1286,14 @@ func TestWebhookIssuerOutageIsNamedPastTheBudget(t *testing.T) {
 	if w := from(t, h, ci, token()); w.Code != http.StatusUnauthorized {
 		t.Fatalf("issuer back past the refetch interval, the token beginning the fetch: code = %d, want 401", w.Code)
 	}
-	primed(t, rig.ma.verifiers)
-	if w := from(t, h, ci, token()); w.Code != http.StatusOK {
+	// Only that token's fetch can let a retry through: nothing else
+	// fetches within the interval.
+	w := from(t, h, ci, token())
+	for deadline := time.Now().Add(5 * time.Second); w.Code == http.StatusUnauthorized && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		w = from(t, h, ci, token())
+	}
+	if w.Code != http.StatusOK {
 		t.Fatalf("issuer back past the refetch interval: code = %d, want 200; body: %s", w.Code, w.Body.String())
 	}
 	if h.limiter.Size() != 1 { // the other address's one failure remains

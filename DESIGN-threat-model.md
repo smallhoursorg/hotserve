@@ -97,8 +97,10 @@ liveswap/deploytrust/jwks.go). The local work still differs — one
 signature check for each source holding a key for the token's kid, so
 a name whose sources check more signatures than the global ones would
 refuse a crafted token a check later — so every refusal is answered no
-sooner than `RefusalFloor` (5 ms) after `Authenticate` began
-(liveswap/deploytrust/authenticate.go); a check took about 55 µs on an
+sooner than `RefusalFloor` (5 ms) after the webhook began handling the
+request, before its app lookup and the lock a reload can hold there
+(`Handler.ServeHTTP`; liveswap/deploytrust/authenticate.go); a check
+took about 55 µs on an
 arm64 machine (2026-10-20). Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy

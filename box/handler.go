@@ -121,7 +121,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 // refusal is written. route names the request in the preamble's
 // journal lines, beside the address.
 func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, route string) (deploytrust.Identity, bool, error) {
-	ident, refusal := h.limiter.Authenticate(r, h.app.verifiers, h.logger, "box_request", route)
+	ident, refusal := h.limiter.Authenticate(r, time.Now(), h.app.verifiers, h.logger, "box_request", route)
 	if refusal != nil {
 		return ident, false, refusal.Write(func(code int, body any) error { return respond(w, code, body) })
 	}

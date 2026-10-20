@@ -85,12 +85,21 @@ func TestAuthenticateHoldsARefusalToTheFloor(t *testing.T) {
 		{"a signature checked", Verifiers([]Source{localTrust(pub, "box")}, nil)},
 	} {
 		begun := time.Now()
-		if _, ref := l.Authenticate(request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil)), tc.vs, zap.NewNop(), "", ""); ref == nil {
+		if _, ref := l.Authenticate(request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil)), begun, tc.vs, zap.NewNop(), "", ""); ref == nil {
 			t.Fatalf("%s: accepted, want a refusal", tc.name)
 		}
 		if took := time.Since(begun); took < RefusalFloor {
 			t.Errorf("%s: refused after %v, want no sooner than %v", tc.name, took, RefusalFloor)
 		}
+	}
+	// The floor runs from the start the webhook passes, taken before
+	// its own lookups: time the webhook already spent counts toward it.
+	called := time.Now()
+	if _, ref := l.Authenticate(request("192.0.2.80:1", "not-a-jwt"), called.Add(-time.Hour), nil, zap.NewNop(), "", ""); ref == nil {
+		t.Fatal("accepted, want a refusal")
+	}
+	if took := time.Since(called); took > time.Second {
+		t.Errorf("a refusal whose start is long past was held %v, want no hold", took)
 	}
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -121,7 +130,7 @@ func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
 	const addr, key = "203.0.113.9:4242", "203.0.113.9"
 	t.Cleanup(func() { forgetTestAddress(key) })
 
-	who, ref := Shared().Authenticate(request(addr, "not-a-jwt"), vs, logger, "webhook", "box")
+	who, ref := Shared().Authenticate(request(addr, "not-a-jwt"), time.Now(), vs, logger, "webhook", "box")
 	if ref == nil || who.By != "" {
 		t.Fatalf("refused token: who = %+v, refusal = %+v; want a refusal and nobody", who, ref)
 	}
@@ -140,7 +149,7 @@ func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
 	}
 
 	const sha = "4f1c2a9d0e8b7c6a5f4e3d2c1b0a998877665544"
-	who, ref = Shared().Authenticate(request(addr, trusttest.Mint(t, priv, "box", map[string]string{"sub": "ci", "sha": sha})), vs, logger, "webhook", "box")
+	who, ref = Shared().Authenticate(request(addr, trusttest.Mint(t, priv, "box", map[string]string{"sub": "ci", "sha": sha})), time.Now(), vs, logger, "webhook", "box")
 	if ref != nil {
 		t.Fatalf("accepted token refused: %+v", ref)
 	}
@@ -177,7 +186,7 @@ func TestAuthenticateBudgetAndBound(t *testing.T) {
 	const addr = "203.0.113.10:4242"
 	call := func(token, key, value string) *Refusal {
 		t.Helper()
-		_, ref := l.Authenticate(request(addr, token), vs, logger, key, value)
+		_, ref := l.Authenticate(request(addr, token), time.Now(), vs, logger, key, value)
 		return ref
 	}
 
@@ -258,7 +267,7 @@ func TestOutageLineIsPerCaller(t *testing.T) {
 		{"webhook", "box", "203.0.113.12:1"},
 		{"app", "demo", "203.0.113.11:1"},
 	} {
-		if _, ref := l.Authenticate(request(c.addr, tok), vs, logger, c.key, c.value); ref == nil || ref.Status != http.StatusUnauthorized {
+		if _, ref := l.Authenticate(request(c.addr, tok), time.Now(), vs, logger, c.key, c.value); ref == nil || ref.Status != http.StatusUnauthorized {
 			t.Fatalf("%s=%s: refusal = %+v; want the flat 401 while the issuer is down", c.key, c.value, ref)
 		}
 	}

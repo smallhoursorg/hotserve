@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -51,7 +52,7 @@ func TestLocalKeyFileRoundtrip(t *testing.T) {
 	tok := trusttest.Mint(t, loadedPriv, "hotserve", map[string]string{"repository": "org/app"})
 	req := httptest.NewRequest(http.MethodGet, "/demo", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	who, ref := deploytrust.NewLimiter(newFakeClock()).Authenticate(req, deploytrust.Verifiers(sources, nil), zap.NewNop(), "", "")
+	who, ref := deploytrust.NewLimiter(newFakeClock()).Authenticate(req, time.Now(), deploytrust.Verifiers(sources, nil), zap.NewNop(), "", "")
 	if ref != nil || who.By != "local:"+pubPath {
 		t.Fatalf("round-trip token: who = %+v, refusal = %+v; want accepted under the key file's label", who, ref)
 	}

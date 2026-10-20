@@ -125,8 +125,12 @@ func TestKeySetFetchesForAnUnknownKidOncePerInterval(t *testing.T) {
 	c.Advance(RefetchInterval - time.Second)
 	err = forged("forged-2")
 	refusedPlainly(t, err, "unknown kid a second before the interval")
-	if strings.Contains(err.Error(), "fetching") {
-		t.Fatalf("unknown kid within the interval: reason = %q, want no word of a fetch", err)
+	// Within the interval the refusal names why no fetch began, when one
+	// may, and the reload that fetches now: a rotation in that minute is
+	// not read as a trust mismatch.
+	next := c.Now().Add(time.Second).UTC().Format(time.RFC3339)
+	if want := `kid "forged-2"); they were fetched under a minute ago, so a token from ` + next + ` on fetches them again, as does systemctl reload hotserve now`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("unknown kid within the interval: reason = %q, want %q", err, want)
 	}
 	fetches(t, iss, 1, "unknown kids within the interval")
 	c.Advance(time.Second)
@@ -200,6 +204,18 @@ func TestIssuerStateIsSharedAcrossSourcesAndReloads(t *testing.T) {
 	settled(t, first) // a reload whose fetch fails
 	if _, err := first.verify(ctx, ciToken(t, iss)); err != nil {
 		t.Fatalf("a held key after a reload whose fetch failed: refused: %v", err)
+	}
+	// So does one whose discovery names a moved jwks_uri: the keys held
+	// stay in use until the new endpoint's first fetch replaces them.
+	iss.JWKSMoved.Store(true)
+	settled(t, first)
+	if _, err := first.verify(ctx, ciToken(t, iss)); err != nil {
+		t.Fatalf("a held key after a reload that moved the jwks_uri, its fetch failed: refused: %v", err)
+	}
+	iss.JWKSDown.Store(false)
+	settled(t, first)
+	if _, err := first.verify(ctx, ciToken(t, iss)); err != nil {
+		t.Fatalf("after the moved endpoint's fetch: refused: %v", err)
 	}
 }
 

@@ -33,8 +33,8 @@ func (ref *Refusal) Write(write func(code int, body any) error) error {
 // source pins.
 const unauthorizedMessage = "invalid or missing deploy token (Authorization: Bearer <jwt>)"
 
-// RefusalFloor is the soonest a refused token is answered after
-// Authenticate began judging it (#306). Judging is local, but not
+// RefusalFloor is the soonest a refused token is answered after the
+// webhook began handling it (#306). Judging is local, but not
 // equal: one signature check for each source the name resolves to
 // that holds a key for the token, none for a name with no source, so
 // the time to the 401 alone would say how many sources a name has, and
@@ -100,10 +100,11 @@ func scopeField(fields []zap.Field, key, value string) []zap.Field {
 // and the reason — liveswap names the app — bounded where a line is
 // written (scopeField); an empty key is no field. liveswap's webhook
 // and the box's both call this on the limiter Shared returns, so one
-// address has one budget whichever webhook a flood aims at. A refusal
-// is returned no sooner than RefusalFloor after the call began.
-func (l *Limiter) Authenticate(r *http.Request, verifiers []Verifier, logger *zap.Logger, scopeKey, scopeValue string) (Identity, *Refusal) {
-	start := time.Now()
+// address has one budget whichever webhook a flood aims at. start is
+// when the webhook began handling the request, before it looked up
+// the verifiers (a lock a reload holds can stand in that way): a
+// refusal is returned no sooner than RefusalFloor after it.
+func (l *Limiter) Authenticate(r *http.Request, start time.Time, verifiers []Verifier, logger *zap.Logger, scopeKey, scopeValue string) (Identity, *Refusal) {
 	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)
 	// A source the box could not consult is named here once per window

@@ -1028,7 +1028,7 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("no baseline: exit %d\n%s", code, out)
 		}
 		g.box.set(func(s *standIn) { s.onGet = "401" })
-		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy_trust local { public_key") || strings.Contains(out, "claim repository") || strings.Contains(out, "trying once more") {
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy_trust local { public_key") || strings.Contains(out, "claim repository") || strings.Contains(out, "sending it once more") {
 			t.Fatalf("401 from a laptop (refused, not sent again): exit %d\n%s", code, out)
 		}
 		g.box.set(func(s *standIn) { s.onGet = "" })
@@ -1117,7 +1117,7 @@ func TestBoxApply(t *testing.T) {
 		// key while it fetches it); a second 401 stands.
 		mints := g.box.seen().mints
 		g.box.set(func(s *standIn) { s.onGet = "401" })
-		if out, code := g.apply(actions...); code != 1 || strings.Count(out, "trying once more in 3s") != 1 || !strings.Contains(out, "claim repository  your-org/boxes") || !strings.Contains(out, "::error title=apply deploy.example.com failed::") {
+		if out, code := g.apply(actions...); code != 1 || strings.Count(out, "the box refused the token; sending it once more in 3s (a box refuses the first token under a new signing key while it fetches the key)") != 1 || !strings.Contains(out, "claim repository  your-org/boxes") || !strings.Contains(out, "::error title=apply deploy.example.com failed::") {
 			t.Fatalf("401 in Actions: exit %d\n%s", code, out)
 		}
 		if got := g.box.seen().mints - mints; got != 2 {
@@ -1126,12 +1126,12 @@ func TestBoxApply(t *testing.T) {
 		// A 401 from something in front of the box is not about the
 		// token, and is not sent again.
 		g.box.set(func(s *standIn) { s.onGet = "front401" })
-		if out, code := g.apply(actions...); code != 1 || strings.Contains(out, "trying once more") {
+		if out, code := g.apply(actions...); code != 1 || strings.Contains(out, "sending it once more") {
 			t.Fatalf("a proxy's 401 in Actions: exit %d\n%s", code, out)
 		}
 		head = g.change("two")
 		g.box.set(func(s *standIn) { s.onGet = "401once" })
-		if out, code := g.apply(append(actions, "GITHUB_SHA="+head)...); code != 0 || !strings.Contains(out, "trying once more in 3s") {
+		if out, code := g.apply(append(actions, "GITHUB_SHA="+head)...); code != 0 || !strings.Contains(out, "the box refused the token; sending it once more in 3s (a box refuses the first token under a new signing key while it fetches the key)") {
 			t.Fatalf("one 401 in Actions, then the box's answer: exit %d\n%s", code, out)
 		}
 	})

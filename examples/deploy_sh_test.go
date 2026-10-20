@@ -343,7 +343,7 @@ func TestDeployShSendsARefusedMintedTokenOnceMore(t *testing.T) {
 				env = minted(srv)
 			}
 			out, code := deploySh(t, srv, env...)
-			retried := strings.Contains(out, "trying once more in 3s")
+			retried := strings.Contains(out, "the box refused the token; sending it once more in 3s (a box refuses the first token under a new signing key while it fetches the key)")
 			if code != tc.exit || n.Load() != tc.requests || retried != (tc.requests == 2) {
 				t.Fatalf("exit %d (want %d), %d requests (want %d), retry said: %v; output:\n%s", code, tc.exit, n.Load(), tc.requests, retried, out)
 			}

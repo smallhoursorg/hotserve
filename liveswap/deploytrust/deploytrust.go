@@ -477,16 +477,6 @@ func newJWKSClient(allowInsecure bool) *http.Client {
 
 type httpsOnlyTransport struct{ base http.RoundTripper }
 
-// CloseIdleConnections passes through to the base transport:
-// http.Client.CloseIdleConnections reaches only a transport that has
-// the method, so without it the call does nothing on every client
-// that refuses plain http.
-func (t httpsOnlyTransport) CloseIdleConnections() {
-	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
-		c.CloseIdleConnections()
-	}
-}
-
 func (t httpsOnlyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.URL.Scheme != "https" {
 		return nil, fmt.Errorf("refusing non-https OIDC request to %s (set allow_insecure_http for test rigs)", r.URL.Redacted())
@@ -923,10 +913,16 @@ func (is *issuerState) discover(done chan struct{}) {
 	is.err = err
 	if err == nil {
 		if is.keys == nil || is.keys.url != jwksURL {
-			is.keys = &keySet{url: jwksURL, client: is.client, clock: is.clock}
+			next := &keySet{url: jwksURL, client: is.client, clock: is.clock}
+			if is.keys != nil {
+				// A moved jwks_uri: the keys held stay in use until the
+				// new set's first fetch replaces them.
+				next.keys = is.keys.held()
+			}
+			is.keys = next
 		}
 		is.algs = algs
-		_, _ = is.keys.refresh(true)
+		_, _, _ = is.keys.refresh(true)
 	}
 	is.inflight = nil
 	close(done)

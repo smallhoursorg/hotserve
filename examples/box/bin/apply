@@ -131,7 +131,7 @@ req() {
 		# of it is not about the token.
 		{ [ "$code" = 401 ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ "$sent" = 1 ] &&
 			case $(field error) in 'invalid or missing deploy token'*) true ;; *) false ;; esac; } || return 0
-		echo "apply: the box refused the token; trying once more in 3s, in case it was fetching the issuer's new signing key"
+		echo "apply: the box refused the token; sending it once more in 3s (a box refuses the first token under a new signing key while it fetches the key)"
 		sleep 3
 	done
 }
@@ -241,9 +241,9 @@ refused401() {
 		echo "  the audience, subject or claim it pins, against what hotserve deploy-token was given"
 		echo "A box token must also name the commit: hotserve deploy-token --claims sha=$head."
 	fi
-	echo "Or the box could not consult the token's issuer (an outage there): its journal says so, and a"
-	echo "re-run once the issuer is back goes through. On the box, journalctl -u hotserve ('webhook auth"
-	echo "failed') names the check that refused it."
+	echo "Or the box could not consult the token's issuer (an outage there), or had fetched its keys in the"
+	echo "minute before the issuer changed them. On the box, journalctl -u hotserve ('webhook auth failed')"
+	echo "names the check that refused it, and for those two, when a re-run goes through."
 }
 
 # done_ok <phase>: a result the box answered green.

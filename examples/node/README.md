@@ -127,7 +127,9 @@ box failing to consult the token's issuer is named once a minute
 whatever the budget, and a re-run once the issuer is back goes
 through. Before reporting a 401 the step sends the request once more,
 3 seconds later: the box refuses the first token under GitHub's new
-signing key while it fetches that key, and the retry goes through.
+signing key while it fetches that key, and the retry goes through —
+unless the box had fetched the keys in the minute before, when the
+journal's refusal says from when a re-run goes through.
 
 What a first deploy that worked looks like, from the laptop:
 

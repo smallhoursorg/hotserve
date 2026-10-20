@@ -880,8 +880,9 @@ that trusts it — every app's, the global ones, the box's — and no
 token waits on fetching them. When hotserve starts or reloads it runs
 each issuer's discovery and fetches its keys again in the background;
 on a reload the keys it already holds stay in use meanwhile, so a
-reload refuses nothing. A token that arrives at start before they
-have ended is refused with `oidc discovery for <issuer>: under way,
+reload refuses no token it would have accepted before. A token that
+arrives before an issuer's first discovery and fetch have ended — at
+start, or after a reload adds an issuer — is refused with `oidc discovery for <issuer>: under way,
 so a retry once that ends may go through` (or the key set's `fetching
 them`) in `refused`. A discovery that failed is tried again by the
 next reload, or by a token at most once a minute. After that the keys
@@ -892,14 +893,16 @@ ends may go through` when it began a fetch, and with the last fetch's
 error if that failed. So the first deploy after the issuer rotates its
 key is refused, and its retry a few seconds later goes through —
 unless the keys were fetched in the minute before, when the retry is
-refused too and one a minute later goes through; after an outage,
+refused too, with `they were fetched under a minute ago, so a token
+from <time> on fetches them again, as does systemctl reload hotserve
+now` in `refused`; after an outage,
 the first token past the minute is refused with the outage's error and
 the next goes through. The templates' scripts (`scripts/deploy.sh`,
 and the box repository's `bin/apply`) send a token the box refused in
 Actions once more, 3 seconds later, so a rotation usually costs a run
 three seconds, not a re-run. Every refusal is answered no sooner than
-5 ms after the request arrived, so its timing does not say how many
-sources checked the token. A forged token under a key the
+5 ms after the webhook began handling the request, so its timing does
+not say how many sources checked the token. A forged token under a key the
 box does hold costs it no request to the issuer, which is also why an
 issuer that replaces a key but keeps its kid is not picked up: tokens
 under the new key are refused, with `signature does not match the key
