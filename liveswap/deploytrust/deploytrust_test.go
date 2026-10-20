@@ -365,12 +365,14 @@ func TestNewJWKSClientBoundsIdleConnections(t *testing.T) {
 func TestOIDCVerifier(t *testing.T) {
 	iss := trusttest.NewIssuer(t)
 	want := map[string]string{"repository": "org/app"}
-	base := func() *oidcVerifier {
-		return &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: want, client: iss.Client}
+	base := func(t *testing.T) *oidcVerifier {
+		v := &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: want, client: iss.Client}
+		settled(t, v)
+		return v
 	}
 	ctx := context.Background()
 
-	if _, err := base().verify(ctx, iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(5*time.Minute))); err != nil {
+	if _, err := base(t).verify(ctx, iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(5*time.Minute))); err != nil {
 		t.Fatalf("valid token rejected: %v", err)
 	}
 
@@ -397,7 +399,7 @@ func TestOIDCVerifier(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := base().verify(ctx, tc.tok()); err == nil {
+			if _, err := base(t).verify(ctx, tc.tok()); err == nil {
 				t.Fatalf("%s must be rejected", tc.name)
 			}
 		})
@@ -417,6 +419,7 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 		claims: map[string]string{"repository_id": "100000000"},
 		client: iss.Client,
 	}
+	settled(t, v)
 	tok := iss.MintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": 100000000})
 	if _, err := v.verify(context.Background(), tok); err != nil {
@@ -439,6 +442,7 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 		claims: map[string]string{"repository_id": "9007199254740993"},
 		client: iss.Client,
 	}
+	settled(t, bigV)
 	bigTok := iss.MintClaims(t, "hotserve", time.Now().Add(5*time.Minute),
 		map[string]any{"repository_id": big})
 	if _, err := bigV.verify(context.Background(), bigTok); err != nil {
@@ -448,19 +452,27 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 
 // TestOIDCVerifierIssuerDown pins what an issuer the box cannot get
 // what it needs from looks like to the caller of verify: an
-// unavailable, not a refusal — the token was never judged — for both
-// discovery and the key fetch, and a failed fetch stands until the
-// refetch interval has passed. The key-fetch case holds keyFetchFailed
-// against the pinned go-oidc (the text is the only handle on it). It
-// also pins what is NOT an outage: a token the cached keys verify
-// still deploys, a malformed token and a bad signature under a kid the
-// box holds are refusals of their own, a caller that went away is its
-// own failure, and an issuer answering as someone else is the config's.
+// unavailable, not a refusal — the token was never judged — for
+// discovery not yet ended, discovery failed and the key fetch failed,
+// none of them waited on, and a failure stands until the refetch
+// interval has passed and the fetch it then begins has ended. The
+// key-fetch case holds keyFetchFailed against the pinned go-oidc (the
+// text is the only handle on it). It also pins what is NOT an outage:
+// a token the cached keys verify still deploys, a malformed token and
+// a bad signature under a kid the box holds are refusals of their own,
+// a caller that went away is its own failure, and an issuer answering
+// as someone else is the config's.
 func TestOIDCVerifierIssuerDown(t *testing.T) {
 	iss := trusttest.NewIssuer(t)
 	want := map[string]string{"repository": "org/app"}
+	c := trusttest.NewClock()
 	fresh := func() *oidcVerifier {
-		return &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: want, client: iss.Client}
+		return &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: want, client: iss.Client, clock: c}
+	}
+	primed := func() *oidcVerifier {
+		v := fresh()
+		settled(t, v)
+		return v
 	}
 	valid := func() string { return iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(5*time.Minute)) }
 	ctx := context.Background()
@@ -484,18 +496,35 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	gone, cancel := context.WithCancel(ctx)
 	cancel()
 
-	iss.DiscoveryDown.Store(true)
-	_, err := fresh().verify(ctx, valid())
-	u := wantDown(t, err, "discovery 503")
-	if !strings.Contains(u.Error(), "oidc discovery for") {
-		t.Fatalf("discovery 503: reason = %q, want it to say discovery", u.Error())
+	// A source whose discovery has not ended answers at once.
+	u := wantDown(t, func() error { _, err := fresh().verify(ctx, valid()); return err }(), "discovery under way")
+	if !strings.Contains(u.Error(), "oidc discovery for "+iss.URL+": under way") {
+		t.Fatalf("discovery under way: reason = %q, want it to say so", u.Error())
 	}
-	_, err = fresh().verify(gone, valid())
+
+	iss.DiscoveryDown.Store(true)
+	v := primed()
+	_, err := v.verify(ctx, valid())
+	u = wantDown(t, err, "discovery 503")
+	if !strings.Contains(u.Error(), "oidc discovery for") || !strings.Contains(u.Error(), "503") {
+		t.Fatalf("discovery 503: reason = %q, want it to say discovery and the answer", u.Error())
+	}
+	_, err = v.verify(gone, valid())
 	wantPlain(t, err, "discovery with the caller gone")
+	// Discovery is retried only past the interval, and the token that
+	// begins it is still the outage's: its retry once it ends deploys.
 	iss.DiscoveryDown.Store(false)
+	settled(t, v)
+	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "discovery back within the interval")
+	c.Advance(RefetchInterval)
+	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "discovery back, beginning it again")
+	settled(t, v)
+	if _, err := v.verify(ctx, valid()); err != nil {
+		t.Fatalf("discovery back: valid token rejected: %v", err)
+	}
 
 	iss.DiscoveredAs.Store("https://someone-else.example")
-	_, err = fresh().verify(ctx, valid())
+	_, err = primed().verify(ctx, valid())
 	wantPlain(t, err, "discovery naming another issuer")
 	if !strings.Contains(err.Error(), "someone-else.example") {
 		t.Fatalf("issuer mismatch: reason = %q, want it to name the issuer found", err.Error())
@@ -503,9 +532,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	iss.DiscoveredAs.Store("")
 
 	iss.JWKSDown.Store(true)
-	c := trusttest.NewClock()
-	v := fresh()
-	v.clock = c
+	v = primed()
 	_, err = v.verify(ctx, valid())
 	u = wantDown(t, err, "JWKS 503 on first use")
 	if !strings.HasPrefix(u.Error(), keyFetchFailed) {
@@ -516,11 +543,13 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 
 	// Recovery needs no restart: the provider is cached, and the key
 	// set fetches again once the interval since the failed fetch has
-	// passed. Until then the failure stands, without a fetch per token.
+	// passed, for the token that then needs it. Until that fetch has
+	// ended the failure stands, without a fetch per token.
 	iss.JWKSDown.Store(false)
-	_, err = v.verify(ctx, valid())
-	_ = wantDown(t, err, "issuer back within the interval")
-	c.Advance(KeyRefetchInterval)
+	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "issuer back within the interval")
+	c.Advance(RefetchInterval)
+	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "issuer back, beginning the fetch")
+	settled(t, v)
 	if _, err := v.verify(ctx, valid()); err != nil {
 		t.Fatalf("issuer back past the interval: valid token rejected: %v", err)
 	}
@@ -543,13 +572,20 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	if n := iss.JWKSFetches.Load(); n != before {
 		t.Fatalf("issuer down with keys cached: %d fetches, want none", n-before)
 	}
-	// A token whose kid the box holds no key for is the outage's: its
-	// fetch fails, and the next such token within the interval gets that
-	// failure without fetching again.
-	c.Advance(KeyRefetchInterval)
+	// A token whose kid the box holds no key for begins a fetch it does
+	// not wait on: refused against the keys held, the last fetch having
+	// succeeded. Once that fetch has failed, the next such token within
+	// the interval is the outage's, without fetching again.
+	c.Advance(RefetchInterval)
+	unknown := func() error {
+		_, err := v.verify(ctx, iss.MintKID(t, other, "unknown", "hotserve", want, time.Now().Add(5*time.Minute)))
+		return err
+	}
+	err = unknown()
+	wantPlain(t, err, "unknown kid beginning a fetch during an outage")
+	settled(t, v)
 	for range 2 {
-		_, err = v.verify(ctx, iss.MintKID(t, other, "unknown", "hotserve", want, time.Now().Add(5*time.Minute)))
-		_ = wantDown(t, err, "unknown kid during an outage")
+		_ = wantDown(t, unknown(), "unknown kid during an outage")
 	}
 	if n := iss.JWKSFetches.Load(); n != before+1 {
 		t.Fatalf("unknown kids during an outage: %d fetches, want one", n-before)
@@ -566,7 +602,8 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 	iss.DiscoveryDown.Store(true)
 	priv, pub := trusttest.GenerateKey()
 	local := &localVerifier{audience: "hotserve", pub: pub, keyPath: "/k.pem", maxTTL: DefaultMaxTokenTTL}
-	down := &oidcVerifier{issuer: iss.URL, audience: "hotserve", client: iss.Client}
+	c := trusttest.NewClock()
+	down := &oidcVerifier{issuer: iss.URL, audience: "hotserve", client: iss.Client, clock: c}
 	labels := func(down []unavailable) string {
 		var out []string
 		for _, u := range down {
@@ -597,8 +634,12 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 	if by, got, err := authorize(context.Background(), []Verifier{down, local}, good); err != nil || by.By != local.Label() || labels(got) != down.Label() {
 		t.Fatalf("accepted past a down source: by = %q, down = %q, err = %v", by.By, labels(got), err)
 	}
-	// Both up: nothing is down, and the bad token is a plain refusal.
+	// Both up, and the down source's discovery retried past the
+	// interval: nothing is down, and the bad token is a plain refusal.
 	iss.DiscoveryDown.Store(false)
+	settled(t, down)
+	c.Advance(RefetchInterval)
+	settled(t, down)
 	if _, got, err := authorize(context.Background(), []Verifier{local, down}, bad); err == nil || len(got) != 0 {
 		t.Fatalf("both sources up: err = %v, down = %q, want a plain refusal", err, labels(got))
 	}
@@ -689,6 +730,7 @@ func TestAuthorizeAttributes(t *testing.T) {
 		kind: "oidc", issuer: iss.URL, audience: "hotserve",
 		claims: map[string]string{"repository": "org/blog"}, attribution: attributionClaims["github"],
 	}}, iss.Client)
+	settled(t, gh...)
 	tok := iss.Mint(t, iss.Priv, "hotserve", map[string]string{
 		"repository": "org/blog", "ref": "refs/heads/main", "actor": "alice",
 		"sub": "repo:org/blog:ref:refs/heads/main",
@@ -713,6 +755,7 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		kind: "oidc", issuer: iss.URL, audience: "hotserve",
 		claims: map[string]string{"repository": "org/blog"}, attribution: attributionClaims["github"],
 	}}, iss.Client)
+	settled(t, gh...)
 	both := append(append([]Verifier{}, gh...), local...)
 	otherRSA, _ := rsa.GenerateKey(rand.Reader, 2048)
 	mint := func(aud string, claims map[string]string) string {

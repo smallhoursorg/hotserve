@@ -126,7 +126,10 @@ minute from one address and a hundred a minute in all; past either,
 a failure is not written until the minute passes, and the answer
 stays the same 401 — except that the box failing to consult the
 token's issuer is named once a minute whatever the budget, and a
-re-run once the issuer is back goes through.
+re-run once the issuer is back goes through. Before reporting a 401
+the step sends the request once more, 3 seconds later: the box
+refuses the first token under GitHub's new signing key while it
+fetches that key, and the retry goes through.
 
 What a first deploy that worked looks like, from the laptop:
 

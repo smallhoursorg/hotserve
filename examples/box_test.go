@@ -471,7 +471,7 @@ type standIn struct {
 	tokens    map[string]bool // minted here: used yet?
 	mints     int
 	bundles   int
-	onGet     string            // "": the baseline; "401"; "nobaseline"
+	onGet     string            // "": the baseline; "401"; "401once", a 401 and then the baseline; "nobaseline"
 	onPost    []string          // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "front<code>", "html409", "504", "502", "524", "lost", "sync"; then "": 202
 	edited    bool              // results say the file was edited on the box
 	recipient string            // GET /'s box key; "" leaves it out, as a box without one does
@@ -587,7 +587,10 @@ func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(res)
 	case r.Method == http.MethodGet:
 		switch s.onGet {
-		case "401":
+		case "401", "401once":
+			if s.onGet == "401once" {
+				s.onGet = ""
+			}
 			reply(w, 401, map[string]string{"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)"})
 		case "nobaseline":
 			reply(w, 409, map[string]string{"error": "this box has no baseline; hotserve init <sha>, as root inside the box's directory, sets one"})
@@ -1023,8 +1026,8 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("no baseline: exit %d\n%s", code, out)
 		}
 		g.box.set(func(s *standIn) { s.onGet = "401" })
-		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy_trust local { public_key") || strings.Contains(out, "claim repository") {
-			t.Fatalf("401 from a laptop: exit %d\n%s", code, out)
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy_trust local { public_key") || strings.Contains(out, "claim repository") || strings.Contains(out, "trying once more") {
+			t.Fatalf("401 from a laptop (refused, not sent again): exit %d\n%s", code, out)
 		}
 		g.box.set(func(s *standIn) { s.onGet = "" })
 		// A shallow clone: refused before asking the box anything, never
@@ -1107,9 +1110,21 @@ func TestBoxApply(t *testing.T) {
 		if out, code := g.apply(append(actions, "GITHUB_SHA="+g.base)...); code != 1 || !strings.Contains(out, "but this run is for "+g.base) {
 			t.Fatalf("another commit: exit %d\n%s", code, out)
 		}
+		// A 401 to a minted token is sent once more, with a fresh token
+		// (#306: the box refuses the first token under an issuer's new
+		// key while it fetches it); a second 401 stands.
+		mints := g.box.seen().mints
 		g.box.set(func(s *standIn) { s.onGet = "401" })
-		if out, code := g.apply(actions...); code != 1 || !strings.Contains(out, "claim repository  your-org/boxes") || !strings.Contains(out, "::error title=apply deploy.example.com failed::") {
+		if out, code := g.apply(actions...); code != 1 || strings.Count(out, "trying once more in 3s") != 1 || !strings.Contains(out, "claim repository  your-org/boxes") || !strings.Contains(out, "::error title=apply deploy.example.com failed::") {
 			t.Fatalf("401 in Actions: exit %d\n%s", code, out)
+		}
+		if got := g.box.seen().mints - mints; got != 2 {
+			t.Errorf("401 in Actions: %d tokens minted, want the GET's and its retry's", got)
+		}
+		head = g.change("two")
+		g.box.set(func(s *standIn) { s.onGet = "401once" })
+		if out, code := g.apply(append(actions, "GITHUB_SHA="+head)...); code != 0 || !strings.Contains(out, "trying once more in 3s") {
+			t.Fatalf("one 401 in Actions, then the box's answer: exit %d\n%s", code, out)
 		}
 	})
 

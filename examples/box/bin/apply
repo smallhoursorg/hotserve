@@ -112,12 +112,25 @@ mint() {
 
 # req <curl args...>: one request with a token. The status goes in
 # $code — 000 when no answer came, `mint` when no token could be had
-# and nothing was sent — and the body in $tmpd/resp.
+# and nothing was sent — and the body in $tmpd/resp. A 401 to a token
+# minted in Actions is sent once more, 3s later, with a fresh one: the
+# first token under an issuer's new signing key is refused while the
+# box fetches that key, without waiting on the fetch (a wait would
+# tell anyone with a token what the box trusts), and the retry finds
+# it. The box refuses before it does anything else, so sending again
+# repeats nothing. A HOTSERVE_TOKEN is checked against a key the box
+# already holds, so it is not sent again.
 req() {
-	: >"$tmpd/resp"
-	mint || { code=mint; return 0; }
-	code=$(curl -sS -o "$tmpd/resp" -w '%{http_code}' --max-time "$maxtime" \
-		-H "@$tmpd/auth" "$@") || code=000
+	# Not $try: mint's loop sets it.
+	for sent in 1 2; do
+		: >"$tmpd/resp"
+		mint || { code=mint; return 0; }
+		code=$(curl -sS -o "$tmpd/resp" -w '%{http_code}' --max-time "$maxtime" \
+			-H "@$tmpd/auth" "$@") || code=000
+		{ [ "$code" = 401 ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ "$sent" = 1 ]; } || return 0
+		echo "apply: the box refused the token; trying once more in 3s, in case it was fetching the issuer's new signing key"
+		sleep 3
+	done
 }
 
 # field <key>: a string field of the response, JSON's escapes undone.

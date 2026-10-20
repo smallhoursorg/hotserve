@@ -749,7 +749,16 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 
 	t.Run("valid OIDC token deploys and serves", func(t *testing.T) {
 		tok := iss.Mint(t, iss.Priv, "e2e", map[string]string{"sub": "ci"}, future)
-		if code, body := deploy(tok); code != http.StatusOK {
+		// Provision fetches the issuer's discovery and keys in the
+		// background (deploytrust.Warm), and no token waits on them: one
+		// sent before they end is refused, and its retry deploys, as the
+		// template's deploy.sh retries.
+		code, body := deploy(tok)
+		if code == http.StatusUnauthorized {
+			time.Sleep(time.Second)
+			code, body = deploy(tok)
+		}
+		if code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", code, body)
 		}
 		code, b := getBody(t)

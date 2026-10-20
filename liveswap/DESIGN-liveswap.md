@@ -46,17 +46,17 @@ Concept map from the Nomad-era stack:
   key), and its answer MUST NOT reveal whether an app exists to
   unauthenticated callers (unknown apps verify against the global trust
   sources, then 404; a refused token gets the same 401 either way). Its
-  timing can, within a bound (DESIGN-threat-model.md, "Webhook
-  endpoint", the residual; owed: #306): a token is checked against
-  each source a name resolves to in turn, the signature before the
-  issuer, so an OIDC source refuses a forged token after a local
-  signature check when it holds the token's kid, and, when it does
-  not, after a fetch of its issuer's keys that it makes at most once a
-  minute, whatever issuer the token names. A name that does not exist
-  goes to the global sources: it is refused at once when they hold no
-  OIDC source, and otherwise pays the same on their own key sets.
-  The fetch window is per app, not shared across apps that trust the
-  same issuer. No shared secret is stored on the box.
+  timing MUST NOT wait on an issuer (DESIGN-threat-model.md, "Webhook
+  endpoint"; #306): a token is checked against each source a name
+  resolves to in turn, the signature before the issuer, each check
+  local. An OIDC source's discovery and key fetches run in the
+  background — at start and each reload (`deploytrust.Warm`), then a
+  key fetch begun by a token under a kid it holds no key for, at most
+  once a minute — and the token that begins one is refused without
+  waiting on it. A name that does not exist goes to the global
+  sources. The time still depends on the local work: one signature
+  check per source holding a key for the token's kid. No shared secret
+  is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
   sources.
 - Config load and every launch MUST warn when an app's `env_file` is
@@ -741,7 +741,6 @@ severity × occurrence × detection, then the fix's size and risk.
 
 | Finding | S | O | D | Where the fix lands |
 |---|---|---|---|---|
-| A refused token's timing names configured apps: a forged token under an unknown kid for a configured app waits on its issuer's key fetch (at most once a minute per app), where one for a name that does not exist is refused at once when the global sources hold no OIDC source (Behavior specification, the webhook's timing). | 3 | 5 | 5 | #306 |
 | A bind mount can give two apps one directory, or put one app's data inside another's: an fstab source another app also uses, or a whole app dir mounted at another's. A mount resolves to itself, so the launch check (`resolveBindSources`) passes it: blog launches on shop's data, writable, and nothing says so. | 5 | 5 | 5 | #308, to design: equal `(st_dev, st_ino)` alone misses a source nested in another's; when to check, what to refuse and what to say are open there. Until then, the README's bind-mount advice says the source must be the app's own |
 
 ## Non-goals

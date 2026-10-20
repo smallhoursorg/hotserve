@@ -1,8 +1,10 @@
 package liveswap
 
 import (
+	"context"
 	"crypto/ed25519"
 	"testing"
+	"time"
 
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust/trusttest"
@@ -36,6 +38,19 @@ func localSource(t *testing.T, pub ed25519.PublicKey, audience string) deploytru
 func oidcSource(t *testing.T, issuer string) deploytrust.Source {
 	t.Helper()
 	return mustBuild(t, []deploytrust.TrustConfig{{Kind: "oidc", Issuer: issuer, Audience: "hotserve", Subject: "ci"}})[0]
+}
+
+// primed is vs once each OIDC source's discovery and key fetch have
+// ended (deploytrust.Prime): no token waits on them, so one sent
+// before is refused.
+func primed(t *testing.T, vs []deploytrust.Verifier) []deploytrust.Verifier {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := deploytrust.Prime(ctx, vs); err != nil {
+		t.Fatalf("priming the trust sources: %v", err)
+	}
+	return vs
 }
 
 // mustBuild is deploytrust.Build for a config the test knows is valid.

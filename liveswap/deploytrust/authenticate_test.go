@@ -324,9 +324,10 @@ func TestNewIsResolveOnACopy(t *testing.T) {
 	// An OIDC source: the JWKS client is https-only unless
 	// allowInsecure. The test issuer speaks plain http, so only the
 	// insecure client reaches it; the other names it as unreachable.
-	// The warm each one starts is a single bounded discovery fetch
-	// that the issuer answers, or the https-only client refuses, at
-	// once; nothing of it outlives the test.
+	// The warm each one starts is a single bounded discovery fetch,
+	// then a key fetch, that the issuer answers, or the https-only
+	// client refuses, at once; settled waits them out, so nothing of
+	// them outlives the test.
 	iss := trusttest.NewIssuer(t)
 	cfg := func() []TrustConfig {
 		return []TrustConfig{{Kind: "oidc", Issuer: iss.URL, Audience: "hotserve", Subject: "ci"}}
@@ -336,6 +337,7 @@ func TestNewIsResolveOnACopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	settled(t, insecure...)
 	if who, _, err := authorize(ctx, insecure, tok); err != nil || who.By != "oidc:"+iss.URL+" sub=ci" {
 		t.Errorf("allow_insecure_http: By = %q, %v; want the token accepted over plain http", who.By, err)
 	}
@@ -343,6 +345,7 @@ func TestNewIsResolveOnACopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	settled(t, secure...)
 	if _, down, err := authorize(ctx, secure, tok); err == nil || len(down) != 1 || !strings.Contains(err.Error(), "refusing non-https") {
 		t.Errorf("https only: err = %v, down = %d; want the issuer refused as unreachable over http", err, len(down))
 	}

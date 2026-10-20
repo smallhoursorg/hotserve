@@ -872,15 +872,28 @@ the identity the token presented:
 ```
 
 A request with no bearer token says so instead, as does an app with
-no source at all. The box failing to consult the issuer — OIDC
-discovery on first use, or fetching its signing keys — lands here as
-well: still a 401 to the caller, with the network error in the
-journal. An OIDC source fetches the issuer's keys only for a token
-signed under a key it does not hold yet, and at most once a minute:
-within a minute of its last fetch such a token is refused, with that
-fetch's error if it failed. So the first deploy after the issuer
-rotates its key, or comes back from an outage, can be refused for up
-to a minute; its retry goes through. A forged token under a key the
+no source at all. The box failing to consult the issuer — its OIDC
+discovery, or fetching its signing keys — lands here as well: still a
+401 to the caller, with the network error in the journal. An OIDC
+source runs its discovery and fetches the issuer's keys in the
+background when hotserve starts or reloads, and no token waits on
+either: a token that arrives before they have ended is refused with
+`oidc discovery for <issuer>: under way` (or the key set's `fetching
+them`) in `refused`. A discovery that failed is tried again at most
+once a minute. After that the source fetches the keys only for a token
+signed under a key it does not hold yet, at most once a minute, and
+refuses that token at once rather than wait: with `fetching them, so
+a retry once that ends may go through` when it began a fetch, and
+with the last fetch's error if that failed. So the first deploy after
+the issuer rotates its key is refused, and its retry a few seconds
+later goes through — unless the source fetched in the minute before,
+when the retry is refused too and one a minute later goes through;
+after an outage, the first token past the minute is refused with the
+outage's error and the next goes through. The templates' scripts
+(`scripts/deploy.sh`, and the box repository's `bin/apply`) send a
+token the box refused in Actions once more, 3 seconds later, so a
+rotation usually costs a run three seconds, not a re-run. A forged
+token under a key the
 box does hold costs it no request to the issuer, which is also why an
 issuer that replaces a key but keeps its kid is not picked up: tokens
 under the new key are refused, with `signature does not match the key

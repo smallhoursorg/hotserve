@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,10 +33,21 @@ import (
 // reason (liveswap/handler.go pins it); "refused-elsewhere" is a 401
 // from something that is not the box; "wrongarch" streams the 422 the
 // box's pre-flight gives a release built for another architecture
-// (liveswap/elf.go words it). The stand-in also mints the run's OIDC
-// token at /token, the way Actions does.
+// (liveswap/elf.go words it); "refused-once" is the box's 401 to the
+// first request and a deploy to every later one, as when the box was
+// fetching the issuer's new signing key. The stand-in also mints the
+// run's OIDC token at /token, the way Actions does.
 func box(t *testing.T, mode string) *httptest.Server {
 	t.Helper()
+	srv, _ := countedBox(t, mode)
+	return srv
+}
+
+// countedBox is box, and the number of deploy requests it has answered
+// (/token is not one).
+func countedBox(t *testing.T, mode string) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var n atomic.Int64
 	status := map[string]any{"app": "demo", "current_version": "v1", "running": true, "last_deploy": map[string]any{"version": "v1", "status": "succeeded"}}
 	single := func(w http.ResponseWriter, code int, v any) {
 		b, _ := json.Marshal(v)
@@ -48,7 +60,13 @@ func box(t *testing.T, mode string) *httptest.Server {
 			single(w, 200, map[string]any{"value": "minted-" + r.URL.Query().Get("audience")})
 			return
 		}
-		switch mode {
+		m := mode
+		if first := n.Add(1) == 1; m == "refused-once" && first {
+			m = "refused"
+		} else if m == "refused-once" {
+			m = "stream"
+		}
+		switch m {
 		case "single":
 			single(w, 200, status)
 		case "refused":
@@ -82,13 +100,13 @@ func box(t *testing.T, mode string) *httptest.Server {
 			f := w.(http.Flusher)
 			_, _ = w.Write([]byte(`{"at":"t","event":"phase","phase":"downloading"}` + "\n"))
 			f.Flush()
-			if mode == "cut" {
+			if m == "cut" {
 				return
 			}
 			b, _ := json.Marshal(status)
 			_, _ = w.Write(append(b[:len(b)-1], []byte(`,"event":"done","http_status":200}`+"\n")...))
 		}
-	}))
+	})), &n
 }
 
 // The scripts stay byte-identical, and each reads every shape of
@@ -289,6 +307,47 @@ func TestDeployShSaysWhatARefusedRunMustBeTrustedFor(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "claim repository  org/blog") {
 		t.Errorf("job summary lacks the checklist:\n%s", got)
+	}
+}
+
+// The box's 401 to a minted token is sent once more, 3s later: the
+// first token under an issuer's new key is refused while the box
+// fetches it (#306), and the retry deploys. A HOTSERVE_TOKEN, checked
+// against a key the box holds, and a 401 from something that is not
+// the box are not sent again.
+func TestDeployShSendsARefusedMintedTokenOnceMore(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Fatal("deploy.sh needs curl; install it to run this test")
+	}
+	minted := func(srv *httptest.Server) []string {
+		return []string{"GITHUB_ACTIONS=true", "GITHUB_REPOSITORY=org/blog", "GITHUB_REF=refs/heads/main",
+			"ACTIONS_ID_TOKEN_REQUEST_URL=" + srv.URL + "/token?api-version=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=run", "HOTSERVE_TOKEN="}
+	}
+	laptop := []string{"HOTSERVE_TOKEN=x", "GITHUB_ACTIONS=", "ACTIONS_ID_TOKEN_REQUEST_URL="}
+	for _, tc := range []struct {
+		name, mode string
+		minted     bool
+		exit       int
+		requests   int64
+	}{
+		{"minted, the retry deploys", "refused-once", true, 0, 2},
+		{"minted, refused again", "refused", true, 1, 2},
+		{"HOTSERVE_TOKEN", "refused-once", false, 1, 1},
+		{"minted, a 401 not the box's", "refused-elsewhere", true, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, n := countedBox(t, tc.mode)
+			defer srv.Close()
+			env := laptop
+			if tc.minted {
+				env = minted(srv)
+			}
+			out, code := deploySh(t, srv, env...)
+			retried := strings.Contains(out, "trying once more in 3s")
+			if code != tc.exit || n.Load() != tc.requests || retried != (tc.requests == 2) {
+				t.Fatalf("exit %d (want %d), %d requests (want %d), retry said: %v; output:\n%s", code, tc.exit, n.Load(), tc.requests, retried, out)
+			}
+		})
 	}
 }
 

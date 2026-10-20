@@ -84,21 +84,21 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so its refusal is the same 401 as a known
-app's (`Handler.ServeHTTP`, liveswap/handler.go). The time to that 401
-need not be, and that is the **residual** (S3 × O5 × D5 = 75, as #296
-scored it; owed: #306). A token is checked against each source a name
-resolves to in turn, the signature before the issuer, so an OIDC
-source refuses a forged token after a local signature check when it
-holds the token's kid, and, when it does not, after a fetch of its
-issuer's keys that it makes at most once a minute (`keySet`,
-liveswap/deploytrust/jwks.go), whatever issuer the token names. A name
-that does not exist goes to the global sources: it is refused at once
-when they hold no OIDC source, and otherwise pays the same on their own
-key sets. The fetch window is per app, not shared across apps that
-trust the same issuer: each app's sources keep their own key set, so
-one unknown-kid token per app per minute can wait on an issuer round
-trip that one to a missing name, sent just before, did not, and an app
-name can be confirmed by timing. Config load refuses an app
+app's (`Handler.ServeHTTP`, liveswap/handler.go). No token waits on
+an issuer for it either (#306): a token is checked against each source
+a name resolves to in turn, the signature before the issuer, and every
+check is local. An OIDC source judges a token against the keys it
+holds; its discovery and its key fetches run in the background —
+`Warm` at start and at each reload, then a key fetch begun by a token
+under a kid it holds no key for, at most once a minute, which that
+token does not wait on (`keySet`, liveswap/deploytrust/jwks.go;
+`oidcVerifier.ensure`, liveswap/deploytrust/deploytrust.go). A name
+that does not exist goes to the global sources, which do the same.
+What the time to the 401 still depends on is that local work: one
+signature check for each source a name resolves to that holds a key
+for the token's kid (or any key, for a token that names none), so a
+name whose sources check more signatures than the global ones refuses
+a crafted token a signature check later. Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.
@@ -226,16 +226,15 @@ Properties that matter to the model:
   deploy-denial primitive for whoever shares it. Verification cost is
   therefore not bounded by the throttle. Against a local key it is one
   signature check, comparable to the TLS handshake the request already
-  paid; against an OIDC source it is the same for a token under a kid
-  the source holds a key for, and, for one under a kid it does not, a
-  fetch of the issuer's keys that each source makes at most once a
-  minute, every other such token meanwhile waiting on that fetch or
-  answered from its outcome (`keySet`, liveswap/deploytrust/jwks.go;
-  the wait is owed: #306). So the throttle is not what bounds CPU, and
-  once a source's discovery has succeeded, traffic does not set how
-  often the box fetches its issuer's keys; while discovery fails, each
-  verification tries it again (`oidcVerifier.ensure`,
-  liveswap/deploytrust/deploytrust.go), one at a time per source.
+  paid; against an OIDC source it is the same, or none for a token
+  under a kid the source holds no key for, which begins a fetch of the
+  issuer's keys in the background, at most once a minute per source,
+  and is refused without waiting on it (`keySet`,
+  liveswap/deploytrust/jwks.go). So the throttle is not what bounds
+  CPU, and traffic does not set how often the box asks an issuer
+  anything: a source tries its discovery, while that fails, and fetches
+  its keys, each at most once a minute and one at a time
+  (`oidcVerifier.ensure`, liveswap/deploytrust/deploytrust.go).
   One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413
