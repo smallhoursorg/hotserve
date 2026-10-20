@@ -49,16 +49,20 @@ Concept map from the Nomad-era stack:
   nor MUST its timing (DESIGN-threat-model.md, "Webhook endpoint";
   #306). No verification waits on an issuer: each check is local,
   against the discovery and keys the process holds once per issuer
-  for every source that trusts it, fetched in the background — at
-  start and at each reload (`deploytrust.Warm`), the held keys in use
-  meanwhile, then for a token under a kid none is held for, at most
-  once a minute per issuer, which that token does not wait on. And
-  every refusal is answered no sooner than `deploytrust.RefusalFloor`
-  after the webhook began handling the request (before its app
-  lookup and the verifiers' lock), so the local work a name's sources do
-  does not show. No shared secret is stored on the box.
+  and `allow_insecure_http` setting for every source that trusts it,
+  fetched in the background — at start and at each reload
+  (`deploytrust.Warm`), the held keys in use meanwhile, then for a
+  token under a kid none is held for, at most once a minute per held
+  state, which that token does not wait on. And every refusal is
+  answered no sooner than `deploytrust.RefusalFloor` (25 ms) after the
+  webhook began handling the request (before its app lookup and the
+  verifiers' lock), so the local work a name's sources do does not
+  show; a token longer than `deploytrust.MaxTokenLen` (8 KiB) is
+  refused before any source reads it, so the work the floor hides is
+  bounded. No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
-  sources.
+  sources, or to more than `deploytrust.MaxSources` (8), for which the
+  refusal floor is sized.
 - Config load and every launch MUST warn when an app's `env_file` is
   world-readable or world-writable (the documented mode is 0640
   root:hotserve; owner and group are not checked), and MUST NOT refuse

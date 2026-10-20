@@ -88,20 +88,26 @@ app's (`Handler.ServeHTTP`, liveswap/handler.go), and so is its time
 (#306). No token waits on an issuer: a token is checked against each
 source a name resolves to in turn, the signature before the issuer,
 and every check is local. Each issuer's discovery and keys are held
-once for the process, shared by every source that trusts it
-(`issuerState`, liveswap/deploytrust/deploytrust.go), and fetched in
-the background — at start and at each reload (`Warm`), then for a
-token under a kid the process holds no key for, at most once a minute
-per issuer, which that token does not wait on (`keySet`,
-liveswap/deploytrust/jwks.go). The local work still differs — one
-signature check for each source holding a key for the token's kid, so
-a name whose sources check more signatures than the global ones would
-refuse a crafted token a check later — so every refusal is answered no
-sooner than `RefusalFloor` (5 ms) after the webhook began handling the
-request, before its app lookup and the lock a reload can hold there
-(`Handler.ServeHTTP`; liveswap/deploytrust/authenticate.go); a check
-took about 55 µs on an
-arm64 machine (2026-10-20). Config load refuses an app
+once for the process per `allow_insecure_http` setting (so at most
+twice, when liveswap's differs from the box's https-only one), shared
+by every source that trusts it over that client (`issuerState`,
+liveswap/deploytrust/deploytrust.go), and fetched in the background —
+at start and at each reload (`Warm`), then for a token under a kid
+none is held for, at most once a minute per held state, which that
+token does not wait on (`keySet`, liveswap/deploytrust/jwks.go). The
+local work still differs — each source a name resolves to parses the
+token and checks a signature, a name with no source does neither — so
+it is bounded and then hidden: a token longer than `MaxTokenLen` (8
+KiB) is refused before any source parses it, a name resolves to at
+most `MaxSources` (8; `Build` refuses more at config load), and every
+refusal is answered no sooner than `RefusalFloor` (25 ms) after the
+webhook began handling the request, before its app lookup and the
+lock a reload can hold there (`Handler.ServeHTTP`;
+liveswap/deploytrust/authenticate.go). Measured on an arm64 machine
+(2026-10-20): an OIDC source refuses a 2 KiB token in 0.11 ms and a
+16 KiB one in 0.33 ms; a 1 MiB one, which the header limit allows,
+took 16 ms. The floor covers eight checks of an 8 KiB token on a box
+ten times slower (an estimate). Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.

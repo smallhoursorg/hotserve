@@ -115,6 +115,58 @@ func TestAuthenticateHoldsARefusalToTheFloor(t *testing.T) {
 	}
 }
 
+// A token longer than MaxTokenLen is refused before any source reads
+// it, whatever the name: one with no source and one with a source the
+// same way, with the length named for the journal. One at the limit
+// reaches the sources (#306).
+func TestAuthorizeRefusesALongTokenUnread(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
+	long := strings.Repeat("a", MaxTokenLen+1)
+	for _, set := range [][]Verifier{nil, vs} {
+		_, _, err := authorize(context.Background(), set, long)
+		if want := "bearer token is " + strconv.Itoa(MaxTokenLen+1) + " bytes, longer than " + strconv.Itoa(MaxTokenLen); err == nil || err.Error() != want {
+			t.Fatalf("%d sources: err = %v, want %q", len(set), err, want)
+		}
+	}
+	atLimit := strings.Repeat("a", MaxTokenLen)
+	if _, _, err := authorize(context.Background(), vs, atLimit); err == nil || !strings.HasPrefix(err.Error(), "local:") {
+		t.Fatalf("a token at the limit: err = %v, want the source's own refusal", err)
+	}
+	if _, _, err := authorize(context.Background(), vs, trusttest.Mint(t, priv, "box", nil)); err != nil {
+		t.Fatalf("a real token: refused: %v", err)
+	}
+}
+
+// Build refuses a set of more than MaxSources, for which the refusal
+// floor is sized, naming the count and the limit; MaxSources loads.
+func TestBuildRefusesMoreSourcesThanTheFloorCovers(t *testing.T) {
+	_, pub := trusttest.GenerateKey()
+	key := trusttest.KeyFile(t, pub)
+	set := func(n int) []TrustConfig {
+		out := make([]TrustConfig, n)
+		for i := range out {
+			out[i] = TrustConfig{Kind: "local", PublicKey: key, Audience: "box"}
+		}
+		return out
+	}
+	if _, err := Build(set(MaxSources), nil); err != nil {
+		t.Fatalf("%d sources: %v", MaxSources, err)
+	}
+	for _, tc := range []struct {
+		name           string
+		global, perApp []TrustConfig
+	}{
+		{"global", set(MaxSources + 1), nil},
+		{"per app", nil, set(MaxSources + 1)},
+	} {
+		_, err := Build(tc.global, tc.perApp)
+		if want := "deploy_trust: " + strconv.Itoa(MaxSources+1) + " sources, at most " + strconv.Itoa(MaxSources); err == nil || !strings.HasPrefix(err.Error(), want) {
+			t.Fatalf("%s: err = %v, want it to begin %q", tc.name, err, want)
+		}
+	}
+}
+
 // TestAuthenticateOnTheSharedLimiter pins the preamble on the limiter
 // both webhooks share: one refusal through it is charged there and
 // answered with the flat 401 under the caller's field; an accepted

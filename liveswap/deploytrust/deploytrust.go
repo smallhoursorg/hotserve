@@ -129,11 +129,16 @@ func ResolvePlaceholders(repl *caddy.Replacer, tcs []TrustConfig) {
 // sources override the global default wholesale (same semantics as
 // artifact_allowlist), never append. It loads local public keys and
 // validates presets here so a bad key path or missing audience fails
-// config load — fail-closed, like the rest of liveswap's config.
+// config load — fail-closed, like the rest of liveswap's config. A set
+// of more than MaxSources is refused: RefusalFloor is sized for that
+// many checks of a token.
 func Build(global, perApp []TrustConfig) ([]Source, error) {
 	src := global
 	if len(perApp) > 0 {
 		src = perApp
+	}
+	if len(src) > MaxSources {
+		return nil, fmt.Errorf("deploy_trust: %d sources, at most %d: a refused token's answer is held to a floor sized for %d checks of it (RefusalFloor), so its time names no app", len(src), MaxSources, MaxSources)
 	}
 	out := make([]Source, 0, len(src))
 	for i, tc := range src {
@@ -686,6 +691,12 @@ func (u unavailable) Unwrap() error { return u.err }
 func authorize(ctx context.Context, verifiers []Verifier, rawToken string) (who Identity, down []unavailable, err error) {
 	if rawToken == "" {
 		return Identity{}, nil, errors.New("no bearer token in Authorization header")
+	}
+	// Before any source parses it, and whatever the name: what a
+	// refusal costs grows with the token, and a name with no source
+	// would not pay it (RefusalFloor).
+	if len(rawToken) > MaxTokenLen {
+		return Identity{}, nil, fmt.Errorf("bearer token is %d bytes, longer than %d", len(rawToken), MaxTokenLen)
 	}
 	if len(verifiers) == 0 {
 		return Identity{}, nil, errors.New("no deploy_trust source resolves for this app")

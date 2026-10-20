@@ -34,15 +34,28 @@ func (ref *Refusal) Write(write func(code int, body any) error) error {
 const unauthorizedMessage = "invalid or missing deploy token (Authorization: Bearer <jwt>)"
 
 // RefusalFloor is the soonest a refused token is answered after the
-// webhook began handling it (#306). Judging is local, but not
-// equal: one signature check for each source the name resolves to
-// that holds a key for the token, none for a name with no source, so
-// the time to the 401 alone would say how many sources a name has, and
-// so whether the app exists. A check took about 55µs on an arm64
-// machine (Ed25519 and RSA-2048 alike, measured 2026-10-20), so the
-// floor covers dozens on a box several times slower. An accepted token
-// is not held.
-const RefusalFloor = 5 * time.Millisecond
+// webhook began handling it (#306). Judging is local, but not equal:
+// each source the name resolves to parses the token and checks a
+// signature, and a name with no source does neither, so the time to
+// the 401 alone would say how many sources a name has, and so whether
+// the app exists. Measured on an arm64 machine (2026-10-20), an OIDC
+// source refuses a 2 KiB token (about a real GitHub one) in 0.11 ms
+// and a 16 KiB one in 0.33 ms, so one of MaxTokenLen in between; a
+// local source in a tenth of that; a 1 MiB token, which the header
+// limit allows, took 16 ms. The floor covers MaxSources checks of a
+// MaxTokenLen token on a box ten times slower (an estimate, not
+// measured); Build refuses a set of more, and authorize a longer
+// token. An accepted token is not held.
+const RefusalFloor = 25 * time.Millisecond
+
+// MaxTokenLen is the longest bearer token judged; a longer one is
+// refused before any source parses it. A GitHub or GitLab OIDC token
+// is 1–2 KiB, a `hotserve deploy-token` one smaller.
+const MaxTokenLen = 8 << 10
+
+// MaxSources is the most deploy_trust sources one name resolves to
+// (Build).
+const MaxSources = 8
 
 // holdRefusal returns once RefusalFloor has passed since start, or the
 // caller has gone away.
@@ -101,9 +114,10 @@ func scopeField(fields []zap.Field, key, value string) []zap.Field {
 // written (scopeField); an empty key is no field. liveswap's webhook
 // and the box's both call this on the limiter Shared returns, so one
 // address has one budget whichever webhook a flood aims at. start is
-// when the webhook began handling the request, before it looked up
-// the verifiers (a lock a reload holds can stand in that way): a
-// refusal is returned no sooner than RefusalFloor after it.
+// when the webhook began handling the request, before anything whose
+// time depends on what was asked for (liveswap's app lookup and the
+// lock a reload holds there): a refusal is returned no sooner than
+// RefusalFloor after it.
 func (l *Limiter) Authenticate(r *http.Request, start time.Time, verifiers []Verifier, logger *zap.Logger, scopeKey, scopeValue string) (Identity, *Refusal) {
 	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)

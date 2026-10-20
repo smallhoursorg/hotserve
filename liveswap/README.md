@@ -876,7 +876,9 @@ no source at all. The box failing to consult the issuer — its OIDC
 discovery, or fetching its signing keys — lands here as well: still a
 401 to the caller, with the network error in the journal. hotserve
 holds one copy of each issuer's discovery and keys for every source
-that trusts it — every app's, the global ones, the box's — and no
+that trusts it — every app's, the global ones, the box's — per
+`allow_insecure_http` setting (the box always fetches over https, so
+with that option set on liveswap an issuer is held twice), and no
 token waits on fetching them. When hotserve starts or reloads it runs
 each issuer's discovery and fetches its keys again in the background;
 on a reload the keys it already holds stay in use meanwhile, so a
@@ -887,7 +889,7 @@ so a retry once that ends may go through` (or the key set's `fetching
 them`) in `refused`. A discovery that failed is tried again by the
 next reload, or by a token at most once a minute. After that the keys
 are fetched only for a token signed under a key hotserve does not
-hold yet, at most once a minute per issuer, and that token is refused
+hold yet, at most once a minute per copy, and that token is refused
 at once rather than wait: with `fetching them, so a retry once that
 ends may go through` when it began a fetch, and with the last fetch's
 error if that failed. So the first deploy after the issuer rotates its
@@ -901,8 +903,12 @@ the next goes through. The templates' scripts (`scripts/deploy.sh`,
 and the box repository's `bin/apply`) send a token the box refused in
 Actions once more, 3 seconds later, so a rotation usually costs a run
 three seconds, not a re-run. Every refusal is answered no sooner than
-5 ms after the webhook began handling the request, so its timing does
-not say how many sources checked the token. A forged token under a key the
+25 ms after the webhook began handling the request, so its timing does
+not say how many sources checked the token; to keep that true, a
+bearer token longer than 8 KiB is refused unread (`bearer token is
+<n> bytes, longer than 8192` in `refused`), and a config where an app,
+the global set or the box's resolves to more than 8 `deploy_trust`
+sources does not load. A forged token under a key the
 box does hold costs it no request to the issuer, which is also why an
 issuer that replaces a key but keeps its kid is not picked up: tokens
 under the new key are refused, with `signature does not match the key

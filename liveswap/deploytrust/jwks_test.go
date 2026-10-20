@@ -267,6 +267,14 @@ func TestKeySetNoCallerWaitsOnAFetch(t *testing.T) {
 			t.Fatalf("a caller under the held fetch: err = %v, want a refusal naming the fetch under way", err)
 		}
 	}
+	// The callers can all return before the fetch they began reaches the
+	// transport.
+	for deadline := time.Now().Add(5 * time.Second); held.n.Load() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("no fetch reached the transport")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if n := held.n.Load(); n != 1 {
 		t.Fatalf("%d concurrent callers made %d fetches, want one", callers, n)
 	}
