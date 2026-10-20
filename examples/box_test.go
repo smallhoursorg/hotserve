@@ -1028,8 +1028,8 @@ func TestBoxApply(t *testing.T) {
 			t.Fatalf("no baseline: exit %d\n%s", code, out)
 		}
 		g.box.set(func(s *standIn) { s.onGet = "401" })
-		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy_trust local { public_key") || strings.Contains(out, "claim repository") || strings.Contains(out, "sending it once more") {
-			t.Fatalf("401 from a laptop (refused, not sent again): exit %d\n%s", code, out)
+		if out, code := g.apply(); code != 1 || !strings.Contains(out, "deploy_trust local { public_key") || strings.Contains(out, "claim repository") || strings.Count(out, "sending it once more") != 1 {
+			t.Fatalf("401 from a laptop (sent once more, then refused): exit %d\n%s", code, out)
 		}
 		g.box.set(func(s *standIn) { s.onGet = "" })
 		// A shallow clone: refused before asking the box anything, never

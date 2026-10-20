@@ -902,23 +902,11 @@ from <time> on fetches them again, as does systemctl reload hotserve
 now` in `refused`; after an outage,
 the first token past the minute is refused with the outage's error and
 the next goes through. The templates' scripts (`scripts/deploy.sh`,
-and the box repository's `bin/apply`) send a token the box refused in
-Actions once more, 3 seconds later, so a rotation usually costs a run
-three seconds, not a re-run. Every refusal is answered no sooner than
-25 ms after the webhook began handling the request, so its timing does
-not say how many sources checked the token; to keep that true, a
-bearer token longer than 8 KiB is refused unread (`bearer token is
-<n> bytes, longer than 8192` in `refused`), an OIDC token is checked
-against one key — the first under its `kid` that fits its algorithm,
-or, for a token that names no `kid`, the issuer's one key for that
-algorithm, refused when the issuer has more — a config where an
-app, the global set or the box's resolves to more than 8
-`deploy_trust` sources does not load, and a refusal that took longer
-than 25 ms anyway (a loaded box) is held to the next multiple of it,
-with `judging a refused token took longer than the refusal floor`
-in the journal once a minute. Warnings come first: an accepted token
-over 6 KiB (`an accepted token is near the length limit`, once a
-minute), and a set of 7 or 8 sources at config load. A forged token under a key the
+and the box repository's `bin/apply`) send a token the box refused
+once more, 3 seconds later, so a rotation usually costs a run
+three seconds, not a re-run. A bearer token longer than 8 KiB is
+refused unread (`bearer token is <n> bytes, longer than 8192` in
+`refused`); a GitHub or GitLab token is 1–2 KiB. A forged token under a key the
 box does hold costs it no request to the issuer, which is also why an
 issuer that replaces a key but keeps its kid is not picked up: tokens
 under the new key are refused, with `signature does not match the key

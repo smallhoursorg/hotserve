@@ -292,9 +292,9 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// app that does not exist is still authenticated (against the
 	// global sources) before its 404, so the status never leaks app
 	// names to unauthenticated callers, and no refusal waits on an
-	// issuer or answers sooner than the floor, so its time does not
-	// either (DESIGN-threat-model.md, "Webhook endpoint"). The same
-	// wiring serves the box webhook (New).
+	// issuer; its time can still differ by the local work a name's
+	// sources do, the residual DESIGN-threat-model.md accepts
+	// ("Webhook endpoint"). The same wiring serves the box webhook (New).
 	if a.globalVerifiers, err = deploytrust.Resolve(repl, a.DeployTrust, clients.jwks); err != nil {
 		return err
 	}

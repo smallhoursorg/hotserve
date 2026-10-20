@@ -310,12 +310,12 @@ func TestDeployShSaysWhatARefusedRunMustBeTrustedFor(t *testing.T) {
 	}
 }
 
-// The box's 401 to a minted token is sent once more, 3s later: the
-// first token under an issuer's new key is refused while the box
-// fetches it (#306), and the retry deploys. A HOTSERVE_TOKEN, checked
-// against a key the box holds, and a 401 from something that is not
-// the box are not sent again.
-func TestDeployShSendsARefusedMintedTokenOnceMore(t *testing.T) {
+// The box's 401 is sent once more, 3s later: the first token under an
+// issuer's new key is refused while the box fetches it (#306), and the
+// retry deploys — a minted token's, and a HOTSERVE_TOKEN's, which can
+// be an issuer's too (a GitLab id_token). A 401 from something that
+// is not the box is not sent again.
+func TestDeployShSendsARefusedTokenOnceMore(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Fatal("deploy.sh needs curl; install it to run this test")
 	}
@@ -332,7 +332,7 @@ func TestDeployShSendsARefusedMintedTokenOnceMore(t *testing.T) {
 	}{
 		{"minted, the retry deploys", "refused-once", true, 0, 2},
 		{"minted, refused again", "refused", true, 1, 2},
-		{"HOTSERVE_TOKEN", "refused-once", false, 1, 1},
+		{"HOTSERVE_TOKEN, the retry deploys", "refused-once", false, 0, 2},
 		{"minted, a 401 not the box's", "refused-elsewhere", true, 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

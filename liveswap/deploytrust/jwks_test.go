@@ -103,43 +103,9 @@ func TestKeySetNeverFetchesForAKidItHolds(t *testing.T) {
 	fetches(t, iss, 1, "bad signatures under a held kid")
 }
 
-// A token that names no kid is checked against the issuer's one key
-// for its algorithm, and refused before any key is tried when the
-// issuer holds more than one: without a kid, each would be a signature
-// check, which no refusal floor is sized for. Neither begins a fetch.
-func TestKeySetChecksATokenNamingNoKidAgainstOneKey(t *testing.T) {
-	iss := trusttest.NewIssuer(t)
-	c := trusttest.NewClock()
-	v := clocked(iss, c)
-	settled(t, v)
-	c.Advance(RefetchInterval)
-	ctx := context.Background()
-	noKid := func() string {
-		return iss.MintKID(t, iss.Priv, "", "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
-	}
-	if _, err := v.verify(ctx, noKid()); err != nil {
-		t.Fatalf("no kid, the issuer's one key: refused: %v", err)
-	}
-	other, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	iss.Publish(jose.JSONWebKey{Key: other.Public(), KeyID: "second", Algorithm: "RS256", Use: "sig"}, false)
-	settled(t, v) // a reload: the set now holds two RS256 keys
-	c.Advance(RefetchInterval)
-	_, err = v.verify(ctx, noKid())
-	refusedPlainly(t, err, "no kid, two keys")
-	if want := "the token names no key (kid), and the issuer's keys hold 2 for RS256; a source checks one key per token"; !strings.Contains(err.Error(), want) {
-		t.Fatalf("no kid, two keys: reason = %q, want %q", err, want)
-	}
-	waited(t, v)
-	fetches(t, iss, 2, "tokens naming no kid")
-}
-
 // A kid may name keys of other types, or for encryption, beside the
-// signing key (RFC 7517 §4.5): the one check goes to the first key
-// under the kid that fits the token's algorithm, whichever order the
-// set lists them in.
+// signing key (RFC 7517 §4.5): a token under it verifies whichever
+// order the set lists them in, as go-oidc matches keys.
 func TestKeySetPicksTheKeyThatFitsUnderASharedKid(t *testing.T) {
 	ec, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

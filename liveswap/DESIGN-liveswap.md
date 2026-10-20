@@ -45,27 +45,21 @@ Concept map from the Nomad-era stack:
   sources (OIDC against an issuer's public JWKS, or a local public
   key), and its answer MUST NOT reveal whether an app exists to
   unauthenticated callers (unknown apps verify against the global trust
-  sources, then 404; a refused token gets the same 401 either way),
-  nor MUST its timing (DESIGN-threat-model.md, "Webhook endpoint";
-  #306). No verification waits on an issuer: each check is local,
+  sources, then 404; a refused token gets the same 401 either way).
+  No verification MUST wait on an issuer (#306): each check is local,
   against the discovery and keys the process holds once per issuer
   and `allow_insecure_http` setting for every source that trusts it,
   fetched in the background — at start and at each reload
   (`deploytrust.Warm`), the held keys in use meanwhile, then for a
   token under a kid none is held for, at most once a minute per held
-  state, which that token does not wait on. And every refusal is
-  answered no sooner than `deploytrust.RefusalFloor` (25 ms) after the
-  webhook began handling the request (before its app lookup and the
-  verifiers' lock), so the local work a name's sources do does not
-  show, held whether or not the client is still there; a token longer
-  than `deploytrust.MaxTokenLen` (8 KiB) is refused before any source
-  reads it, and a source checks one key per token, so the work the
-  floor hides is bounded. A refusal that overruns the floor MUST be
-  held to its next multiple and logged once per window. No shared
+  state, which that token does not wait on. A token longer than
+  `deploytrust.MaxTokenLen` (8 KiB) is refused before any source reads
+  it. The time to the 401 can still differ by the local work a name's
+  sources do, a fraction of a millisecond per source: the residual
+  DESIGN-threat-model.md accepts ("Webhook endpoint"). No shared
   secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
-  sources, or to more than `deploytrust.MaxSources` (8), for which the
-  refusal floor is sized.
+  sources.
 - Config load and every launch MUST warn when an app's `env_file` is
   world-readable or world-writable (the documented mode is 0640
   root:hotserve; owner and group are not checked), and MUST NOT refuse
@@ -745,6 +739,7 @@ severity × occurrence × detection, then the fix's size and risk.
 | A push refused before its upload is staged (a dir that is not the directory it names, like a 413 or a staging failure) leaves `last_deploy` as it was, where a URL deploy or rollback refused the same way replaces it. | `deployPush` | 2 | 5 | 1 | 10 | size 2, risk 2 (a push refusal through the pipeline's bookkeeping) | Under 20, and not a size-1, risk-1 fix (rule 3). The push's own response is the refusal, a 500 naming the path, the reason and the remedy, and the journal says it with who asked (`deploy failed`, `via`, `remote`). Every refusal of a push before staging already leaves `last_deploy` alone, so a status read after a push tells the same story for each. |
 | An issuer's discovery that failed at start (hotserve up before DNS or the route), or its key fetch after a discovery that succeeded, at start or a reload, is tried again by a token at most once a minute from when it began (nothing retries it in the background): deploys are refused until then even once the network is back, and the token that begins the retry is refused too, with the old error; a retry once that discovery and the key fetch after it have ended goes through. | `issuerState.ready`, deploytrust | 2 | 3 | 1 | 6 | size 2, risk 2 (a faster retry after a failure, a second timing) | Rule 2 holds (red and named: the journal's `could not consult` line carries the error); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#306, 2026-10-20). The minute is the bound on how often traffic makes the box ask an issuer anything; a reload retries at once. |
 | A deploy that arrives just after hotserve starts (an upgrade, a restart), or just after a reload that adds an issuer the process holds nothing for, is refused while that issuer's first discovery and key fetch run (`under way`, `fetching them`), and the templates' one retry 3s later is refused too when those two round trips take longer; a re-run goes through. A reload refuses no token for an issuer already held: the keys held stay in use. | `issuerState.ready`, deploytrust | 2 | 4 (start); 5 (an added issuer, operator input) | 1 | 8; 10 | size 2, risk 2 (wait on the first discovery, bounded) | Rule 2 holds (red and named in `refused`); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#306, 2026-10-20). Waiting on the first discovery is the timing the change removes; the window is once per process start, and the retry covers a fetch under 3s. |
+| A refused token's time can still name a configured app by the local work its sources do: each source a name resolves to parses the token and, for one naming its issuer and audience, checks a signature, where a name with no source does neither. Bounded by `MaxTokenLen`: an OIDC source refuses a 2 KiB token in 0.11 ms and an 8 KiB one under 0.33 ms (arm64, measured), per source. No source waits on an issuer. | `authorize`, deploytrust | 3 | 5 | 5 | 75 | size 3, risk 3 (a refusal floor held to the slowest name, with caps on sources and keys tried; built and reviewed in #337, then removed) | Scores to fix; accepted by the owner's decision (#306, 2026-10-20). Six review rounds of a floor each found another way around it (token size, source count, key count, cancellation, load, logging) and each fix narrowed which tokens verify; the asset is whether an app name exists, which its domain or repository often says anyway, and a sub-millisecond difference per source needs many samples through network jitter. The 8 KiB token cap stays: without it a 1 MiB token made the difference 16 ms. |
 | An issuer that replaced a key under the same kid is picked up by `systemctl reload hotserve`, as the refusal says, only when that reload's discovery succeeds: a reload whose discovery fails keeps the held key and fetches nothing, silently (the held state answers; the discovery error is not surfaced), and tokens under the new key stay refused, still naming the reload. | `issuerState.discover`, deploytrust | 3 | 2 | 3 | 18 | size 2, risk 1 (refetch the held set's keys when a reload's discovery fails) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#337, 2026-10-20). It takes two faults: an issuer swapping a key under its kid, which issuers do not do, and the reload's discovery failing; a second reload once the issuer answers fetches. |
 | A key rotation within a minute of the issuer's last key fetch (a reload, a deploy under another new kid, or a forged token naming one, began it) is refused for every token until a minute after that fetch, the templates' 3s retry included: that run goes red, and a re-run from then goes through. Anyone can send a forged token naming a new kid once a minute to keep the window open. | `keySet.refresh`, deploytrust | 2 | 5 | 1 | 10 | size 2, risk 2 (let a retry skip the interval) | Rule 2 holds: red and named, the refusal saying the keys were fetched under a minute ago, from when a token fetches them again, and that `systemctl reload hotserve` fetches them now (#306, 2026-10-20). Under rule 3 the product is under 20 and the fix is not size 1, risk 1. Skipping the interval for any token would hand the fetch rate to whoever sends tokens. |
 

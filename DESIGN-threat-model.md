@@ -84,38 +84,31 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so its refusal is the same 401 as a known
-app's (`Handler.ServeHTTP`, liveswap/handler.go), and so is its time
-(#306). No token waits on an issuer: a token is checked against each
-source a name resolves to in turn, the signature before the issuer,
-and every check is local. Each issuer's discovery and keys are held
-once for the process per `allow_insecure_http` setting (so at most
-twice, when liveswap's differs from the box's https-only one), shared
-by every source that trusts it over that client (`issuerState`,
-liveswap/deploytrust/deploytrust.go), and fetched in the background —
-at start and at each reload (`Warm`), then for a token under a kid
-none is held for, at most once a minute per held state, which that
-token does not wait on (`keySet`, liveswap/deploytrust/jwks.go). The
-local work still differs — each source a name resolves to parses the
-token and checks a signature, a name with no source does neither — so
-it is bounded and then hidden: a token longer than `MaxTokenLen` (8
-KiB) is refused before any source parses it, a name resolves to at
-most `MaxSources` (8; `Build` refuses more at config load), a source
-checks one key per token (the first under its `kid` that fits its
-algorithm; a token naming no `kid` only when the issuer holds one key
-for it), so an issuer's key count does not multiply the work
-(`verifyWith`), and
-every refusal is answered no sooner than `RefusalFloor` (25 ms) after
-the webhook began handling the request, before its app lookup and the
-lock a reload can hold there (`Handler.ServeHTTP`;
-liveswap/deploytrust/authenticate.go), held even when the client has
-gone (an HTTP/1.1 half-close still reads the answer). A refusal that
-took longer anyway is held to the next multiple of the floor, so an
-overrun shows only in 25 ms steps, and the journal says so once per
-window. Measured on an arm64 machine
-(2026-10-20): an OIDC source refuses a 2 KiB token in 0.11 ms and a
-16 KiB one in 0.33 ms; a 1 MiB one, which the header limit allows,
-took 16 ms. The floor covers eight checks of an 8 KiB token on a box
-ten times slower (an estimate). Config load refuses an app
+app's (`Handler.ServeHTTP`, liveswap/handler.go). No token waits on
+an issuer for it (#306): a token is checked against each source a
+name resolves to in turn — an OIDC source checks its issuer, audience
+and expiry, then its signature (go-oidc's order), then the claim
+allowlist — and every check is local. Each issuer's discovery and keys
+are held once for the process per `allow_insecure_http` setting (so at
+most twice, when liveswap's differs from the box's https-only one),
+shared by every source that trusts it over that client
+(`issuerState`, liveswap/deploytrust/deploytrust.go), and fetched in
+the background — at start and at each reload (`Warm`), then for a
+token under a kid none is held for, at most once a minute per held
+state, which that token does not wait on (`keySet`,
+liveswap/deploytrust/jwks.go). The time to the 401 can still differ
+by that local work, and that is the **residual**, accepted by the
+owner's decision (S3 × O5 × D5 = 75, #306, 2026-10-20): each source a
+name resolves to parses the token and, for one that names its issuer
+and audience, checks a signature, where a name with no source does
+neither. A token longer than `MaxTokenLen` (8 KiB) is refused before
+any source parses it, which bounds the difference: measured on an
+arm64 machine (2026-10-20), an OIDC source refuses a 2 KiB token
+(about a real GitHub one) in 0.11 ms and a 16 KiB one in 0.33 ms,
+where a 1 MiB one, which the header limit allows, took 16 ms. A
+fraction of a millisecond per source is under network jitter for a
+few samples, not for many; the asset is whether an app name exists,
+which a domain or repository name often says anyway. Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.
@@ -247,9 +240,8 @@ Properties that matter to the model:
   under a kid the process holds no key for, which begins a fetch of
   the issuer's keys in the background, at most once a minute per
   issuer, and is refused without waiting on it (`keySet`,
-  liveswap/deploytrust/jwks.go). A refusal then waits out
-  `RefusalFloor`, which holds the request, not a CPU. So the throttle
-  is not what bounds CPU, and traffic does not set how often the box
+  liveswap/deploytrust/jwks.go). A token longer than `MaxTokenLen` is
+  refused before any parse. So the throttle is not what bounds CPU, and traffic does not set how often the box
   asks an issuer anything: a token makes it try an issuer's discovery,
   while that fails, and fetch its keys, each at most once a minute and
   one at a time (`issuerState`, liveswap/deploytrust/deploytrust.go).

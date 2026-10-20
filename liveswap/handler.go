@@ -88,9 +88,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 // ServeHTTP is terminal: it never calls the next handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.Handler) error {
-	// The refusal floor runs from here, before the app lookup and its
-	// verifiers' lock, which an unknown name never takes.
-	start := time.Now()
 	name := path.Base(path.Clean(r.URL.Path))
 	ma := h.app.managedApp(name)
 
@@ -98,15 +95,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, _ caddyhttp.
 	// unknown app the token is verified against the global trust
 	// sources, so the status never leaks valid app names to
 	// unauthenticated callers (with no global trust configured, an
-	// unknown app is simply unauthenticable → 401). Nor does the time
-	// to the 401: no refusal waits on an issuer, and none is answered
-	// sooner than deploytrust's floor after start
-	// (DESIGN-threat-model.md, "Webhook endpoint").
+	// unknown app is simply unauthenticable → 401). No refusal waits on
+	// an issuer; the time to the 401 can still differ by the local work
+	// a name's sources do, the residual DESIGN-threat-model.md accepts
+	// ("Webhook endpoint").
 	verifiers := h.app.globalVerifiers
 	if ma != nil {
 		verifiers = ma.currentVerifiers()
 	}
-	who, refusal := h.limiter.Authenticate(r, start, verifiers, h.logger, "app", loggedAppName(name))
+	who, refusal := h.limiter.Authenticate(r, verifiers, h.logger, "app", loggedAppName(name))
 	if refusal != nil {
 		return refusal.Write(func(code int, body any) error { return RespondJSON(w, code, body, nil) })
 	}

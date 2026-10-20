@@ -129,16 +129,11 @@ func ResolvePlaceholders(repl *caddy.Replacer, tcs []TrustConfig) {
 // sources override the global default wholesale (same semantics as
 // artifact_allowlist), never append. It loads local public keys and
 // validates presets here so a bad key path or missing audience fails
-// config load — fail-closed, like the rest of liveswap's config. A set
-// of more than MaxSources is refused: RefusalFloor is sized for that
-// many checks of a token.
+// config load — fail-closed, like the rest of liveswap's config.
 func Build(global, perApp []TrustConfig) ([]Source, error) {
 	src := global
 	if len(perApp) > 0 {
 		src = perApp
-	}
-	if len(src) > MaxSources {
-		return nil, fmt.Errorf("deploy_trust: %d sources, at most %d: a refused token's answer is held to a floor sized for %d checks of it (RefusalFloor), so its time names no app", len(src), MaxSources, MaxSources)
 	}
 	out := make([]Source, 0, len(src))
 	for i, tc := range src {
@@ -692,7 +687,7 @@ func authorize(ctx context.Context, verifiers []Verifier, rawToken string) (who 
 	}
 	// Before any source parses it, and whatever the name: what a
 	// refusal costs grows with the token, and a name with no source
-	// would not pay it (RefusalFloor).
+	// would not pay it (MaxTokenLen).
 	if len(rawToken) > MaxTokenLen {
 		return Identity{}, nil, fmt.Errorf("bearer token is %d bytes, longer than %d", len(rawToken), MaxTokenLen)
 	}
@@ -715,6 +710,18 @@ func authorize(ctx context.Context, verifiers []Verifier, rawToken string) (who 
 	}
 	return Identity{}, down, errors.New(strings.Join(refused, "; "))
 }
+
+// MaxTokenLen is the longest bearer token judged; authorize refuses a
+// longer one before any source parses it. Each source a name resolves
+// to parses the token, and a name with no source parses nothing, so the
+// time to a refusal grows with the token for a name that exists: an
+// OIDC source refused a 2 KiB token (about a real GitHub one) in
+// 0.11 ms, a 16 KiB one in 0.33 ms, and a 1 MiB one, which the header
+// limit allows, in 16 ms (arm64, measured 2026-10-20). The cap keeps
+// that difference to a fraction of a millisecond per source, the
+// timing residual DESIGN-threat-model.md accepts (#306). A GitHub or
+// GitLab OIDC token is 1–2 KiB, a `hotserve deploy-token` one smaller.
+const MaxTokenLen = 8 << 10
 
 // MaxRefusalLen bounds one source's reason in the journal. A reason
 // can carry token-supplied text — an issuer library quotes the token's
@@ -989,9 +996,10 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, e
 	}
 	tok, err := idv.Verify(oidc.ClientContext(ctx, v.client), rawToken)
 	if err != nil {
-		// The signature is checked before any claim, and a token whose
-		// kid the key set holds no key for gets the last fetch's error;
-		// so during an outage such a token lands here, while one under a
+		// go-oidc checks the issuer, audience and expiry, then the
+		// signature, and a token whose kid the key set holds no key for
+		// gets the last fetch's error; so during an outage such a token,
+		// once its standard claims pass, lands here, while one under a
 		// key the set holds is judged as ever.
 		if strings.HasPrefix(err.Error(), keyFetchFailed) {
 			return Identity{}, unavailable{v.Label(), err}

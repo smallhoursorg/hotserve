@@ -40,8 +40,8 @@
 # version keeps serving) — with the status code the request would
 # have had in `http_status`. Every line is printed as it arrives, and
 # a failure exits non-zero. A 401 — the box would not accept the
-# token — to a token minted in Actions is sent once more 3s later
-# (send), and a 401 that stands is followed by what the box must
+# token — is sent once more 3s later (send), and a 401 that stands
+# is followed by what the box must
 # trust for this run, since
 # the box's own answer deliberately does not say (the reason is in its
 # journal, for its operator).
@@ -228,16 +228,16 @@ boxrefused() {
 	case $(field "$(tail -n 1 "$body")" error) in 'invalid or missing deploy token'*) return 0 ;; esac
 	return 1
 }
-# send is stream, sent once more 3s after the box refuses a minted
-# token. The first token under an issuer's new signing key is refused
-# while the box fetches that key, without waiting on the fetch (a wait
-# would tell anyone with a token which apps exist), and the retry
-# finds it. The box refuses before it does anything else, so sending
-# the request again repeats nothing. A HOTSERVE_TOKEN is checked
-# against a key the box already holds, so it is not sent again.
+# send is stream, sent once more 3s after the box refuses the token.
+# The first token under an issuer's new signing key is refused while
+# the box fetches that key, without waiting on the fetch (a wait would
+# tell anyone with a token which apps exist), and the retry finds it.
+# That holds for a HOTSERVE_TOKEN too when it is an issuer's (a GitLab
+# id_token, say). The box refuses before it does anything else, so
+# sending the request again repeats nothing.
 send() { # <curl args...>
 	stream "$@"
-	if [ -n "$minted" ] && boxrefused; then
+	if boxrefused; then
 		printf '\nthe box refused the token; sending it once more in 3s (a box refuses the first token under a new signing key while it fetches the key)\n'
 		sleep 3
 		stream "$@"

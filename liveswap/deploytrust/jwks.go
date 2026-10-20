@@ -2,12 +2,7 @@ package deploytrust
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/elliptic"
-	"crypto/rsa"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -88,32 +83,11 @@ func (ks *keySet) VerifySignature(_ context.Context, raw string) ([]byte, error)
 	if len(jws.Signatures) != 1 {
 		return nil, fmt.Errorf("%d signatures, want one", len(jws.Signatures))
 	}
-	header := jws.Signatures[0].Header
-	kid, alg := header.KeyID, jose.SignatureAlgorithm(header.Algorithm)
+	kid := jws.Signatures[0].Header.KeyID
 	ks.mu.Lock()
 	keys := ks.keys
 	ks.mu.Unlock()
-	if kid == "" {
-		// Without a kid, go-oidc tries every key the set holds: as many
-		// signature checks as the issuer publishes keys, which no floor
-		// is sized for (RefusalFloor). One check is: an issuer with one
-		// key for the algorithm needs no kid. GitHub's and GitLab's
-		// tokens name one. No fetch: a set that grows is no reason to.
-		var only []jose.JSONWebKey
-		for _, key := range keys {
-			if fits(key, alg) {
-				only = append(only, key)
-			}
-		}
-		if len(only) != 1 {
-			return nil, fmt.Errorf("the token names no key (kid), and the issuer's keys hold %d for %s; a source checks one key per token", len(only), alg)
-		}
-		if p, err := jws.Verify(&only[0]); err == nil {
-			return p, nil
-		}
-		return nil, errors.New("signature does not match the issuer's one key, and the token names no kid")
-	}
-	payload, held := verifyWith(jws, kid, alg, keys)
+	payload, held := verifyWith(jws, kid, keys)
 	if payload != nil {
 		return payload, nil
 	}
@@ -136,40 +110,21 @@ func (ks *keySet) VerifySignature(_ context.Context, raw string) ([]byte, error)
 	return nil, fmt.Errorf("the issuer's keys hold none that verifies it (kid %q); they were fetched under a minute ago, so a token from %s on fetches them again, as does systemctl reload hotserve now", kid, next.UTC().Format(time.RFC3339))
 }
 
-// verifyWith is the payload of jws when the first of keys under kid
-// that fits its algorithm verifies it, and whether one does fit: one
-// signature check per token, however many keys the issuer publishes
-// under the kid. A set may hold keys of other types, or for
-// encryption, under the same kid (RFC 7517 §4.5); they are passed
-// over, not checked.
-func verifyWith(jws *jose.JSONWebSignature, kid string, alg jose.SignatureAlgorithm, keys []jose.JSONWebKey) (payload []byte, held bool) {
+// verifyWith is the payload of the first of keys that verifies jws —
+// one under the token's kid, or any, for a token that names none, as
+// go-oidc matches them — and whether the token names a kid that one
+// of keys carries.
+func verifyWith(jws *jose.JSONWebSignature, kid string, keys []jose.JSONWebKey) (payload []byte, held bool) {
 	for _, key := range keys {
-		if key.KeyID != kid || !fits(key, alg) {
+		if kid != "" && key.KeyID != kid {
 			continue
 		}
+		held = kid != ""
 		if p, err := jws.Verify(&key); err == nil {
-			return p, true
+			return p, held
 		}
-		return nil, true
 	}
-	return nil, false
-}
-
-// fits says whether key can verify a signature under alg: a signing key
-// (no `use`, or `sig`), naming alg or no algorithm, of alg's key type.
-func fits(key jose.JSONWebKey, alg jose.SignatureAlgorithm) bool {
-	if (key.Use != "" && key.Use != "sig") || (key.Algorithm != "" && jose.SignatureAlgorithm(key.Algorithm) != alg) {
-		return false
-	}
-	switch k := key.Key.(type) {
-	case *rsa.PublicKey:
-		return alg == jose.RS256 || alg == jose.RS384 || alg == jose.RS512 || alg == jose.PS256 || alg == jose.PS384 || alg == jose.PS512
-	case *ecdsa.PublicKey:
-		return (alg == jose.ES256 && k.Curve == elliptic.P256()) || (alg == jose.ES384 && k.Curve == elliptic.P384()) || (alg == jose.ES512 && k.Curve == elliptic.P521())
-	case ed25519.PublicKey:
-		return alg == jose.EdDSA
-	}
-	return false
+	return nil, held
 }
 
 // refresh begins a fetch when none is under way and either force (a

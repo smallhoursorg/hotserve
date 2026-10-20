@@ -112,14 +112,14 @@ mint() {
 
 # req <curl args...>: one request with a token. The status goes in
 # $code — 000 when no answer came, `mint` when no token could be had
-# and nothing was sent — and the body in $tmpd/resp. A 401 to a token
-# minted in Actions is sent once more, 3s later, with a fresh one: the
-# first token under an issuer's new signing key is refused while the
-# box fetches that key, without waiting on the fetch (a wait would
-# tell anyone with a token what the box trusts), and the retry finds
-# it. The box refuses before it does anything else, so sending again
-# repeats nothing. A HOTSERVE_TOKEN is checked against a key the box
-# already holds, so it is not sent again.
+# and nothing was sent — and the body in $tmpd/resp. The box's 401 is
+# sent once more, 3s later (with a fresh token in Actions): the first
+# token under an issuer's new signing key is refused while the box
+# fetches that key, without waiting on the fetch (a wait would tell
+# anyone with a token what the box trusts), and the retry finds it.
+# That holds for a HOTSERVE_TOKEN too when it is an issuer's (a GitLab
+# id_token, say). The box refuses before it does anything else, so
+# sending again repeats nothing.
 req() {
 	# Not $try: mint's loop sets it.
 	for sent in 1 2; do
@@ -129,7 +129,7 @@ req() {
 			-H "@$tmpd/auth" "$@") || code=000
 		# The box's own 401, by its sentence: one from something in front
 		# of it is not about the token.
-		{ [ "$code" = 401 ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ "$sent" = 1 ] &&
+		{ [ "$code" = 401 ] && [ "$sent" = 1 ] &&
 			case $(field error) in 'invalid or missing deploy token'*) true ;; *) false ;; esac; } || return 0
 		echo "apply: the box refused the token; sending it once more in 3s (a box refuses the first token under a new signing key while it fetches the key)"
 		sleep 3

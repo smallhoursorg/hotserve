@@ -69,164 +69,6 @@ func answered(t *testing.T, ref *Refusal) (code int, body map[string]string) {
 	return code, body
 }
 
-// A refusal is answered no sooner than the floor after the webhook
-// began, whatever it took to reach (#306): a name with no source, which
-// checks nothing, and one whose source checks a signature, alike; and
-// a caller that went away all the same, since an HTTP/1.1 client can
-// half-close its side and still read the answer. A refusal whose
-// judging overran the floor is held to the next multiple of it, and
-// the overrun is logged once per window. Production's limiter holds to
-// RefusalFloor; a test's own (NewLimiter) holds nothing.
-func TestAuthenticateHoldsARefusalToTheFloor(t *testing.T) {
-	_, pub := trusttest.GenerateKey()
-	other, _ := trusttest.GenerateKey()
-	if Shared().floor != RefusalFloor || NewLimiter(trusttest.NewClock()).floor != 0 {
-		t.Fatalf("floors: Shared %v, NewLimiter %v; want %v and 0", Shared().floor, NewLimiter(trusttest.NewClock()).floor, RefusalFloor)
-	}
-	l := NewLimiter(trusttest.NewClock())
-	l.floor = RefusalFloor
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-	overruns := func() int { return logs.FilterMessageSnippet("longer than the refusal floor").Len() }
-	gone, cancel := context.WithCancel(context.Background())
-	cancel()
-	for _, tc := range []struct {
-		name string
-		vs   []Verifier
-		req  *http.Request
-	}{
-		{"no source", nil, request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil))},
-		{"a signature checked", Verifiers([]Source{localTrust(pub, "box")}, nil), request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil))},
-		{"the caller gone", nil, request("192.0.2.80:1", "not-a-jwt").WithContext(gone)},
-	} {
-		begun := time.Now()
-		if _, ref := l.Authenticate(tc.req, begun, tc.vs, logger, "", ""); ref == nil {
-			t.Fatalf("%s: accepted, want a refusal", tc.name)
-		}
-		if took := time.Since(begun); took < RefusalFloor {
-			t.Errorf("%s: refused after %v, want no sooner than %v", tc.name, took, RefusalFloor)
-		}
-	}
-	if n := overruns(); n != 0 {
-		t.Fatalf("%d overrun lines for refusals within the floor, want none", n)
-	}
-	// Judging that took longer than the floor (here, time the webhook
-	// spent before calling) is held to the next multiple, and said once
-	// per window.
-	for range 2 {
-		start := time.Now().Add(-RefusalFloor - RefusalFloor/5)
-		if _, ref := l.Authenticate(request("192.0.2.80:1", "not-a-jwt"), start, nil, logger, "", ""); ref == nil {
-			t.Fatal("accepted, want a refusal")
-		}
-		if took := time.Since(start); took < 2*RefusalFloor {
-			t.Errorf("an overrun refusal answered %v after its start, want the next multiple, %v", took, 2*RefusalFloor)
-		}
-	}
-	if n := overruns(); n != 1 {
-		t.Fatalf("%d overrun lines for two overruns in one window, want one", n)
-	}
-}
-
-// An accepted token over three quarters of MaxTokenLen is logged, once
-// per window, with who it is and how long; one under it is not.
-func TestAuthenticateWarnsOfATokenNearTheLimit(t *testing.T) {
-	priv, pub := trusttest.GenerateKey()
-	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
-	l := NewLimiter(trusttest.NewClock())
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-	near := func() int { return logs.FilterMessageSnippet("near the length limit").Len() }
-	if _, ref := l.Authenticate(request("192.0.2.81:1", trusttest.Mint(t, priv, "box", nil)), time.Now(), vs, logger, "", ""); ref != nil || near() != 0 {
-		t.Fatalf("a small token: refusal %+v, %d warnings; want accepted, none", ref, near())
-	}
-	// Three quarters of three quarters: base64 grows the claim by a
-	// third, so the token lands between the warning and the limit.
-	big := trusttest.Mint(t, priv, "box", map[string]string{"pad": strings.Repeat("a", MaxTokenLen*9/16)})
-	if len(big) <= MaxTokenLen*3/4 || len(big) > MaxTokenLen {
-		t.Fatalf("the padded token is %d bytes, want between %d and %d", len(big), MaxTokenLen*3/4, MaxTokenLen)
-	}
-	for range 2 {
-		if _, ref := l.Authenticate(request("192.0.2.81:1", big), time.Now(), vs, logger, "", ""); ref != nil {
-			t.Fatalf("a token near the limit: refused: %+v", ref)
-		}
-	}
-	if near() != 1 {
-		t.Fatalf("%d warnings for two tokens near the limit in one window, want one", near())
-	}
-}
-
-// A token longer than MaxTokenLen is refused before any source reads
-// it, whatever the name: one with no source and one with a source the
-// same way, with the length named for the journal. One at the limit
-// reaches the sources (#306).
-func TestAuthorizeRefusesALongTokenUnread(t *testing.T) {
-	priv, pub := trusttest.GenerateKey()
-	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
-	long := strings.Repeat("a", MaxTokenLen+1)
-	for _, set := range [][]Verifier{nil, vs} {
-		_, _, err := authorize(context.Background(), set, long)
-		if want := "bearer token is " + strconv.Itoa(MaxTokenLen+1) + " bytes, longer than " + strconv.Itoa(MaxTokenLen); err == nil || err.Error() != want {
-			t.Fatalf("%d sources: err = %v, want %q", len(set), err, want)
-		}
-	}
-	atLimit := strings.Repeat("a", MaxTokenLen)
-	if _, _, err := authorize(context.Background(), vs, atLimit); err == nil || !strings.HasPrefix(err.Error(), "local:") {
-		t.Fatalf("a token at the limit: err = %v, want the source's own refusal", err)
-	}
-	if _, _, err := authorize(context.Background(), vs, trusttest.Mint(t, priv, "box", nil)); err != nil {
-		t.Fatalf("a real token: refused: %v", err)
-	}
-}
-
-// Build refuses a set of more than MaxSources, for which the refusal
-// floor is sized, naming the count and the limit; MaxSources loads.
-func TestBuildRefusesMoreSourcesThanTheFloorCovers(t *testing.T) {
-	_, pub := trusttest.GenerateKey()
-	key := trusttest.KeyFile(t, pub)
-	set := func(n int) []TrustConfig {
-		out := make([]TrustConfig, n)
-		for i := range out {
-			out[i] = TrustConfig{Kind: "local", PublicKey: key, Audience: "box"}
-		}
-		return out
-	}
-	if _, err := Build(set(MaxSources), nil); err != nil {
-		t.Fatalf("%d sources: %v", MaxSources, err)
-	}
-	for _, tc := range []struct {
-		name           string
-		global, perApp []TrustConfig
-	}{
-		{"global", set(MaxSources + 1), nil},
-		{"per app", nil, set(MaxSources + 1)},
-	} {
-		_, err := Build(tc.global, tc.perApp)
-		if want := "deploy_trust: " + strconv.Itoa(MaxSources+1) + " sources, at most " + strconv.Itoa(MaxSources); err == nil || !strings.HasPrefix(err.Error(), want) {
-			t.Fatalf("%s: err = %v, want it to begin %q", tc.name, err, want)
-		}
-	}
-}
-
-// WarnSourceCount warns about a set over three quarters of MaxSources,
-// naming the set, its count and the limit; one at three quarters is
-// quiet.
-func TestWarnSourceCountNearTheLimit(t *testing.T) {
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-	WarnSourceCount(logger, MaxSources*3/4, zap.String("app", "blog"))
-	if n := logs.Len(); n != 0 {
-		t.Fatalf("%d sources: %d warnings, want none", MaxSources*3/4, n)
-	}
-	WarnSourceCount(logger, MaxSources*3/4+1, zap.String("app", "blog"))
-	all := logs.TakeAll()
-	if len(all) != 1 {
-		t.Fatalf("%d sources: %d warnings, want one", MaxSources*3/4+1, len(all))
-	}
-	if f := all[0].ContextMap(); f["app"] != "blog" || f["sources"] != int64(MaxSources*3/4+1) || f["limit"] != int64(MaxSources) {
-		t.Fatalf("warning fields = %v, want the set, its count and the limit", f)
-	}
-}
-
 // TestAuthenticateOnTheSharedLimiter pins the preamble on the limiter
 // both webhooks share: one refusal through it is charged there and
 // answered with the flat 401 under the caller's field; an accepted
@@ -242,7 +84,7 @@ func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
 	const addr, key = "203.0.113.9:4242", "203.0.113.9"
 	t.Cleanup(func() { forgetTestAddress(key) })
 
-	who, ref := Shared().Authenticate(request(addr, "not-a-jwt"), time.Now(), vs, logger, "webhook", "box")
+	who, ref := Shared().Authenticate(request(addr, "not-a-jwt"), vs, logger, "webhook", "box")
 	if ref == nil || who.By != "" {
 		t.Fatalf("refused token: who = %+v, refusal = %+v; want a refusal and nobody", who, ref)
 	}
@@ -261,7 +103,7 @@ func TestAuthenticateOnTheSharedLimiter(t *testing.T) {
 	}
 
 	const sha = "4f1c2a9d0e8b7c6a5f4e3d2c1b0a998877665544"
-	who, ref = Shared().Authenticate(request(addr, trusttest.Mint(t, priv, "box", map[string]string{"sub": "ci", "sha": sha})), time.Now(), vs, logger, "webhook", "box")
+	who, ref = Shared().Authenticate(request(addr, trusttest.Mint(t, priv, "box", map[string]string{"sub": "ci", "sha": sha})), vs, logger, "webhook", "box")
 	if ref != nil {
 		t.Fatalf("accepted token refused: %+v", ref)
 	}
@@ -298,7 +140,7 @@ func TestAuthenticateBudgetAndBound(t *testing.T) {
 	const addr = "203.0.113.10:4242"
 	call := func(token, key, value string) *Refusal {
 		t.Helper()
-		_, ref := l.Authenticate(request(addr, token), time.Now(), vs, logger, key, value)
+		_, ref := l.Authenticate(request(addr, token), vs, logger, key, value)
 		return ref
 	}
 
@@ -361,6 +203,29 @@ func TestAuthenticateBudgetAndBound(t *testing.T) {
 	}
 }
 
+// A token longer than MaxTokenLen is refused before any source reads
+// it, whatever the name: one with no source and one with a source the
+// same way, with the length named for the journal. One at the limit
+// reaches the sources (#306).
+func TestAuthorizeRefusesALongTokenUnread(t *testing.T) {
+	priv, pub := trusttest.GenerateKey()
+	vs := Verifiers([]Source{localTrust(pub, "box")}, nil)
+	long := strings.Repeat("a", MaxTokenLen+1)
+	for _, set := range [][]Verifier{nil, vs} {
+		_, _, err := authorize(context.Background(), set, long)
+		if want := "bearer token is " + strconv.Itoa(MaxTokenLen+1) + " bytes, longer than " + strconv.Itoa(MaxTokenLen); err == nil || err.Error() != want {
+			t.Fatalf("%d sources: err = %v, want %q", len(set), err, want)
+		}
+	}
+	atLimit := strings.Repeat("a", MaxTokenLen)
+	if _, _, err := authorize(context.Background(), vs, atLimit); err == nil || !strings.HasPrefix(err.Error(), "local:") {
+		t.Fatalf("a token at the limit: err = %v, want the source's own refusal", err)
+	}
+	if _, _, err := authorize(context.Background(), vs, trusttest.Mint(t, priv, "box", nil)); err != nil {
+		t.Fatalf("a real token: refused: %v", err)
+	}
+}
+
 // TestOutageLineIsPerCaller pins that the once-per-window line naming
 // a source the box could not consult is written for each webhook that
 // meets it, under that webhook's field: an operator reading one
@@ -379,7 +244,7 @@ func TestOutageLineIsPerCaller(t *testing.T) {
 		{"webhook", "box", "203.0.113.12:1"},
 		{"app", "demo", "203.0.113.11:1"},
 	} {
-		if _, ref := l.Authenticate(request(c.addr, tok), time.Now(), vs, logger, c.key, c.value); ref == nil || ref.Status != http.StatusUnauthorized {
+		if _, ref := l.Authenticate(request(c.addr, tok), vs, logger, c.key, c.value); ref == nil || ref.Status != http.StatusUnauthorized {
 			t.Fatalf("%s=%s: refusal = %+v; want the flat 401 while the issuer is down", c.key, c.value, ref)
 		}
 	}
