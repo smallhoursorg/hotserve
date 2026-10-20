@@ -451,18 +451,16 @@ func WarnUnboundSource(logger *zap.Logger, tc TrustConfig, where ...zap.Field) {
 // its sources the same one, and an issuer's shared state (issuerFor)
 // outlives a reload.
 func NewJWKSClient(allowInsecure bool) *http.Client {
-	c := &jwksClients[0]
 	if allowInsecure {
-		c = &jwksClients[1]
+		return insecureJWKSClient()
 	}
-	c.once.Do(func() { c.client = newJWKSClient(allowInsecure) })
-	return c.client
+	return httpsJWKSClient()
 }
 
-var jwksClients [2]struct {
-	once   sync.Once
-	client *http.Client
-}
+var (
+	httpsJWKSClient    = sync.OnceValue(func() *http.Client { return newJWKSClient(false) })
+	insecureJWKSClient = sync.OnceValue(func() *http.Client { return newJWKSClient(true) })
+)
 
 func newJWKSClient(allowInsecure bool) *http.Client {
 	var rt http.RoundTripper = &http.Transport{
@@ -982,11 +980,9 @@ func (is *issuerState) provide(ctx context.Context) (jwksURL string, algs []stri
 const keyFetchFailed = "failed to verify signature: fetching keys"
 
 func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, error) {
-	// Nothing here waits, so a caller that went away is seen here or
-	// not at all; it is its own failure, not an outage.
-	if err := ctx.Err(); err != nil {
-		return Identity{}, err
-	}
+	// Nothing here waits, so the caller's context decides nothing: a
+	// valid token is accepted even from a client that half-closed its
+	// side (which ends the context) and still reads the answer.
 	idv, err := v.ensure()
 	if err != nil {
 		return Identity{}, err

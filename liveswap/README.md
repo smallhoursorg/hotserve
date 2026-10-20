@@ -882,9 +882,11 @@ with that option set on liveswap an issuer is held twice), and no
 token waits on fetching them. When hotserve starts or reloads it runs
 each issuer's discovery and fetches its keys again in the background;
 on a reload the keys it already holds stay in use meanwhile, so a
-reload refuses no token it would have accepted before. A token that
-arrives before an issuer's first discovery and fetch have ended — at
-start, or after a reload adds an issuer — is refused with `oidc discovery for <issuer>: under way,
+reload refuses no token it would have accepted before, unless it adds
+an issuer or changes liveswap's `allow_insecure_http` (a copy hotserve
+holds nothing for yet). A token that arrives before an issuer's first
+discovery and fetch have ended — at start, or after such a reload —
+is refused with `oidc discovery for <issuer>: under way,
 so a retry once that ends may go through` (or the key set's `fetching
 them`) in `refused`. A discovery that failed is tried again by the
 next reload, or by a token at most once a minute. After that the keys
@@ -906,8 +908,10 @@ three seconds, not a re-run. Every refusal is answered no sooner than
 25 ms after the webhook began handling the request, so its timing does
 not say how many sources checked the token; to keep that true, a
 bearer token longer than 8 KiB is refused unread (`bearer token is
-<n> bytes, longer than 8192` in `refused`), an OIDC token that names
-no key (`kid`) is refused before any key is tried, a config where an
+<n> bytes, longer than 8192` in `refused`), an OIDC token is checked
+against one key — the first under its `kid` that fits its algorithm,
+or, for a token that names no `kid`, the issuer's one key for that
+algorithm, refused when the issuer has more — a config where an
 app, the global set or the box's resolves to more than 8
 `deploy_trust` sources does not load, and a refusal that took longer
 than 25 ms anyway (a loaded box) is held to the next multiple of it,

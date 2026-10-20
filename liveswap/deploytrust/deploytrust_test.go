@@ -429,8 +429,8 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 // text is the only handle on it). It also pins what is NOT an outage:
 // a token the cached keys verify still deploys, a malformed token and
 // a bad signature under a kid the box holds are refusals of their own,
-// a caller that went away is its own failure, and an issuer answering
-// as someone else is the config's.
+// and an issuer answering as someone else is the config's. A caller
+// that went away is judged as any other: nothing waits.
 func TestOIDCVerifierIssuerDown(t *testing.T) {
 	want := map[string]string{"repository": "org/app"}
 	c := trusttest.NewClock()
@@ -490,7 +490,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 		t.Fatalf("discovery 503: reason = %q, want it to say discovery and the answer", u.Error())
 	}
 	_, err = v.verify(gone, valid(iss))
-	wantPlain(t, err, "discovery with the caller gone")
+	_ = wantDown(t, iss, err, "discovery 503, the caller gone: judged the same")
 	iss.DiscoveryDown.Store(false)
 	_, err = v.verify(ctx, valid(iss))
 	_ = wantDown(t, iss, err, "discovery back within the interval")
@@ -532,7 +532,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 		t.Fatalf("JWKS 503: reason = %q, want the keyFetchFailed prefix %q", u.Error(), keyFetchFailed)
 	}
 	_, err = v.verify(gone, valid(iss))
-	wantPlain(t, err, "key fetch with the caller gone")
+	_ = wantDown(t, iss, err, "JWKS 503, the caller gone: judged the same")
 
 	// Recovery needs no restart: the key set fetches again once the
 	// interval since the failed fetch has passed, for the token that then
@@ -547,6 +547,11 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	waited(t, v)
 	if _, err := v.verify(ctx, valid(iss)); err != nil {
 		t.Fatalf("issuer back past the interval: valid token rejected: %v", err)
+	}
+	// Nothing waits, so a caller whose context has ended (an HTTP/1.1
+	// half-close, which still reads the answer) is judged as any other.
+	if _, err := v.verify(gone, valid(iss)); err != nil {
+		t.Fatalf("a valid token, the caller gone: rejected: %v", err)
 	}
 
 	// Down again, keys cached: a token those keys verify still deploys

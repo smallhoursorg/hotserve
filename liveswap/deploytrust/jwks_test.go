@@ -2,6 +2,8 @@ package deploytrust
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
@@ -101,23 +103,62 @@ func TestKeySetNeverFetchesForAKidItHolds(t *testing.T) {
 	fetches(t, iss, 1, "bad signatures under a held kid")
 }
 
-// A token that names no kid is refused before any key is tried, and
-// begins no fetch: without one, every key the issuer publishes would
-// be a signature check, which no refusal floor is sized for. Even one
-// signed with the issuer's own key.
-func TestKeySetRefusesATokenNamingNoKid(t *testing.T) {
+// A token that names no kid is checked against the issuer's one key
+// for its algorithm, and refused before any key is tried when the
+// issuer holds more than one: without a kid, each would be a signature
+// check, which no refusal floor is sized for. Neither begins a fetch.
+func TestKeySetChecksATokenNamingNoKidAgainstOneKey(t *testing.T) {
 	iss := trusttest.NewIssuer(t)
 	c := trusttest.NewClock()
 	v := clocked(iss, c)
 	settled(t, v)
 	c.Advance(RefetchInterval)
-	_, err := v.verify(context.Background(), iss.MintKID(t, iss.Priv, "", "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute)))
-	refusedPlainly(t, err, "a token naming no kid")
-	if want := "the token names no key (kid); a source checks one key per token"; !strings.Contains(err.Error(), want) {
-		t.Fatalf("a token naming no kid: reason = %q, want %q", err, want)
+	ctx := context.Background()
+	noKid := func() string {
+		return iss.MintKID(t, iss.Priv, "", "hotserve", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	}
+	if _, err := v.verify(ctx, noKid()); err != nil {
+		t.Fatalf("no kid, the issuer's one key: refused: %v", err)
+	}
+	other, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iss.Publish(jose.JSONWebKey{Key: other.Public(), KeyID: "second", Algorithm: "RS256", Use: "sig"}, false)
+	settled(t, v) // a reload: the set now holds two RS256 keys
+	c.Advance(RefetchInterval)
+	_, err = v.verify(ctx, noKid())
+	refusedPlainly(t, err, "no kid, two keys")
+	if want := "the token names no key (kid), and the issuer's keys hold 2 for RS256; a source checks one key per token"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("no kid, two keys: reason = %q, want %q", err, want)
 	}
 	waited(t, v)
-	fetches(t, iss, 1, "a token naming no kid")
+	fetches(t, iss, 2, "tokens naming no kid")
+}
+
+// A kid may name keys of other types, or for encryption, beside the
+// signing key (RFC 7517 §4.5): the one check goes to the first key
+// under the kid that fits the token's algorithm, whichever order the
+// set lists them in.
+func TestKeySetPicksTheKeyThatFitsUnderASharedKid(t *testing.T) {
+	ec, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, first := range []bool{true, false} {
+		iss := trusttest.NewIssuer(t)
+		iss.Publish(jose.JSONWebKey{Key: ec.Public(), KeyID: iss.KID}, first)
+		iss.Publish(jose.JSONWebKey{Key: enc.Public(), KeyID: iss.KID, Use: "enc"}, first)
+		v := clocked(iss, trusttest.NewClock())
+		settled(t, v)
+		if _, err := v.verify(context.Background(), ciToken(t, iss)); err != nil {
+			t.Fatalf("other keys under the kid listed first=%v: refused: %v", first, err)
+		}
+	}
 }
 
 // A token whose kid the key set holds no key for begins a fetch, but

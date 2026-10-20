@@ -100,8 +100,10 @@ token and checks a signature, a name with no source does neither — so
 it is bounded and then hidden: a token longer than `MaxTokenLen` (8
 KiB) is refused before any source parses it, a name resolves to at
 most `MaxSources` (8; `Build` refuses more at config load), a source
-checks one key per token (a token naming no `kid` is refused, so an
-issuer's key count does not multiply the work: `verifyWith`), and
+checks one key per token (the first under its `kid` that fits its
+algorithm; a token naming no `kid` only when the issuer holds one key
+for it), so an issuer's key count does not multiply the work
+(`verifyWith`), and
 every refusal is answered no sooner than `RefusalFloor` (25 ms) after
 the webhook began handling the request, before its app lookup and the
 lock a reload can hold there (`Handler.ServeHTTP`;

@@ -46,7 +46,7 @@ const unauthorizedMessage = "invalid or missing deploy token (Authorization: Bea
 // measured); Build refuses a set of more, authorize a longer token,
 // and a source checks one key per token (verifyWith). A refusal that
 // took longer anyway, on a loaded box, is held to the next multiple of
-// the floor and the overrun logged (holdRefusal). An accepted token is
+// the floor and the overrun logged (refusalDeadline). An accepted token is
 // not held.
 const RefusalFloor = 25 * time.Millisecond
 
@@ -69,20 +69,21 @@ const (
 	nearTokenCapLabel = "token near MaxTokenLen"
 )
 
-// holdRefusal returns at the first multiple of floor after start that
+// refusalDeadline is the first multiple of floor after start that
 // judging has not passed: floor itself, unless judging took longer, so
 // an overrun shows only in floor-sized steps and is reported (overran).
-// A caller that went away is held all the same: an HTTP/1.1 client can
-// half-close its side, which ends the request's context, and still
-// read the answer. A floor of 0 holds nothing (a test's limiter).
-func holdRefusal(start time.Time, floor time.Duration) (took time.Duration, overran bool) {
+// The caller sleeps until it after anything else it writes, so that
+// work is inside the step too. A caller that went away is held all the
+// same: an HTTP/1.1 client can half-close its side, which ends the
+// request's context, and still read the answer. A floor of 0 holds
+// nothing (a test's limiter): the deadline is start.
+func refusalDeadline(start time.Time, floor time.Duration) (deadline time.Time, took time.Duration, overran bool) {
 	if floor <= 0 {
-		return 0, false
+		return start, 0, false
 	}
 	took = time.Since(start)
 	steps := took/floor + 1
-	time.Sleep(time.Until(start.Add(steps * floor)))
-	return took, steps > 1
+	return start.Add(steps * floor), took, steps > 1
 }
 
 // WarnSourceCount warns, at config load, about a set of deploy_trust
@@ -141,7 +142,7 @@ func scopeField(fields []zap.Field, key, value string) []zap.Field {
 // when the webhook began handling the request, before anything whose
 // time depends on what was asked for (liveswap's app lookup and the
 // lock a reload holds there): a refusal is returned no sooner than the
-// limiter's floor after it (holdRefusal).
+// limiter's floor after it (refusalDeadline).
 func (l *Limiter) Authenticate(r *http.Request, start time.Time, verifiers []Verifier, logger *zap.Logger, scopeKey, scopeValue string) (Identity, *Refusal) {
 	token := bearerToken(r)
 	who, down, refused := authorize(r.Context(), verifiers, token)
@@ -178,10 +179,12 @@ func (l *Limiter) Authenticate(r *http.Request, start time.Time, verifiers []Ver
 			logger.Warn("webhook auth failures throttled process-wide: further ones are not logged",
 				zap.Int("failures", FailGlobalBudget), zap.Duration("window", FailWindow))
 		}
-		if took, overran := holdRefusal(start, l.floor); overran && l.outage(overrunLabel, scopeKey) {
+		deadline, took, overran := refusalDeadline(start, l.floor)
+		if overran && l.outage(overrunLabel, scopeKey) {
 			logger.Warn("webhook auth: judging a refused token took longer than the refusal floor; its answer was held to the next multiple, so its timing may say how many sources checked it",
 				append(scopeField(nil, scopeKey, scopeValue), zap.Duration("took", took), zap.Duration("floor", l.floor))...)
 		}
+		time.Sleep(time.Until(deadline))
 		return Identity{}, &Refusal{Status: http.StatusUnauthorized, Message: unauthorizedMessage}
 	}
 	if len(token) > MaxTokenLen*3/4 && l.outage(nearTokenCapLabel, scopeKey) {

@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -187,6 +188,18 @@ func (iss *Issuer) setKey(tb testing.TB, kid string) {
 	iss.Priv, iss.KID = priv, kid
 	pub := jose.JSONWebKey{Key: priv.Public(), KeyID: kid, Algorithm: "RS256", Use: "sig"}
 	iss.jwks.Store(&jose.JSONWebKeySet{Keys: []jose.JSONWebKey{pub}})
+}
+
+// Publish adds key to what the JWKS endpoint serves, before the
+// issuer's own signing key or after it.
+func (iss *Issuer) Publish(key jose.JSONWebKey, first bool) {
+	keys := slices.Clone(iss.jwks.Load().Keys)
+	if first {
+		keys = append([]jose.JSONWebKey{key}, keys...)
+	} else {
+		keys = append(keys, key)
+	}
+	iss.jwks.Store(&jose.JSONWebKeySet{Keys: keys})
 }
 
 // Rotate is a key rotation: a new signing key under a new kid, which
