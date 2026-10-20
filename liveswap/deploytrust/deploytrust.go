@@ -165,10 +165,11 @@ func Resolve(repl *caddy.Replacer, configs []TrustConfig, jwks *http.Client) ([]
 
 // New is the verifiers for a set of `deploy_trust` blocks, for a
 // webhook that is not liveswap's — the box's: Resolve, on a JWKS
-// client that fetches over https only unless allowInsecure, with OIDC
-// discovery warmed in the background so the first request does not
-// pay for it. Two things liveswap's Provision does not do, because its
-// caller is itself: the placeholders are resolved on a copy, so
+// client that fetches over https only unless allowInsecure, with each
+// OIDC issuer's discovery and keys fetched again in the background
+// (Warm), the keys the process already holds in use meanwhile. Two
+// things liveswap's Provision does not do, because its caller is
+// itself: the placeholders are resolved on a copy, so
 // configs still read as parsed — a caller that renders or diffs its
 // config later writes {env.NAME}, never the value — and no source at
 // all is refused here, at config load, rather than as a 401 for every
@@ -440,15 +441,29 @@ func WarnUnboundSource(logger *zap.Logger, tc TrustConfig, where ...zap.Field) {
 // discovery and JWKS fetches. It refuses plain-http requests (and
 // https→http redirects) so a network attacker cannot swap the
 // verification keys and forge deploy tokens — unless allow_insecure_http
-// is set, the documented escape hatch for test rigs and LANs.
+// is set, the documented escape hatch for test rigs and LANs. There is
+// one client per setting for the process, so every config load hands
+// its sources the same one, and an issuer's shared state (issuerFor)
+// outlives a reload.
 func NewJWKSClient(allowInsecure bool) *http.Client {
+	c := &jwksClients[0]
+	if allowInsecure {
+		c = &jwksClients[1]
+	}
+	c.once.Do(func() { c.client = newJWKSClient(allowInsecure) })
+	return c.client
+}
+
+var jwksClients [2]struct {
+	once   sync.Once
+	client *http.Client
+}
+
+func newJWKSClient(allowInsecure bool) *http.Client {
 	var rt http.RoundTripper = &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
-		// Each config load builds a new client and drops the old one,
-		// but a kept-alive connection holds its transport's goroutines
-		// until the issuer hangs up. This bounds what a retired client
-		// keeps, including one nobody closes (the box's) and one a
-		// request was still using when its config was cleaned up.
+		// A kept-alive connection holds its transport's goroutines until
+		// the issuer hangs up; this bounds how long one idles.
 		// DefaultTransport's value.
 		IdleConnTimeout: 90 * time.Second,
 	}
@@ -571,16 +586,18 @@ func VerifiersOn(clock Clock, sources []Source, jwksClient *http.Client) []Verif
 }
 
 // Warm begins each OIDC source's discovery, and after it the fetch of
-// its issuer's keys, in the background, so the source holds both by
-// the first real deploy. No token waits on either (RefetchInterval):
-// one that arrives before they have ended is refused, and its retry
-// goes through. A failure is retried by the next token that needs it,
-// at most once per RefetchInterval.
+// its issuer's keys, in the background, whatever RefetchInterval says:
+// at start, so the source holds both by the first real deploy, and at
+// each reload, so a reload picks up what the issuer now publishes —
+// a key replaced under the same kid among it. The issuer's state is
+// shared (issuerState), so what a source held before the reload stays
+// in use until the new fetch has ended, and N sources trusting one
+// issuer make one fetch. No token waits on either (RefetchInterval).
 func Warm(verifierSets ...[]Verifier) {
 	for _, set := range verifierSets {
 		for _, v := range set {
 			if ov, ok := v.(*oidcVerifier); ok {
-				_, _ = ov.ensure()
+				ov.state().warm()
 			}
 		}
 	}
@@ -592,21 +609,28 @@ func Warm(verifierSets ...[]Verifier) {
 // what the source then holds; Prime does not report it.
 func Prime(ctx context.Context, verifierSets ...[]Verifier) error {
 	Warm(verifierSets...)
+	return waitFor(ctx, verifierSets...)
+}
+
+// waitFor returns once each OIDC source's discovery and key fetch
+// under way, if any, have ended, or ctx has; it begins neither.
+func waitFor(ctx context.Context, verifierSets ...[]Verifier) error {
 	for _, set := range verifierSets {
 		for _, v := range set {
 			ov, ok := v.(*oidcVerifier)
 			if !ok {
 				continue
 			}
-			ov.mu.Lock()
-			done := ov.inflight
-			ov.mu.Unlock()
+			is := ov.state()
+			is.mu.Lock()
+			done := is.inflight
+			is.mu.Unlock()
 			if err := waitOn(ctx, done); err != nil {
 				return err
 			}
-			ov.mu.Lock()
-			keys := ov.keys
-			ov.mu.Unlock()
+			is.mu.Lock()
+			keys := is.keys
+			is.mu.Unlock()
 			if keys == nil {
 				continue
 			}
@@ -632,9 +656,10 @@ func waitOn(ctx context.Context, done chan struct{}) error {
 }
 
 // unavailable is a refusal that is the box's, not the token's: the
-// source could not be consulted — its discovery failed or has not yet
-// ended, or its key fetch failed — so the token was never judged.
-// label names the source.
+// source could not be consulted — its discovery or its key fetch
+// failed — so the token was never judged. label names the source. A
+// discovery or fetch still under way is not one: the source is not
+// ready, and the token is refused plainly, its retry soon judged.
 //
 // Authenticate charges it like any refusal: it answers the same flat
 // 401, and its "webhook auth failed" lines count against the same
@@ -762,10 +787,12 @@ func presented(names []string, claims map[string]any) string {
 }
 
 // oidcVerifier validates a provider-issued OIDC token against the
-// issuer's published JWKS. The provider (JWKS + discovery) is built
-// in the background (Warm), so a network blip fails a deploy — which
-// is safe (the old version keeps serving) — rather than failing config
-// load for the whole server, and no token waits on it.
+// issuer's published JWKS. The issuer's discovery and keys are its
+// issuerState, shared by every source in the process that trusts the
+// same issuer over the same client, and built in the background
+// (Warm), so a network blip fails a deploy — which is safe (the old
+// version keeps serving) — rather than failing config load for the
+// whole server, and no token waits on it.
 type oidcVerifier struct {
 	issuer      string
 	audience    string
@@ -773,77 +800,151 @@ type oidcVerifier struct {
 	attribution []string
 	client      *http.Client
 	clock       Clock // RefetchInterval runs on it, for discovery and the key set; nil is the system clock
-
-	mu       sync.Mutex
-	idv      *oidc.IDTokenVerifier // nil until a discovery succeeds
-	keys     *keySet               // idv's, set with it
-	tried    time.Time             // when the last discovery began; zero before the first
-	err      error                 // the last discovery's error; nil when none has failed
-	inflight chan struct{}         // closed when the discovery under way ends; nil when none is
 }
 
 func (v *oidcVerifier) Label() string { return "oidc:" + v.issuer }
 
-func (v *oidcVerifier) now() time.Time {
-	if v.clock == nil {
-		return systemClock{}.Now()
+// state is the issuer's shared discovery and key set.
+func (v *oidcVerifier) state() *issuerState {
+	clock := v.clock
+	if clock == nil {
+		clock = systemClock{}
 	}
-	return v.clock.Now()
+	return issuerFor(v.issuer, v.client, clock)
 }
 
-// ensure is the source's IDTokenVerifier once a discovery has
-// succeeded. Until then it begins one in the background, when none is
-// under way and RefetchInterval has passed since the last began, or
-// none ever has, and answers at once: with the last discovery's
-// error, or, before any has ended, an unavailable saying one is under
-// way. No caller waits on the issuer (RefetchInterval).
+// ensure is the IDTokenVerifier the provider's Verifier would build —
+// the issuer's advertised algorithms that go-oidc supports, RS256 when
+// it advertises none — over the issuer's keySet in place of go-oidc's
+// RemoteKeySet, once a discovery of the issuer has succeeded; until
+// then, issuerState.ready's answer. Built per call, so a reload's new
+// discovery reaches every source at once.
 func (v *oidcVerifier) ensure() (*oidc.IDTokenVerifier, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.idv != nil {
-		return v.idv, nil
+	keys, algs, err := v.state().ready()
+	if err != nil {
+		return nil, err
 	}
-	if now := v.now(); v.inflight == nil && (v.tried.IsZero() || now.Sub(v.tried) >= RefetchInterval) {
-		v.inflight, v.tried = make(chan struct{}), now
-		go v.discover(v.inflight)
-	}
-	if v.err != nil {
-		return nil, v.err
-	}
-	return nil, unavailable{v.Label(), fmt.Errorf("oidc discovery for %s: under way", v.issuer)}
+	return oidc.NewVerifier(v.issuer, keys, &oidc.Config{ClientID: v.audience, SupportedSigningAlgs: algs}), nil
 }
 
-// discover records one discovery's outcome — the verifier, with the
-// fetch of its keys begun, or the error — and only then closes done.
-func (v *oidcVerifier) discover(done chan struct{}) {
+// issuerKey names one issuer's shared state: the issuer, the client
+// it is fetched over (NewJWKSClient's, one per allow_insecure_http
+// setting, so the same across reloads) and the clock its
+// RefetchInterval runs on.
+type issuerKey struct {
+	url    string
+	client *http.Client
+	clock  Clock
+}
+
+// issuers holds every issuer's state the process has trusted. An
+// issuer a reload drops keeps its entry, a discovery document and a
+// key set, until the process ends; trusting it again picks it up.
+var (
+	issuersMu sync.Mutex
+	issuers   = map[issuerKey]*issuerState{}
+)
+
+func issuerFor(url string, client *http.Client, clock Clock) *issuerState {
+	issuersMu.Lock()
+	defer issuersMu.Unlock()
+	key := issuerKey{url, client, clock}
+	is, ok := issuers[key]
+	if !ok {
+		is = &issuerState{url: url, client: client, clock: clock}
+		issuers[key] = is
+	}
+	return is
+}
+
+// issuerState is one issuer's discovery and key set. A discovery runs
+// in the background: Warm begins one whenever none is under way, and a
+// token, while none has succeeded, when RefetchInterval has passed
+// since the last began. One that succeeds replaces the advertised
+// algorithms and begins a key fetch; one that fails leaves what an
+// earlier one found in use.
+type issuerState struct {
+	url    string
+	client *http.Client
+	clock  Clock
+
+	mu       sync.Mutex
+	keys     *keySet       // nil until a discovery succeeds; replaced only when the jwks_uri changes
+	algs     []string      // the advertised algorithms go-oidc supports, from the last discovery that succeeded
+	tried    time.Time     // when the last discovery began; zero before the first
+	err      error         // the last discovery's error; nil when it succeeded
+	inflight chan struct{} // closed when the discovery under way ends; nil when none is
+}
+
+// ready is the issuer's key set and algorithms once a discovery has
+// succeeded. Until then it begins one when none is under way and
+// RefetchInterval has passed since the last began, or none ever has,
+// and answers at once: with the last discovery's error, or, before any
+// has ended, a refusal saying one is under way.
+func (is *issuerState) ready() (*keySet, []string, error) {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	if is.keys != nil {
+		return is.keys, is.algs, nil
+	}
+	is.begin(false)
+	if is.err != nil {
+		return nil, nil, is.err
+	}
+	return nil, nil, fmt.Errorf("oidc discovery for %s: under way, so a retry once that ends may go through", is.url)
+}
+
+// warm begins a discovery whatever RefetchInterval says, unless one is
+// under way (Warm).
+func (is *issuerState) warm() {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	is.begin(true)
+}
+
+// begin starts a discovery when none is under way and either force or
+// RefetchInterval has passed since the last began. is.mu is held.
+func (is *issuerState) begin(force bool) {
+	if now := is.clock.Now(); is.inflight == nil && (force || is.tried.IsZero() || now.Sub(is.tried) >= RefetchInterval) {
+		is.inflight, is.tried = make(chan struct{}), now
+		go is.discover(is.inflight)
+	}
+}
+
+// discover records one discovery's outcome — the algorithms and the
+// key set, with a fetch of its keys begun whatever RefetchInterval
+// says, or the error — and only then closes done.
+func (is *issuerState) discover(done chan struct{}) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
-	idv, keys, err := v.provide(ctx)
-	if keys != nil {
-		_, _ = keys.refresh()
+	jwksURL, algs, err := is.provide(ctx)
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	is.err = err
+	if err == nil {
+		if is.keys == nil || is.keys.url != jwksURL {
+			is.keys = &keySet{url: jwksURL, client: is.client, clock: is.clock}
+		}
+		is.algs = algs
+		_, _ = is.keys.refresh(true)
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.idv, v.keys, v.err = idv, keys, err
-	v.inflight = nil
+	is.inflight = nil
 	close(done)
 }
 
-// provide is the IDTokenVerifier the provider's Verifier would build —
-// the issuer's advertised algorithms that go-oidc supports, RS256 when
-// it advertises none — over keySet in place of go-oidc's RemoteKeySet,
-// and that key set.
-func (v *oidcVerifier) provide(ctx context.Context) (*oidc.IDTokenVerifier, *keySet, error) {
-	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, v.client), v.issuer)
+// provide is the issuer's jwks_uri and the advertised algorithms that
+// go-oidc supports, from its discovery document.
+func (is *issuerState) provide(ctx context.Context) (jwksURL string, algs []string, err error) {
+	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, is.client), is.url)
 	if err != nil {
-		err = fmt.Errorf("oidc discovery for %s: %w", v.issuer, err)
+		err = fmt.Errorf("oidc discovery for %s: %w", is.url, err)
 		// An issuer that answers as someone else (a misnamed issuer in
 		// the config) is not the issuer being out of reach.
 		var mismatch *oidc.IssuerMismatchError
 		if errors.As(err, &mismatch) {
-			return nil, nil, err
+			return "", nil, err
 		}
-		return nil, nil, unavailable{v.Label(), err}
+		return "", nil, unavailable{"oidc:" + is.url, err}
 	}
 	// NewProvider has decoded this document already, so the decode
 	// cannot fail on it now.
@@ -852,20 +953,14 @@ func (v *oidcVerifier) provide(ctx context.Context) (*oidc.IDTokenVerifier, *key
 		Algs []string `json:"id_token_signing_alg_values_supported"`
 	}
 	if err := provider.Claims(&meta); err != nil {
-		return nil, nil, fmt.Errorf("oidc discovery for %s: %w", v.issuer, err)
+		return "", nil, fmt.Errorf("oidc discovery for %s: %w", is.url, err)
 	}
-	var algs []string
 	for _, a := range meta.Algs {
 		if slices.Contains(signingAlgs, jose.SignatureAlgorithm(a)) {
 			algs = append(algs, a)
 		}
 	}
-	clock := v.clock
-	if clock == nil {
-		clock = systemClock{}
-	}
-	keys := &keySet{url: meta.JWKS, client: v.client, clock: clock}
-	return oidc.NewVerifier(v.issuer, keys, &oidc.Config{ClientID: v.audience, SupportedSigningAlgs: algs}), keys, nil
+	return meta.JWKS, algs, nil
 }
 
 // keyFetchFailed prefixes the error a verify returns when the issuer's

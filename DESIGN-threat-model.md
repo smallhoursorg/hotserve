@@ -84,21 +84,22 @@ verified JWT in `Authorization: Bearer` (see "Reducing the asset"):
 against public material, then a claim allowlist. Auth happens **before**
 existence is revealed: an unknown app name is verified against the
 *global* trust sources, so its refusal is the same 401 as a known
-app's (`Handler.ServeHTTP`, liveswap/handler.go). No token waits on
-an issuer for it either (#306): a token is checked against each source
-a name resolves to in turn, the signature before the issuer, and every
-check is local. An OIDC source judges a token against the keys it
-holds; its discovery and its key fetches run in the background —
-`Warm` at start and at each reload, then a key fetch begun by a token
-under a kid it holds no key for, at most once a minute, which that
-token does not wait on (`keySet`, liveswap/deploytrust/jwks.go;
-`oidcVerifier.ensure`, liveswap/deploytrust/deploytrust.go). A name
-that does not exist goes to the global sources, which do the same.
-What the time to the 401 still depends on is that local work: one
-signature check for each source a name resolves to that holds a key
-for the token's kid (or any key, for a token that names none), so a
-name whose sources check more signatures than the global ones refuses
-a crafted token a signature check later. Config load refuses an app
+app's (`Handler.ServeHTTP`, liveswap/handler.go), and so is its time
+(#306). No token waits on an issuer: a token is checked against each
+source a name resolves to in turn, the signature before the issuer,
+and every check is local. Each issuer's discovery and keys are held
+once for the process, shared by every source that trusts it
+(`issuerState`, liveswap/deploytrust/deploytrust.go), and fetched in
+the background — at start and at each reload (`Warm`), then for a
+token under a kid the process holds no key for, at most once a minute
+per issuer, which that token does not wait on (`keySet`,
+liveswap/deploytrust/jwks.go). The local work still differs — one
+signature check for each source holding a key for the token's kid, so
+a name whose sources check more signatures than the global ones would
+refuse a crafted token a check later — so every refusal is answered no
+sooner than `RefusalFloor` (5 ms) after `Authenticate` began
+(liveswap/deploytrust/authenticate.go); a check took about 55 µs on an
+arm64 machine (2026-10-20). Config load refuses an app
 that resolves to zero trust sources (`App.Validate`,
 liveswap/liveswap.go). Bearer is the only transport, which Caddy
 redacts from access logs.
@@ -227,14 +228,15 @@ Properties that matter to the model:
   therefore not bounded by the throttle. Against a local key it is one
   signature check, comparable to the TLS handshake the request already
   paid; against an OIDC source it is the same, or none for a token
-  under a kid the source holds no key for, which begins a fetch of the
-  issuer's keys in the background, at most once a minute per source,
-  and is refused without waiting on it (`keySet`,
-  liveswap/deploytrust/jwks.go). So the throttle is not what bounds
-  CPU, and traffic does not set how often the box asks an issuer
-  anything: a source tries its discovery, while that fails, and fetches
-  its keys, each at most once a minute and one at a time
-  (`oidcVerifier.ensure`, liveswap/deploytrust/deploytrust.go).
+  under a kid the process holds no key for, which begins a fetch of
+  the issuer's keys in the background, at most once a minute per
+  issuer, and is refused without waiting on it (`keySet`,
+  liveswap/deploytrust/jwks.go). A refusal then waits out
+  `RefusalFloor`, which holds the request, not a CPU. So the throttle
+  is not what bounds CPU, and traffic does not set how often the box
+  asks an issuer anything: a token makes it try an issuer's discovery,
+  while that fails, and fetch its keys, each at most once a minute and
+  one at a time (`issuerState`, liveswap/deploytrust/deploytrust.go).
   One limiter for the process, not per handler, so a
   reload hands out no fresh budget and a second mount does not double
   it. Body is capped at 64 KiB → 413

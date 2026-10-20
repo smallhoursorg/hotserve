@@ -471,7 +471,7 @@ type standIn struct {
 	tokens    map[string]bool // minted here: used yet?
 	mints     int
 	bundles   int
-	onGet     string            // "": the baseline; "401"; "401once", a 401 and then the baseline; "nobaseline"
+	onGet     string            // "": the baseline; "401"; "401once", a 401 and then the baseline; "front401", a proxy's; "nobaseline"
 	onPost    []string          // a behaviour per POST, in order: "admitting", "unread", "never", "proxy504", "front<code>", "html409", "504", "502", "524", "lost", "sync"; then "": 202
 	edited    bool              // results say the file was edited on the box
 	recipient string            // GET /'s box key; "" leaves it out, as a box without one does
@@ -592,6 +592,8 @@ func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.onGet = ""
 			}
 			reply(w, 401, map[string]string{"error": "invalid or missing deploy token (Authorization: Bearer <jwt>)"})
+		case "front401":
+			proxied(w, 401)
 		case "nobaseline":
 			reply(w, 409, map[string]string{"error": "this box has no baseline; hotserve init <sha>, as root inside the box's directory, sets one"})
 		default:
@@ -1120,6 +1122,12 @@ func TestBoxApply(t *testing.T) {
 		}
 		if got := g.box.seen().mints - mints; got != 2 {
 			t.Errorf("401 in Actions: %d tokens minted, want the GET's and its retry's", got)
+		}
+		// A 401 from something in front of the box is not about the
+		// token, and is not sent again.
+		g.box.set(func(s *standIn) { s.onGet = "front401" })
+		if out, code := g.apply(actions...); code != 1 || strings.Contains(out, "trying once more") {
+			t.Fatalf("a proxy's 401 in Actions: exit %d\n%s", code, out)
 		}
 		head = g.change("two")
 		g.box.set(func(s *standIn) { s.onGet = "401once" })

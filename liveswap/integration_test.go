@@ -751,11 +751,11 @@ func TestIntegrationOIDCDeploy(t *testing.T) {
 		tok := iss.Mint(t, iss.Priv, "e2e", map[string]string{"sub": "ci"}, future)
 		// Provision fetches the issuer's discovery and keys in the
 		// background (deploytrust.Warm), and no token waits on them: one
-		// sent before they end is refused, and its retry deploys, as the
-		// template's deploy.sh retries.
+		// sent before they end is refused, and a retry once they have
+		// deploys. A loaded lane may take a while, so retry to a deadline.
 		code, body := deploy(tok)
-		if code == http.StatusUnauthorized {
-			time.Sleep(time.Second)
+		for deadline := time.Now().Add(15 * time.Second); code == http.StatusUnauthorized && time.Now().Before(deadline); {
+			time.Sleep(200 * time.Millisecond)
 			code, body = deploy(tok)
 		}
 		if code != http.StatusOK {

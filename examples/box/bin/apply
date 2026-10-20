@@ -127,7 +127,10 @@ req() {
 		mint || { code=mint; return 0; }
 		code=$(curl -sS -o "$tmpd/resp" -w '%{http_code}' --max-time "$maxtime" \
 			-H "@$tmpd/auth" "$@") || code=000
-		{ [ "$code" = 401 ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ "$sent" = 1 ]; } || return 0
+		# The box's own 401, by its sentence: one from something in front
+		# of it is not about the token.
+		{ [ "$code" = 401 ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ "$sent" = 1 ] &&
+			case $(field error) in 'invalid or missing deploy token'*) true ;; *) false ;; esac; } || return 0
 		echo "apply: the box refused the token; trying once more in 3s, in case it was fetching the issuer's new signing key"
 		sleep 3
 	done

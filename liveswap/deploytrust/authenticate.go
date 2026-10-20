@@ -1,8 +1,10 @@
 package deploytrust
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -30,6 +32,32 @@ func (ref *Refusal) Write(write func(code int, body any) error) error {
 // reason, so a caller learns neither which apps exist nor what a
 // source pins.
 const unauthorizedMessage = "invalid or missing deploy token (Authorization: Bearer <jwt>)"
+
+// RefusalFloor is the soonest a refused token is answered after
+// Authenticate began judging it (#306). Judging is local, but not
+// equal: one signature check for each source the name resolves to
+// that holds a key for the token, none for a name with no source, so
+// the time to the 401 alone would say how many sources a name has, and
+// so whether the app exists. A check took about 55µs on an arm64
+// machine (Ed25519 and RSA-2048 alike, measured 2026-10-20), so the
+// floor covers dozens on a box several times slower. An accepted token
+// is not held.
+const RefusalFloor = 5 * time.Millisecond
+
+// holdRefusal returns once RefusalFloor has passed since start, or the
+// caller has gone away.
+func holdRefusal(ctx context.Context, start time.Time) {
+	wait := RefusalFloor - time.Since(start)
+	if wait <= 0 {
+		return
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
+}
 
 // bearerToken extracts the deploy JWT from `Authorization: Bearer
 // <jwt>`. Bearer is the only accepted transport: Caddy redacts the
@@ -72,8 +100,10 @@ func scopeField(fields []zap.Field, key, value string) []zap.Field {
 // and the reason — liveswap names the app — bounded where a line is
 // written (scopeField); an empty key is no field. liveswap's webhook
 // and the box's both call this on the limiter Shared returns, so one
-// address has one budget whichever webhook a flood aims at.
+// address has one budget whichever webhook a flood aims at. A refusal
+// is returned no sooner than RefusalFloor after the call began.
 func (l *Limiter) Authenticate(r *http.Request, verifiers []Verifier, logger *zap.Logger, scopeKey, scopeValue string) (Identity, *Refusal) {
+	start := time.Now()
 	who, down, refused := authorize(r.Context(), verifiers, bearerToken(r))
 	key := clientKey(r)
 	// A source the box could not consult is named here once per window
@@ -108,6 +138,7 @@ func (l *Limiter) Authenticate(r *http.Request, verifiers []Verifier, logger *za
 			logger.Warn("webhook auth failures throttled process-wide: further ones are not logged",
 				zap.Int("failures", FailGlobalBudget), zap.Duration("window", FailWindow))
 		}
+		holdRefusal(r.Context(), start)
 		return Identity{}, &Refusal{Status: http.StatusUnauthorized, Message: unauthorizedMessage}
 	}
 	l.clear(key)

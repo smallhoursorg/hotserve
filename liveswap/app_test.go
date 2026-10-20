@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -2222,21 +2221,6 @@ func TestCleanupJoinsRecoveryBeforeReleasing(t *testing.T) {
 	}
 }
 
-// closeRecorder is a RoundTripper that only counts CloseIdleConnections.
-type closeRecorder struct{ closes atomic.Int32 }
-
-func (*closeRecorder) RoundTrip(*http.Request) (*http.Response, error) { return nil, errTest }
-func (c *closeRecorder) CloseIdleConnections()                         { c.closes.Add(1) }
-
-func TestCleanupClosesTheRetiredJWKSClient(t *testing.T) {
-	rt := &closeRecorder{}
-	a := &App{logger: zap.NewNop(), clients: &fetchClients{jwks: &http.Client{Transport: rt}}}
-	must(t, a.Cleanup())
-	if n := rt.closes.Load(); n != 1 {
-		t.Fatalf("Cleanup closed the JWKS client's idle connections %d times, want 1", n)
-	}
-}
-
 // markLive stands in for a started liveswap config being live for the
 // rest of the test (what App.Start/Cleanup maintain).
 func markLive(t *testing.T) {
@@ -2254,9 +2238,8 @@ func TestDestructOnUnconfiguredAppIsANoop(t *testing.T) {
 }
 
 func TestConfigureInstallsTheVerifiersItIsGiven(t *testing.T) {
-	// The OIDC discovery cache lives on the verifier object, so the
-	// set Provision warms is only useful if configure installs those
-	// same objects rather than resolving a cold set of its own.
+	// configure installs the set Provision built and warmed, rather
+	// than resolving one of its own.
 	rig := newTestRig(t)
 	spec := testSpec(t)
 	spec.trust = []deploytrust.Source{oidcSource(t, "https://issuer.example")}

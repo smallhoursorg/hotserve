@@ -45,18 +45,17 @@ Concept map from the Nomad-era stack:
   sources (OIDC against an issuer's public JWKS, or a local public
   key), and its answer MUST NOT reveal whether an app exists to
   unauthenticated callers (unknown apps verify against the global trust
-  sources, then 404; a refused token gets the same 401 either way). Its
-  timing MUST NOT wait on an issuer (DESIGN-threat-model.md, "Webhook
-  endpoint"; #306): a token is checked against each source a name
-  resolves to in turn, the signature before the issuer, each check
-  local. An OIDC source's discovery and key fetches run in the
-  background — at start and each reload (`deploytrust.Warm`), then a
-  key fetch begun by a token under a kid it holds no key for, at most
-  once a minute — and the token that begins one is refused without
-  waiting on it. A name that does not exist goes to the global
-  sources. The time still depends on the local work: one signature
-  check per source holding a key for the token's kid. No shared secret
-  is stored on the box.
+  sources, then 404; a refused token gets the same 401 either way),
+  nor MUST its timing (DESIGN-threat-model.md, "Webhook endpoint";
+  #306). No verification waits on an issuer: each check is local,
+  against the discovery and keys the process holds once per issuer
+  for every source that trusts it, fetched in the background — at
+  start and at each reload (`deploytrust.Warm`), the held keys in use
+  meanwhile, then for a token under a kid none is held for, at most
+  once a minute per issuer, which that token does not wait on. And
+  every refusal is answered no sooner than `deploytrust.RefusalFloor`
+  after authentication began, so the local work a name's sources do
+  does not show. No shared secret is stored on the box.
 - Config load MUST fail if any app resolves to zero `deploy_trust`
   sources.
 - Config load and every launch MUST warn when an app's `env_file` is
@@ -736,6 +735,8 @@ severity × occurrence × detection, then the fix's size and risk.
 | `max_token_ttl {env.NAME}` in a `deploy_trust local` block is refused at config load (`invalid max_token_ttl "{env.NAME}"`), though the README says `{env.*}` placeholders are resolved at config load: the duration is parsed when the Caddyfile is, before placeholders are. | `deploytrust.Parse` | 2 | 5 | 1 | 10 | size 2, risk 2 (a string field, resolved in `ResolvePlaceholders` and parsed in `Build`) | Rule 2 holds (refused and named, before anything runs); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#296, 2026-10-17). Every liveswap duration directive (`health_interval`, `deadline`, …) parses the same way, so this one matches them; the Caddyfile's own `{$NAME}`, substituted when the file is read, works for all of them. |
 | An app dir, or a dir it makes, that is a link to a sibling's (`<root>/blog -> shop`, `blog/proxy -> ../shop/proxy`) is still followed outside a deploy. blog's status lists shop's releases as its own available versions, and so does the status a refused deploy's response carries. blog's recovery reads shop's `state.json`; it and the watchdog's relaunch make and remove a run dir in shop's `run/` and are refused at launch for a linked app dir, `releases/`, `shared/` or `run/`, recovery retrying, backing off to once a minute. A linked `proxy/` launches: blog's pins land in shop's `proxy/`, where shop's sweep removes them, so blog, not shop, goes unreachable. | `status`, `ensureRunning`, `launchVersion` | 3 | 5 | 3 | 45 | size 2, risk 1 (`writeRefusal` in status and before a relaunch, #300) | Scores to fix (rule 3); held by decision (#300, 2026-10-18: the deploy side is fixed, the rest held) until a box runs a link under the root, or renaming or aliasing an app becomes a feature. No box does. Nothing here writes into the sibling's releases or data: a deploy, push or rollback through such a dir is refused before it writes (`writeRefusal`), so a rollback to a listed version is refused and named; a relaunch through a linked app dir, `releases/`, `shared/` or `run/` is refused at launch (`resolveBindSources`), red and named; and the socket prune never follows a link (`linkAt`), so no sibling loses its socket and pin that way. |
 | A push refused before its upload is staged (a dir that is not the directory it names, like a 413 or a staging failure) leaves `last_deploy` as it was, where a URL deploy or rollback refused the same way replaces it. | `deployPush` | 2 | 5 | 1 | 10 | size 2, risk 2 (a push refusal through the pipeline's bookkeeping) | Under 20, and not a size-1, risk-1 fix (rule 3). The push's own response is the refusal, a 500 naming the path, the reason and the remedy, and the journal says it with who asked (`deploy failed`, `via`, `remote`). Every refusal of a push before staging already leaves `last_deploy` alone, so a status read after a push tells the same story for each. |
+| An issuer's discovery that failed at start (hotserve up before DNS or the route) is tried again by a token at most once a minute from when it began: deploys are refused until then even once the network is back, and the token that begins the retry is refused too, with the old error; its retry goes through. | `issuerState.ready`, deploytrust | 2 | 3 | 1 | 6 | size 2, risk 2 (a faster retry after a failure, a second timing) | Rule 2 holds (red and named: the journal's `could not consult` line carries the error); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#306, 2026-10-20). The minute is the bound on how often traffic makes the box ask an issuer anything; a reload retries at once. |
+| A key rotation within a minute of the issuer's last key fetch (a deploy under another new kid, or a forged token naming one, began it) is refused for every token until a minute after that fetch, the templates' 3s retry included: that run goes red, and a re-run a minute later goes through. | `keySet.refresh`, deploytrust | 2 | 3 | 3 | 18 | size 2, risk 2 (let a retry skip the interval) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#306, 2026-10-20). Skipping the interval for any token would hand the fetch rate to whoever sends tokens; a reload fetches at once. |
 
 **Owed** (over the bar, not yet fixed):
 

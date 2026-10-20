@@ -453,9 +453,10 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 // TestOIDCVerifierIssuerDown pins what an issuer the box cannot get
 // what it needs from looks like to the caller of verify: an
 // unavailable, not a refusal — the token was never judged — for
-// discovery not yet ended, discovery failed and the key fetch failed,
-// none of them waited on, and a failure stands until the refetch
-// interval has passed and the fetch it then begins has ended. The
+// discovery failed and the key fetch failed, neither waited on, and a
+// failure stands until a reload, or the refetch interval has passed
+// and the fetch a token then begins has ended. A discovery not yet
+// ended is a plain refusal: the source is not ready, not out. The
 // key-fetch case holds keyFetchFailed against the pinned go-oidc (the
 // text is the only handle on it). It also pins what is NOT an outage:
 // a token the cached keys verify still deploys, a malformed token and
@@ -463,20 +464,18 @@ func TestOIDCVerifierNumericClaim(t *testing.T) {
 // a caller that went away is its own failure, and an issuer answering
 // as someone else is the config's.
 func TestOIDCVerifierIssuerDown(t *testing.T) {
-	iss := trusttest.NewIssuer(t)
 	want := map[string]string{"repository": "org/app"}
 	c := trusttest.NewClock()
-	fresh := func() *oidcVerifier {
+	ctx := context.Background()
+	// Each case its own issuer, since every source of one issuer shares
+	// its state (issuerState).
+	source := func(iss *trusttest.Issuer) *oidcVerifier {
 		return &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: want, client: iss.Client, clock: c}
 	}
-	primed := func() *oidcVerifier {
-		v := fresh()
-		settled(t, v)
-		return v
+	valid := func(iss *trusttest.Issuer) string {
+		return iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(5*time.Minute))
 	}
-	valid := func() string { return iss.Mint(t, iss.Priv, "hotserve", want, time.Now().Add(5*time.Minute)) }
-	ctx := context.Background()
-	wantDown := func(t *testing.T, err error, what string) unavailable {
+	wantDown := func(t *testing.T, iss *trusttest.Issuer, err error, what string) unavailable {
 		t.Helper()
 		var u unavailable
 		if !errors.As(err, &u) {
@@ -496,61 +495,89 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	gone, cancel := context.WithCancel(ctx)
 	cancel()
 
-	// A source whose discovery has not ended answers at once.
-	u := wantDown(t, func() error { _, err := fresh().verify(ctx, valid()); return err }(), "discovery under way")
-	if !strings.Contains(u.Error(), "oidc discovery for "+iss.URL+": under way") {
-		t.Fatalf("discovery under way: reason = %q, want it to say so", u.Error())
+	// A source whose discovery has not ended is not ready, which is not
+	// an outage: refused at once, saying a retry may go through.
+	iss := trusttest.NewIssuer(t)
+	v := source(iss)
+	_, err := v.verify(ctx, valid(iss))
+	wantPlain(t, err, "discovery under way")
+	if !strings.Contains(err.Error(), "oidc discovery for "+iss.URL+": under way, so a retry once that ends may go through") {
+		t.Fatalf("discovery under way: reason = %q, want it to say so", err)
+	}
+	waited(t, v)
+	if _, err := v.verify(ctx, valid(iss)); err != nil {
+		t.Fatalf("after the discovery the token began: refused: %v", err)
 	}
 
+	// Discovery down: the outage's, and retried by a token only past
+	// the interval; the token that begins it is still the outage's, and
+	// its retry once it ends deploys.
+	iss = trusttest.NewIssuer(t)
 	iss.DiscoveryDown.Store(true)
-	v := primed()
-	_, err := v.verify(ctx, valid())
-	u = wantDown(t, err, "discovery 503")
+	v = source(iss)
+	settled(t, v)
+	_, err = v.verify(ctx, valid(iss))
+	u := wantDown(t, iss, err, "discovery 503")
 	if !strings.Contains(u.Error(), "oidc discovery for") || !strings.Contains(u.Error(), "503") {
 		t.Fatalf("discovery 503: reason = %q, want it to say discovery and the answer", u.Error())
 	}
-	_, err = v.verify(gone, valid())
+	_, err = v.verify(gone, valid(iss))
 	wantPlain(t, err, "discovery with the caller gone")
-	// Discovery is retried only past the interval, and the token that
-	// begins it is still the outage's: its retry once it ends deploys.
 	iss.DiscoveryDown.Store(false)
-	settled(t, v)
-	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "discovery back within the interval")
+	_, err = v.verify(ctx, valid(iss))
+	_ = wantDown(t, iss, err, "discovery back within the interval")
 	c.Advance(RefetchInterval)
-	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "discovery back, beginning it again")
-	settled(t, v)
-	if _, err := v.verify(ctx, valid()); err != nil {
+	_, err = v.verify(ctx, valid(iss))
+	_ = wantDown(t, iss, err, "discovery back, beginning it again")
+	waited(t, v)
+	if _, err := v.verify(ctx, valid(iss)); err != nil {
 		t.Fatalf("discovery back: valid token rejected: %v", err)
 	}
+	// A reload retries it at once, whatever the interval.
+	iss = trusttest.NewIssuer(t)
+	iss.DiscoveryDown.Store(true)
+	v = source(iss)
+	settled(t, v)
+	iss.DiscoveryDown.Store(false)
+	settled(t, v)
+	if _, err := v.verify(ctx, valid(iss)); err != nil {
+		t.Fatalf("discovery back after a reload: valid token rejected: %v", err)
+	}
 
+	iss = trusttest.NewIssuer(t)
 	iss.DiscoveredAs.Store("https://someone-else.example")
-	_, err = primed().verify(ctx, valid())
+	v = source(iss)
+	settled(t, v)
+	_, err = v.verify(ctx, valid(iss))
 	wantPlain(t, err, "discovery naming another issuer")
 	if !strings.Contains(err.Error(), "someone-else.example") {
 		t.Fatalf("issuer mismatch: reason = %q, want it to name the issuer found", err.Error())
 	}
-	iss.DiscoveredAs.Store("")
 
+	iss = trusttest.NewIssuer(t)
 	iss.JWKSDown.Store(true)
-	v = primed()
-	_, err = v.verify(ctx, valid())
-	u = wantDown(t, err, "JWKS 503 on first use")
+	v = source(iss)
+	settled(t, v)
+	_, err = v.verify(ctx, valid(iss))
+	u = wantDown(t, iss, err, "JWKS 503 on first use")
 	if !strings.HasPrefix(u.Error(), keyFetchFailed) {
 		t.Fatalf("JWKS 503: reason = %q, want the keyFetchFailed prefix %q", u.Error(), keyFetchFailed)
 	}
-	_, err = v.verify(gone, valid())
+	_, err = v.verify(gone, valid(iss))
 	wantPlain(t, err, "key fetch with the caller gone")
 
-	// Recovery needs no restart: the provider is cached, and the key
-	// set fetches again once the interval since the failed fetch has
-	// passed, for the token that then needs it. Until that fetch has
-	// ended the failure stands, without a fetch per token.
+	// Recovery needs no restart: the key set fetches again once the
+	// interval since the failed fetch has passed, for the token that then
+	// needs it. Until that fetch has ended the failure stands, without a
+	// fetch per token.
 	iss.JWKSDown.Store(false)
-	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "issuer back within the interval")
+	_, err = v.verify(ctx, valid(iss))
+	_ = wantDown(t, iss, err, "issuer back within the interval")
 	c.Advance(RefetchInterval)
-	_ = wantDown(t, func() error { _, err := v.verify(ctx, valid()); return err }(), "issuer back, beginning the fetch")
-	settled(t, v)
-	if _, err := v.verify(ctx, valid()); err != nil {
+	_, err = v.verify(ctx, valid(iss))
+	_ = wantDown(t, iss, err, "issuer back, beginning the fetch")
+	waited(t, v)
+	if _, err := v.verify(ctx, valid(iss)); err != nil {
 		t.Fatalf("issuer back past the interval: valid token rejected: %v", err)
 	}
 
@@ -558,7 +585,7 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 	// — an outage only reaches tokens the box has no key for.
 	iss.JWKSDown.Store(true)
 	before := iss.JWKSFetches.Load()
-	if _, err := v.verify(ctx, valid()); err != nil {
+	if _, err := v.verify(ctx, valid(iss)); err != nil {
 		t.Fatalf("issuer down with keys cached: valid token rejected: %v", err)
 	}
 	// A malformed token never reaches the fetch: a refusal of its own.
@@ -581,11 +608,10 @@ func TestOIDCVerifierIssuerDown(t *testing.T) {
 		_, err := v.verify(ctx, iss.MintKID(t, other, "unknown", "hotserve", want, time.Now().Add(5*time.Minute)))
 		return err
 	}
-	err = unknown()
-	wantPlain(t, err, "unknown kid beginning a fetch during an outage")
-	settled(t, v)
+	wantPlain(t, unknown(), "unknown kid beginning a fetch during an outage")
+	waited(t, v)
 	for range 2 {
-		_ = wantDown(t, unknown(), "unknown kid during an outage")
+		_ = wantDown(t, iss, unknown(), "unknown kid during an outage")
 	}
 	if n := iss.JWKSFetches.Load(); n != before+1 {
 		t.Fatalf("unknown kids during an outage: %d fetches, want one", n-before)
@@ -604,6 +630,7 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 	local := &localVerifier{audience: "hotserve", pub: pub, keyPath: "/k.pem", maxTTL: DefaultMaxTokenTTL}
 	c := trusttest.NewClock()
 	down := &oidcVerifier{issuer: iss.URL, audience: "hotserve", client: iss.Client, clock: c}
+	settled(t, down) // its discovery has failed: an outage, not a source not yet ready
 	labels := func(down []unavailable) string {
 		var out []string
 		for _, u := range down {
@@ -625,6 +652,7 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 	iss2 := trusttest.NewIssuer(t)
 	iss2.DiscoveryDown.Store(true)
 	down2 := &oidcVerifier{issuer: iss2.URL, audience: "hotserve", client: iss2.Client}
+	settled(t, down2)
 	if _, got, err := authorize(context.Background(), []Verifier{down, local, down2}, bad); err == nil || labels(got) != down.Label()+" "+down2.Label() {
 		t.Fatalf("two sources down: err = %v, down = %q, want both", err, labels(got))
 	}
@@ -634,11 +662,9 @@ func TestAuthorizeNamesEverySourceItCouldNotConsult(t *testing.T) {
 	if by, got, err := authorize(context.Background(), []Verifier{down, local}, good); err != nil || by.By != local.Label() || labels(got) != down.Label() {
 		t.Fatalf("accepted past a down source: by = %q, down = %q, err = %v", by.By, labels(got), err)
 	}
-	// Both up, and the down source's discovery retried past the
-	// interval: nothing is down, and the bad token is a plain refusal.
+	// Both up, and the down source's discovery retried by a reload:
+	// nothing is down, and the bad token is a plain refusal.
 	iss.DiscoveryDown.Store(false)
-	settled(t, down)
-	c.Advance(RefetchInterval)
 	settled(t, down)
 	if _, got, err := authorize(context.Background(), []Verifier{local, down}, bad); err == nil || len(got) != 0 {
 		t.Fatalf("both sources up: err = %v, down = %q, want a plain refusal", err, labels(got))

@@ -69,6 +69,43 @@ func answered(t *testing.T, ref *Refusal) (code int, body map[string]string) {
 	return code, body
 }
 
+// A refusal is answered no sooner than RefusalFloor after Authenticate
+// began, whatever it took to reach (#306): a name with no source, which
+// checks nothing, and one whose source checks a signature, alike. A
+// caller that went away is not held.
+func TestAuthenticateHoldsARefusalToTheFloor(t *testing.T) {
+	_, pub := trusttest.GenerateKey()
+	other, _ := trusttest.GenerateKey()
+	l := NewLimiter(trusttest.NewClock())
+	for _, tc := range []struct {
+		name string
+		vs   []Verifier
+	}{
+		{"no source", nil},
+		{"a signature checked", Verifiers([]Source{localTrust(pub, "box")}, nil)},
+	} {
+		begun := time.Now()
+		if _, ref := l.Authenticate(request("192.0.2.80:1", trusttest.Mint(t, other, "box", nil)), tc.vs, zap.NewNop(), "", ""); ref == nil {
+			t.Fatalf("%s: accepted, want a refusal", tc.name)
+		}
+		if took := time.Since(begun); took < RefusalFloor {
+			t.Errorf("%s: refused after %v, want no sooner than %v", tc.name, took, RefusalFloor)
+		}
+	}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	held := make(chan struct{})
+	go func() {
+		defer close(held)
+		holdRefusal(gone, time.Now().Add(time.Hour))
+	}()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a caller that went away was held")
+	}
+}
+
 // TestAuthenticateOnTheSharedLimiter pins the preamble on the limiter
 // both webhooks share: one refusal through it is charged there and
 // answered with the flat 401 under the caller's field; an accepted
@@ -211,6 +248,7 @@ func TestOutageLineIsPerCaller(t *testing.T) {
 	iss := trusttest.NewIssuer(t)
 	iss.JWKSDown.Store(true)
 	vs := Verifiers([]Source{{kind: "oidc", issuer: iss.URL, audience: "hotserve", claims: map[string]string{"sub": "ci"}}}, iss.Client)
+	settled(t, vs...)
 	core, logs := observer.New(zap.WarnLevel)
 	logger := zap.New(core)
 	l := NewLimiter(trusttest.NewClock())

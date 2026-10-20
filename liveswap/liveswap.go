@@ -291,10 +291,10 @@ func (a *App) Provision(ctx caddy.Context) error {
 	// Global trust sources back the unknown-app path: a request for an
 	// app that does not exist is still authenticated (against the
 	// global sources) before its 404, so the status never leaks app
-	// names to unauthenticated callers; the time to the 401 still can,
-	// within the bound DESIGN-threat-model.md states ("Webhook
-	// endpoint", the residual; owed: #306). The same wiring serves the
-	// box webhook (New).
+	// names to unauthenticated callers, and no refusal waits on an
+	// issuer or answers sooner than the floor, so its time does not
+	// either (DESIGN-threat-model.md, "Webhook endpoint"). The same
+	// wiring serves the box webhook (New).
 	if a.globalVerifiers, err = deploytrust.Resolve(repl, a.DeployTrust, clients.jwks); err != nil {
 		return err
 	}
@@ -342,13 +342,11 @@ func (a *App) Provision(ctx caddy.Context) error {
 		a.managed[name] = val.(*managedApp)
 		a.pooled = append(a.pooled, poolKey(name))
 	}
-	// Warm OIDC discovery in the background so the first verification of a
-	// known app does not pay the discovery round trip an unknown one
-	// would not. Warm leaves each key set empty, so the first token after
-	// a reload still waits on a key fetch (DESIGN-threat-model.md's
-	// timing residual; owed: #306). The objects warmed here are the ones Start
-	// installs (appVerifiers): resolving again at Start would hand the
-	// handler a cold set.
+	// Begin each OIDC issuer's discovery and key fetch again in the
+	// background, so this config picks up what the issuers now publish;
+	// the keys the process already holds stay in use until the fetch
+	// ends (deploytrust.Warm). The sets built here are the ones Start
+	// installs (appVerifiers).
 	a.appVerifiers = make(map[string][]deploytrust.Verifier, len(specs))
 	sets := [][]deploytrust.Verifier{a.globalVerifiers}
 	for name, spec := range specs {
@@ -817,11 +815,6 @@ func (a *App) Cleanup() error {
 				}
 			}
 		}
-	}
-	if a.clients != nil && a.clients.jwks != nil {
-		// This config is being discarded. Only idle connections close,
-		// so anything still holding the client keeps a working one.
-		a.clients.jwks.CloseIdleConnections()
 	}
 	var firstErr error
 	for _, key := range a.pooled {

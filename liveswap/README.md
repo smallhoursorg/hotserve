@@ -874,32 +874,38 @@ the identity the token presented:
 A request with no bearer token says so instead, as does an app with
 no source at all. The box failing to consult the issuer — its OIDC
 discovery, or fetching its signing keys — lands here as well: still a
-401 to the caller, with the network error in the journal. An OIDC
-source runs its discovery and fetches the issuer's keys in the
-background when hotserve starts or reloads, and no token waits on
-either: a token that arrives before they have ended is refused with
-`oidc discovery for <issuer>: under way` (or the key set's `fetching
-them`) in `refused`. A discovery that failed is tried again at most
-once a minute. After that the source fetches the keys only for a token
-signed under a key it does not hold yet, at most once a minute, and
-refuses that token at once rather than wait: with `fetching them, so
-a retry once that ends may go through` when it began a fetch, and
-with the last fetch's error if that failed. So the first deploy after
-the issuer rotates its key is refused, and its retry a few seconds
-later goes through — unless the source fetched in the minute before,
-when the retry is refused too and one a minute later goes through;
-after an outage, the first token past the minute is refused with the
-outage's error and the next goes through. The templates' scripts
-(`scripts/deploy.sh`, and the box repository's `bin/apply`) send a
-token the box refused in Actions once more, 3 seconds later, so a
-rotation usually costs a run three seconds, not a re-run. A forged
-token under a key the
+401 to the caller, with the network error in the journal. hotserve
+holds one copy of each issuer's discovery and keys for every source
+that trusts it — every app's, the global ones, the box's — and no
+token waits on fetching them. When hotserve starts or reloads it runs
+each issuer's discovery and fetches its keys again in the background;
+on a reload the keys it already holds stay in use meanwhile, so a
+reload refuses nothing. A token that arrives at start before they
+have ended is refused with `oidc discovery for <issuer>: under way,
+so a retry once that ends may go through` (or the key set's `fetching
+them`) in `refused`. A discovery that failed is tried again by the
+next reload, or by a token at most once a minute. After that the keys
+are fetched only for a token signed under a key hotserve does not
+hold yet, at most once a minute per issuer, and that token is refused
+at once rather than wait: with `fetching them, so a retry once that
+ends may go through` when it began a fetch, and with the last fetch's
+error if that failed. So the first deploy after the issuer rotates its
+key is refused, and its retry a few seconds later goes through —
+unless the keys were fetched in the minute before, when the retry is
+refused too and one a minute later goes through; after an outage,
+the first token past the minute is refused with the outage's error and
+the next goes through. The templates' scripts (`scripts/deploy.sh`,
+and the box repository's `bin/apply`) send a token the box refused in
+Actions once more, 3 seconds later, so a rotation usually costs a run
+three seconds, not a re-run. Every refusal is answered no sooner than
+5 ms after the request arrived, so its timing does not say how many
+sources checked the token. A forged token under a key the
 box does hold costs it no request to the issuer, which is also why an
 issuer that replaces a key but keeps its kid is not picked up: tokens
 under the new key are refused, with `signature does not match the key
 held for kid "<kid>"; if the issuer replaced that key, systemctl
-reload hotserve` in `refused`, until the source fetches for another
-kid or that reload starts every source with an empty key set. Each
+reload hotserve` in `refused`, until a fetch for another kid or that
+reload fetches the issuer's keys again. Each
 entry's reason
 is one line, cut at 300 bytes plus an ellipsis — an issuer's error
 quotes what the token carried, and a presented identity can be

@@ -23,15 +23,26 @@ func clocked(iss *trusttest.Issuer, c Clock) *oidcVerifier {
 	return &oidcVerifier{issuer: iss.URL, audience: "hotserve", claims: map[string]string{"sub": "ci"}, client: iss.Client, clock: c}
 }
 
-// settled is Prime on vs: it begins each OIDC source's discovery and
-// key fetch when they are due, and returns once any under way have
-// ended.
+// settled is Prime on vs, as a start or a reload does it: it begins
+// each OIDC source's discovery and key fetch, and returns once they
+// have ended.
 func settled(t *testing.T, vs ...Verifier) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := Prime(ctx, vs); err != nil {
 		t.Fatalf("priming: %v", err)
+	}
+}
+
+// waited returns once the discovery and key fetch under way for each
+// of vs, a token's, have ended; it begins neither.
+func waited(t *testing.T, vs ...Verifier) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := waitFor(ctx, vs); err != nil {
+		t.Fatalf("waiting on the fetches under way: %v", err)
 	}
 }
 
@@ -124,7 +135,7 @@ func TestKeySetFetchesForAnUnknownKidOncePerInterval(t *testing.T) {
 	if want := `kid "forged-3"); fetching them, so a retry once that ends may go through`; !strings.Contains(err.Error(), want) {
 		t.Fatalf("unknown kid at the interval: reason = %q, want %q", err, want)
 	}
-	settled(t, v)
+	waited(t, v)
 	fetches(t, iss, 2, "unknown kid at the interval")
 }
 
@@ -149,12 +160,47 @@ func TestKeySetPicksUpARotation(t *testing.T) {
 	c.Advance(RefetchInterval)
 	_, err = v.verify(ctx, rotated)
 	refusedPlainly(t, err, "new key past the interval, beginning the fetch")
-	settled(t, v)
+	waited(t, v)
 	fetches(t, iss, 2, "new key past the interval")
 	if _, err := v.verify(ctx, rotated); err != nil {
 		t.Fatalf("new key after the fetch it began: refused: %v", err)
 	}
 	fetches(t, iss, 2, "new key after the fetch it began")
+}
+
+// Every source that trusts an issuer shares its discovery and keys,
+// across reloads (#306): a source built after another has fetched —
+// another app's, or the next config's — judges its first token at
+// once, with no fetch of its own. A reload (Warm) fetches the keys
+// again whatever RefetchInterval says, so a rotation reaches the box
+// with no refusal at all; and a reload whose fetch fails keeps the
+// keys it had in use.
+func TestIssuerStateIsSharedAcrossSourcesAndReloads(t *testing.T) {
+	iss := trusttest.NewIssuer(t)
+	c := trusttest.NewClock()
+	ctx := context.Background()
+	first := clocked(iss, c)
+	settled(t, first)
+	fetches(t, iss, 1, "the first source primed")
+	other := &oidcVerifier{issuer: iss.URL, audience: "other", claims: map[string]string{"sub": "ci"}, client: iss.Client, clock: c}
+	tok := iss.Mint(t, iss.Priv, "other", map[string]string{"sub": "ci"}, time.Now().Add(5*time.Minute))
+	if _, err := other.verify(ctx, tok); err != nil {
+		t.Fatalf("a second source's first token: refused: %v", err)
+	}
+	fetches(t, iss, 1, "a second source")
+
+	iss.Rotate(t)
+	settled(t, first) // a reload, well within the interval
+	fetches(t, iss, 2, "a reload")
+	if _, err := first.verify(ctx, ciToken(t, iss)); err != nil {
+		t.Fatalf("the new key after a reload: refused: %v", err)
+	}
+
+	iss.JWKSDown.Store(true)
+	settled(t, first) // a reload whose fetch fails
+	if _, err := first.verify(ctx, ciToken(t, iss)); err != nil {
+		t.Fatalf("a held key after a reload whose fetch failed: refused: %v", err)
+	}
 }
 
 // heldTransport holds every request until hold is closed, counting

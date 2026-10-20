@@ -13,21 +13,22 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 )
 
-// RefetchInterval is the most often one OIDC source tries its
-// issuer's discovery, until one succeeds, and fetches its keys. Both
-// run in the background, and no token waits on either (#306): a
-// token's verdict comes from what the source holds, in the time of a
-// local check whether or not its app exists, so timing names no app.
-// The source fetches its keys after its discovery (Warm, at start and
-// at each reload), and then only for a token whose kid it holds no key
-// for: so a key rotation — a new key under a new kid — is refused for
-// the first token under the new key, which begins the fetch when this
-// long has passed since the last, and the deploy's retry once the
-// fetch has ended goes through (the template's deploy.sh sends a
-// refused Actions token once more, 3s later). A key replaced under the
-// same kid does not reach it: its tokens fail under the held key,
-// which never fetches, until a fetch for another kid or a config
-// reload (a new key set).
+// RefetchInterval is the most often a token makes the box try an
+// issuer's discovery, until one succeeds, or fetch its keys. Both run
+// in the background, and no token waits on either (#306): a token's
+// verdict comes from what the process holds for the issuer
+// (issuerState, shared by every source that trusts it), in the time of
+// a local check whether or not its app exists. A start or a reload
+// (Warm) runs the discovery and fetches the keys whatever this
+// interval says; after that the keys are fetched only for a token
+// whose kid the set holds no key for: so a key rotation — a new key
+// under a new kid — is refused for the first token under the new key,
+// which begins the fetch when this long has passed since the last,
+// and the deploy's retry once the fetch has ended goes through (the
+// templates' scripts send a refused Actions token once more, 3s
+// later). A key replaced under the same kid does not reach it: its
+// tokens fail under the held key, which never fetches, until a fetch
+// for another kid or a reload.
 const RefetchInterval = time.Minute
 
 // fetchTimeout bounds one discovery or one fetch of an issuer's keys.
@@ -45,8 +46,8 @@ var signingAlgs = []jose.SignatureAlgorithm{
 	jose.EdDSA,
 }
 
-// keySet is the oidc.KeySet an OIDC source checks signatures with, in
-// place of go-oidc's RemoteKeySet, which fetches the issuer's keys
+// keySet is the oidc.KeySet an issuer's sources check signatures with
+// (one per issuerState), in place of go-oidc's RemoteKeySet, which fetches the issuer's keys
 // again for every signature that does not verify, its kid known or
 // not, and waits on the fetch: a forged token naming the issuer cost
 // the box an outbound round trip each, and its timing said the app
@@ -97,7 +98,7 @@ func (ks *keySet) VerifySignature(_ context.Context, raw string) ([]byte, error)
 		// here, in the journal's refused field, in the README's words.
 		return nil, fmt.Errorf("signature does not match the key held for kid %q; if the issuer replaced that key, systemctl reload hotserve", kid)
 	}
-	fetching, err := ks.refresh()
+	fetching, err := ks.refresh(false)
 	if err != nil {
 		return nil, err
 	}
@@ -124,14 +125,15 @@ func verifyWith(jws *jose.JSONWebSignature, kid string, keys []jose.JSONWebKey) 
 	return nil, held
 }
 
-// refresh begins a fetch when none is under way and RefetchInterval
-// has passed since the last began, or none ever has, and returns at
-// once: the last fetch's error when it failed, else whether a fetch is
-// under way, whose keys a retry may find.
-func (ks *keySet) refresh() (fetching bool, err error) {
+// refresh begins a fetch when none is under way and either force (a
+// discovery's, at start or a reload) or RefetchInterval has passed
+// since the last began, or none ever has, and returns at once: the
+// last fetch's error when it failed, else whether a fetch is under
+// way, whose keys a retry may find.
+func (ks *keySet) refresh(force bool) (fetching bool, err error) {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
-	if now := ks.clock.Now(); ks.inflight == nil && (ks.fetched.IsZero() || now.Sub(ks.fetched) >= RefetchInterval) {
+	if now := ks.clock.Now(); ks.inflight == nil && (force || ks.fetched.IsZero() || now.Sub(ks.fetched) >= RefetchInterval) {
 		ks.inflight, ks.fetched = make(chan struct{}), now
 		go ks.fetch(ks.inflight)
 	}
