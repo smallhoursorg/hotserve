@@ -553,7 +553,9 @@ func Verifiers(sources []Source, jwksClient *http.Client) []Verifier {
 }
 
 // VerifiersOn is Verifiers with the OIDC sources' RefetchInterval
-// on clock: for tests, which advance it.
+// on clock: for tests, which advance it. clock must be comparable (a
+// pointer, or a struct of comparable fields): it is part of the key
+// the issuer's shared state is held under (issuerFor).
 func VerifiersOn(clock Clock, sources []Source, jwksClient *http.Client) []Verifier {
 	out := make([]Verifier, 0, len(sources))
 	for _, ts := range sources {
@@ -645,9 +647,11 @@ func waitOn(ctx context.Context, done chan struct{}) error {
 
 // unavailable is a refusal that is the box's, not the token's: the
 // source could not be consulted — its discovery or its key fetch
-// failed — so the token was never judged. label names the source. A
-// discovery or fetch still under way is not one: the source is not
-// ready, and the token is refused plainly, its retry soon judged.
+// failed — so the token was never judged. label names the source. The
+// first discovery or fetch still under way is not one: the source is
+// not ready, and the token is refused plainly, its retry soon judged.
+// A retry under way after a failure is: until it ends, the token gets
+// the failure it follows.
 //
 // Authenticate charges it like any refusal: it answers the same flat
 // 401, and its "webhook auth failed" lines count against the same
@@ -661,8 +665,8 @@ func waitOn(ctx context.Context, done chan struct{}) error {
 // not another source then accepted the token, so a CI loop retrying
 // through an issuer outage never leaves the journal quiet about the
 // cause, and neither does a fallback source that keeps deploys going.
-// Not an unavailable: the caller going away (ctx.Err) and an issuer
-// answering as someone else (config).
+// Not an unavailable: an issuer answering as someone else (config).
+// The caller's context decides nothing: no check waits on it.
 type unavailable struct {
 	label string
 	err   error
@@ -996,10 +1000,10 @@ func (v *oidcVerifier) verify(ctx context.Context, rawToken string) (Identity, e
 	}
 	tok, err := idv.Verify(oidc.ClientContext(ctx, v.client), rawToken)
 	if err != nil {
-		// go-oidc checks the issuer, audience and expiry, then the
-		// signature, and a token whose kid the key set holds no key for
-		// gets the last fetch's error; so during an outage such a token,
-		// once its standard claims pass, lands here, while one under a
+		// go-oidc checks the signature before any claim (verifyJWT,
+		// then issuer, audience and expiry), and a token whose kid the
+		// key set holds no key for gets the last fetch's error; so
+		// during an outage such a token lands here, while one under a
 		// key the set holds is judged as ever.
 		if strings.HasPrefix(err.Error(), keyFetchFailed) {
 			return Identity{}, unavailable{v.Label(), err}

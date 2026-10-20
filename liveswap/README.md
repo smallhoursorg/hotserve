@@ -887,19 +887,23 @@ an issuer or changes liveswap's `allow_insecure_http` (a copy hotserve
 holds nothing for yet). A token that arrives before an issuer's first
 discovery and fetch have ended — at start, or after such a reload —
 is refused with `oidc discovery for <issuer>: under way,
-so a retry once that ends may go through` (or the key set's `fetching
-them`) in `refused`. A discovery that failed is tried again by the
+so a retry once that ends may go through` (or the key set's `which
+they are being fetched for`) in `refused`. A discovery that failed is tried again by the
 next reload, or by a token at most once a minute. After that the keys
 are fetched only for a token signed under a key hotserve does not
 hold yet, at most once a minute per copy, and that token is refused
-at once rather than wait: with `fetching them, so a retry once that
-ends may go through` when it began a fetch, and with the last fetch's
-error if that failed. So the first deploy after the issuer rotates its
-key is refused, and its retry a few seconds later goes through —
-unless the keys were fetched in the minute before, when the retry is
-refused too, with `they were fetched under a minute ago, so a token
-from <time> on fetches them again, as does systemctl reload hotserve
-now` in `refused`; after an outage,
+at once rather than wait: with `the token is another issuer's, or is
+under a new key, which they are being fetched for, so a retry once
+that ends may go through` when it began a fetch, and with the last
+fetch's error if that failed. (A token from an issuer the source does
+not trust gets the same text: the signature is checked before the
+issuer, so check the source's `issuer` first if a retry is refused
+too.) So the first deploy after the issuer rotates its key is
+refused, and its retry a few seconds later goes through — unless the
+keys were fetched in the minute before, when the retry is refused too,
+with `… fetched too soon for; a token from <time> on fetches them
+again, as does systemctl reload hotserve now` in `refused`; after an
+outage,
 the first token past the minute is refused with the outage's error and
 the next goes through. The templates' scripts (`scripts/deploy.sh`,
 and the box repository's `bin/apply`) send a token the box refused
@@ -910,8 +914,9 @@ refused unread (`bearer token is <n> bytes, longer than 8192` in
 box does hold costs it no request to the issuer, which is also why an
 issuer that replaces a key but keeps its kid is not picked up: tokens
 under the new key are refused, with `signature does not match the key
-held for kid "<kid>"; if the issuer replaced that key, systemctl
-reload hotserve` in `refused`, until a fetch for another kid or that
+held for kid "<kid>": the token is another issuer's, or, if the issuer
+replaced that key, systemctl reload hotserve` in `refused`, until a
+fetch for another kid or that
 reload fetches the issuer's keys again. Each
 entry's reason
 is one line, cut at 300 bytes plus an ellipsis — an issuer's error

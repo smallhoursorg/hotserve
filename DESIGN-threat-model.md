@@ -86,8 +86,8 @@ existence is revealed: an unknown app name is verified against the
 *global* trust sources, so its refusal is the same 401 as a known
 app's (`Handler.ServeHTTP`, liveswap/handler.go). No token waits on
 an issuer for it (#306): a token is checked against each source a
-name resolves to in turn — an OIDC source checks its issuer, audience
-and expiry, then its signature (go-oidc's order), then the claim
+name resolves to in turn — an OIDC source checks its signature, then
+its issuer, audience and expiry (go-oidc's order), then the claim
 allowlist — and every check is local. Each issuer's discovery and keys
 are held once for the process per `allow_insecure_http` setting (so at
 most twice, when liveswap's differs from the box's https-only one),
@@ -99,9 +99,10 @@ state, which that token does not wait on (`keySet`,
 liveswap/deploytrust/jwks.go). The time to the 401 can still differ
 by that local work, and that is the **residual**, accepted by the
 owner's decision (S3 × O5 × D5 = 75, #306, 2026-10-20): each source a
-name resolves to parses the token and, for one that names its issuer
-and audience, checks a signature, where a name with no source does
-neither. A token longer than `MaxTokenLen` (8 KiB) is refused before
+name resolves to parses the token and checks its signature against a
+key it holds under the token's kid (or each key it holds, for a token
+naming none), whatever issuer and audience the token claims, where a
+name with no source does neither. A token longer than `MaxTokenLen` (8 KiB) is refused before
 any source parses it, which bounds the difference: measured on an
 arm64 machine (2026-10-20), an OIDC source refuses a 2 KiB token
 (about a real GitHub one) in 0.11 ms and a 16 KiB one in 0.33 ms,

@@ -772,7 +772,7 @@ func TestAuthorizeSaysWhy(t *testing.T) {
 		{"wrong audience", local, trusttest.Mint(t, priv, "other", nil), []string{"local:test-key: ", "aud"}},
 		{"expired", local, trusttest.MintExpired(t, priv, "aud1", nil), []string{"local:test-key: ", "exp"}},
 		{"bad signature under a held kid names the reload", gh, iss.Mint(t, otherRSA, "hotserve", nil, time.Now().Add(time.Minute)),
-			[]string{"oidc:" + iss.URL + ": ", `kid "` + iss.KID + `"; if the issuer replaced that key, systemctl reload hotserve`}},
+			[]string{"oidc:" + iss.URL + ": ", `kid "` + iss.KID + `": the token is another issuer's, or, if the issuer replaced that key, systemctl reload hotserve`}},
 		{"claim mismatch names who tried", gh,
 			mint("hotserve", map[string]string{"repository": "org/other", "ref": "refs/heads/main", "actor": "alice"}),
 			[]string{"oidc:" + iss.URL + ": claim \"repository\" mismatch, presented repository=org/other ref=refs/heads/main actor=alice"}},

@@ -96,18 +96,21 @@ func (ks *keySet) VerifySignature(_ context.Context, raw string) ([]byte, error)
 		// kid never fetches, so an issuer that replaced the key and kept
 		// its kid is picked up only by a reload (a new key set). Said
 		// here, in the journal's refused field, in the README's words.
-		return nil, fmt.Errorf("signature does not match the key held for kid %q; if the issuer replaced that key, systemctl reload hotserve", kid)
+		// The signature is checked before the issuer (go-oidc), so the
+		// commoner cause comes first: a source trusting the wrong issuer.
+		return nil, fmt.Errorf("signature does not match the key held for kid %q: the token is another issuer's, or, if the issuer replaced that key, systemctl reload hotserve", kid)
 	}
 	fetching, next, err := ks.refresh(false)
 	if err != nil {
 		return nil, err
 	}
 	if fetching {
-		return nil, fmt.Errorf("the issuer's keys hold none that verifies it (kid %q); fetching them, so a retry once that ends may go through", kid)
+		return nil, fmt.Errorf("the issuer's keys hold none that verifies it (kid %q): the token is another issuer's, or is under a new key, which they are being fetched for, so a retry once that ends may go through", kid)
 	}
 	// Fetched within the interval: say so and when the next may be, so
-	// a refused rotation is not read as a trust mismatch.
-	return nil, fmt.Errorf("the issuer's keys hold none that verifies it (kid %q); they were fetched under a minute ago, so a token from %s on fetches them again, as does systemctl reload hotserve now", kid, next.UTC().Format(time.RFC3339))
+	// a refused rotation is not read as a trust mismatch, nor a trust
+	// mismatch as a rotation.
+	return nil, fmt.Errorf("the issuer's keys hold none that verifies it (kid %q): the token is another issuer's, or is under a new key they were fetched too soon for; a token from %s on fetches them again, as does systemctl reload hotserve now", kid, next.UTC().Format(time.RFC3339))
 }
 
 // verifyWith is the payload of the first of keys that verifies jws —
