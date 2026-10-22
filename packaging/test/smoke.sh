@@ -1464,10 +1464,11 @@ dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03
 # install is a catch-up — unless the timer's own elapse fell in these
 # seconds (the hour and this box's offset, or a Sunday 03:30 and its
 # offset): then the trigger is that elapse, a period before the next
-# one, to the second or within AccuracySec (1s) after it. A catch-up's
-# trigger is off the calendar: the manager's start and the offset
-# [M68], or the timer's activation [M86]. The next elapse is empty
-# while the fired run lasts: it is read once the run has ended.
+# one, to the second or within AccuracySec (1s) after it — up to 5s
+# is taken, for a manager late under load. A catch-up's trigger is
+# off the calendar: the manager's start and the offset [M68], or the
+# timer's activation [M86]. The next elapse is empty while the fired
+# run lasts: it is read once the run has ended.
 for u in hotserve-backup.service hotserve-backup-drill.service; do
 	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
 	t=${u%.service}.timer
@@ -1490,18 +1491,22 @@ timeout 300 systemctl enable --now hotserve || die "hotserve did not start after
 # A timer firing from here to the run below would put a drill, which
 # holds the run lock (hotserve-backup-drill.service), or a run of its
 # own in the way of the stage's run: the timers are held while it runs,
-# and one fired since the check above is let end first. A stop keeps
-# the stamp, and the start after fires nothing but an elapse missed
-# meanwhile [M61].
-systemctl stop $TIMERS
+# and one fired since the check above is let end first. Before they
+# are started again their stamps are touched: a start reads the
+# stamp, and an elapse that passed while they were held would
+# otherwise be caught up at once [M61, M86], into the purge's staging.
+systemctl stop $TIMERS || die "reinstalled after remove: the timers could not be stopped: $(systemctl show -p ActiveState,Result $TIMERS | tr '\n' ' ')"
 i=0
 until [ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] && [ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" != activating ] || [ "$i" -ge 600 ]; do
 	i=$((i + 1))
 	sleep 1
 done
+[ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] && [ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" != activating ] \
+	|| die "reinstalled after remove: a run or drill the timer fired is still running after 600s: $(journalctl -u hotserve-backup.service -u hotserve-backup-drill.service --no-pager | tail -5)"
 systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
-systemctl start $TIMERS
+for u in $TIMERS; do touch "/var/lib/systemd/timers/stamp-$u"; done
+systemctl start $TIMERS || die "reinstalled after remove: the timers could not be started again: $(systemctl show -p ActiveState,Result $TIMERS | tr '\n' ' ')"
 echo "reinstalled after remove: the timers enabled and running again, the same credential file, a run works"
 # What a killed run can leave behind: a bind mount of an app's data
 # under the run directory, and the record writer's temp file. Purge
