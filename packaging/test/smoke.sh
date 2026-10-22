@@ -1487,15 +1487,21 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 done
 echo "reinstalled after remove: the stamps are new, and nothing caught up"
 timeout 300 systemctl enable --now hotserve || die "hotserve did not start after the reinstall"
-# A drill the timer fired since the check above holds the run lock, and
-# a run that meets it fails (hotserve-backup-drill.service): let it end.
+# A timer firing from here to the run below would put a drill, which
+# holds the run lock (hotserve-backup-drill.service), or a run of its
+# own in the way of the stage's run: the timers are held while it runs,
+# and one fired since the check above is let end first. A stop keeps
+# the stamp, and the start after fires nothing but an elapse missed
+# meanwhile [M61].
+systemctl stop $TIMERS
 i=0
-until [ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" != activating ] || [ "$i" -ge 600 ]; do
+until [ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] && [ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" != activating ] || [ "$i" -ge 600 ]; do
 	i=$((i + 1))
 	sleep 1
 done
 systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
+systemctl start $TIMERS
 echo "reinstalled after remove: the timers enabled and running again, the same credential file, a run works"
 # What a killed run can leave behind: a bind mount of an app's data
 # under the run directory, and the record writer's temp file. Purge
