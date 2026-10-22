@@ -1527,7 +1527,7 @@ func (ma *managedApp) syncCaps() {
 		return
 	}
 	want := c.spec.caps
-	if inst.handle.state().Caps == want {
+	if hs := inst.handle.state(); !hs.CapsUnknown && hs.Caps == want {
 		return
 	}
 	fields := []zap.Field{zap.String("version", inst.version),
@@ -1707,7 +1707,7 @@ func (ma *managedApp) status() statusSnapshot {
 		s.Command = hs.Command
 		s.Unit = hs.Unit
 		s.Running = c.runner.Alive(ma.current.handle)
-		if hs.Caps.any() {
+		if hs.Caps.any() && !hs.CapsUnknown {
 			s.Caps = &capsSnapshot{MemoryMax: hs.Caps.memoryMax, TasksMax: hs.Caps.tasksMax, CPUQuota: hs.Caps.cpuQuota}
 		}
 	}

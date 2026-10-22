@@ -272,12 +272,16 @@ type systemdHandle struct {
 	// SetCaps. Atomic for the same reason as argv: status reads it
 	// while a reload's SetCaps writes it.
 	caps atomic.Pointer[resourceCaps]
-	done chan struct{}
-	exit atomic.Pointer[unitStatus] // final status, set before done closes
+	// capsUnknown is set when a SetCaps failed ambiguously and the
+	// unit could not be read back (readBackCaps): caps is then the
+	// last known, not the applied, and no sync may take it as such.
+	capsUnknown atomic.Bool
+	done        chan struct{}
+	exit        atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
-	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
+	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit, CapsUnknown: h.capsUnknown.Load()}
 	if argv := h.argv.Load(); argv != nil {
 		st.Command = *argv
 	}
@@ -575,10 +579,35 @@ func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 		}
 	}
 	if err := r.conn.SetUnitProperties(ctx, sh.unit, capProperties(caps, true, lift)); err != nil {
+		// Ambiguous (invariant 5): the manager may have applied the
+		// properties before the transport failed, and the handle's
+		// caps would then be stale — a later sync back to them would
+		// find them "already applied" and send nothing. Read the unit
+		// back on a context of its own; with no answer the caps are
+		// marked unknown, which no sync takes as applied.
+		r.readBackCaps(sh)
 		return fmt.Errorf("setting the caps of unit %s: %w", sh.unit, err)
 	}
 	sh.caps.Store(&applied)
+	sh.capsUnknown.Store(false)
 	return nil
+}
+
+// readBackCaps replaces the handle's caps with what the manager holds
+// for the unit, or marks them unknown when the manager cannot be
+// asked: the ledger is the manager's, and a handle that cannot read
+// it must not claim to know.
+func (r *systemdRunner) readBackCaps(sh *systemdHandle) {
+	ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
+	defer cancel()
+	us, err := r.conn.UnitStatus(ctx, sh.unit)
+	if err != nil || !us.loaded() {
+		sh.capsUnknown.Store(true)
+		return
+	}
+	caps := r.unitCaps(ctx, us)
+	sh.caps.Store(&caps)
+	sh.capsUnknown.Store(false)
 }
 
 // unitCaps is what the manager's report of a unit means as caps: a

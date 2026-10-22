@@ -882,8 +882,13 @@ Accepted: `memory_max` applies to the pre_start too — a migration
 needing more than the server is raised like any other cap, and the
 deploy's response names the OOM kill. A cap the manager refuses to
 set live (a stale connection) applies at the next launch and the
-journal says so; the next reload, or a reattach, tries again, nothing
-in between does.
+journal says so; the next reload, a publication or a reattach tries
+again, nothing in between does. The failure is ambiguous (the manager
+may have applied the properties before the transport failed), so the
+runner reads the unit back and takes the manager's word for the
+handle's caps; with the unit unreadable too the caps are marked
+unknown, which no sync takes as "already applied" and status does not
+report as in effect, until a SetCaps succeeds.
 
 ## Non-goals
 

@@ -218,10 +218,61 @@ func TestSyncCapsFailureIsAWarning(t *testing.T) {
 	if rig.ma.status().Caps != nil {
 		t.Fatal("a failed sync must not report the caps as applied")
 	}
-	// The next launch carries them regardless.
+	// The failure left the unit's caps unknown (the fake's worst case):
+	// a sync back to what the handle last knew re-sends rather than
+	// trusting the equality — the manager may have applied the
+	// change before the failure.
+	rig.runner.setCapsErr = nil
+	rig.ma.configure(new(int), testSpec(t), nil, zap.NewNop(), &fetchClients{}, userManager)
+	if len(rig.runner.setCaps) != 1 || rig.runner.setCaps[0].any() {
+		t.Fatalf("SetCaps calls = %+v, want one lifting call after the ambiguous failure, not a skip", rig.runner.setCaps)
+	}
+	// The next launch carries the spec's caps regardless.
+	rig.ma.configure(new(int), capped, nil, zap.NewNop(), &fetchClients{}, userManager)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}))
 	if last := rig.runner.started[len(rig.runner.started)-1]; last.caps != capped.caps {
 		t.Fatalf("the launch after a failed sync carried %+v, want %+v", last.caps, capped.caps)
+	}
+}
+
+// A SetCaps that fails after the manager may have applied it reads
+// the unit back and takes the manager's word; with the unit
+// unreadable too, the caps are unknown and status shows none.
+func TestSetCapsFailureReadsTheUnitBack(t *testing.T) {
+	f := newFakeSystemdConn()
+	f.defaultTasksMax = 2273
+	r := newSystemdRunner(f, zap.NewNop())
+	t.Cleanup(r.close)
+	unit := "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service"
+	h := &systemdHandle{unit: unit, done: make(chan struct{})}
+	h.caps.Store(&resourceCaps{cpuQuota: 50})
+	// Applied, then the transport failed: the manager holds 200%.
+	f.mu.Lock()
+	f.setPropsErr = os.ErrDeadlineExceeded
+	f.status[unit] = unitStatus{Name: unit, LoadState: "loaded", ActiveState: "active", MainPID: 4242, Sandboxed: true, Caps: resourceCaps{cpuQuota: 200}}
+	f.mu.Unlock()
+	if err := r.SetCaps(h, resourceCaps{cpuQuota: 200}); err == nil {
+		t.Fatal("SetCaps must report the failure")
+	}
+	if st := h.state(); st.CapsUnknown || st.Caps != (resourceCaps{cpuQuota: 200}) {
+		t.Fatalf("after an ambiguous failure the handle reports %+v (unknown=%v), want the manager's 200%%", st.Caps, st.CapsUnknown)
+	}
+	// The unit unreadable as well: unknown, until a SetCaps succeeds.
+	f.mu.Lock()
+	f.statusErr = os.ErrDeadlineExceeded
+	f.mu.Unlock()
+	if err := r.SetCaps(h, resourceCaps{cpuQuota: 50}); err == nil {
+		t.Fatal("SetCaps must report the failure")
+	}
+	if st := h.state(); !st.CapsUnknown {
+		t.Fatalf("with the unit unreadable the caps must be unknown, got %+v", st)
+	}
+	f.mu.Lock()
+	f.statusErr, f.setPropsErr = nil, nil
+	f.mu.Unlock()
+	must(t, r.SetCaps(h, resourceCaps{cpuQuota: 50}))
+	if st := h.state(); st.CapsUnknown || st.Caps != (resourceCaps{cpuQuota: 50}) {
+		t.Fatalf("a successful SetCaps must settle the caps, got %+v (unknown=%v)", st.Caps, st.CapsUnknown)
 	}
 }
 

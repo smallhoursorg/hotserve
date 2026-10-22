@@ -99,15 +99,18 @@ type fakeHandle struct {
 	// the real runner reports the manager's ExecStart.
 	argv []string
 	// caps is what the "unit" is bounded to: the start spec's, then
-	// whatever SetCaps last set, as the real handle reports them.
-	caps resourceCaps
-	mu   sync.Mutex
+	// whatever SetCaps last set, as the real handle reports them;
+	// capsUnknown after a SetCaps the fake failed, as the real
+	// handle's worst case (the unit unreadable after the failure).
+	caps        resourceCaps
+	capsUnknown bool
+	mu          sync.Mutex
 }
 
 func (h *fakeHandle) state() handleState {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return handleState{PID: 4242, Command: h.argv, Caps: h.caps}
+	return handleState{PID: 4242, Command: h.argv, Caps: h.caps, CapsUnknown: h.capsUnknown}
 }
 
 func (h *fakeHandle) isAlive() bool {
@@ -244,9 +247,14 @@ func (r *fakeRunner) Wait(h handle) <-chan struct{} {
 
 func (r *fakeRunner) SetCaps(h handle, caps resourceCaps) error {
 	r.mu.Lock()
-	if r.setCapsErr != nil {
+	if err := r.setCapsErr; err != nil {
 		r.mu.Unlock()
-		return r.setCapsErr
+		if fh, ok := h.(*fakeHandle); ok {
+			fh.mu.Lock()
+			fh.capsUnknown = true
+			fh.mu.Unlock()
+		}
+		return err
 	}
 	r.setCaps = append(r.setCaps, caps)
 	hook := r.setCapsHook
@@ -257,6 +265,7 @@ func (r *fakeRunner) SetCaps(h handle, caps resourceCaps) error {
 	if fh, ok := h.(*fakeHandle); ok {
 		fh.mu.Lock()
 		fh.caps = caps
+		fh.capsUnknown = false
 		fh.mu.Unlock()
 	}
 	return nil

@@ -234,4 +234,9 @@ type handleState struct {
 	// them: the start's, a SetCaps's, or the values read at reattach.
 	// Not persisted: the manager is the ledger, and status reads this.
 	Caps resourceCaps `json:"-"`
+	// CapsUnknown says Caps is the last known, not the applied: a
+	// SetCaps failed after the manager may have applied it and the
+	// unit could not be read back. A sync re-sends rather than trusts
+	// an equality, and status reports no caps as in effect.
+	CapsUnknown bool `json:"-"`
 }
