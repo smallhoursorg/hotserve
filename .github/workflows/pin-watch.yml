@@ -25,8 +25,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/runner-sample
-        with:
-          phase: start
       - run: python3 .github/scripts/pin-watch.py
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,7 +34,3 @@ jobs:
           # repo only — GITHUB_TOKEN cannot access the alerts API.
           # Absent, alert reconciliation degrades to a setup-issue.
           DEPENDABOT_ALERTS_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
-      - if: always()
-        uses: ./.github/actions/runner-sample
-        with:
-          phase: end

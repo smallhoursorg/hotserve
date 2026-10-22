@@ -94,9 +94,12 @@ many runner types its jobs used.
   4 vCPU / 16 GB machine a public repository gets, at 50% CPU: 18.2 W
   with the data-centre overhead (Sources: runners), on a 380 gCO2e/kWh
   grid (Sources: runner grid), priced at the 2-core x64 rate as a rough
-  floor (Sources: runner price). Each job also logs its machine, Azure
-  region and measured CPU time (the `runner-sample` steps in every
-  workflow), from which these factors are recalibrated by hand.
+  floor (Sources: runner price). Every job of this repository's own
+  workflows that checks the tree out also logs its machine, Azure
+  region and measured CPU time (the `runner-sample` action), from
+  which these factors are recalibrated by hand; GitHub's own
+  workflows (Copilot review, CodeQL, Dependabot) keep the assumed
+  figures.
 - **Copilot.** Reviews are the Copilot code-review workflow's runs.
   Credits are typed into `usage/copilot.csv` from GitHub billing each
   month, note column included, so both are public (Sources: Copilot

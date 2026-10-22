@@ -1,86 +1,29 @@
 # Two samples per job, for usage/factors.json: what the runner is
 # (cores, memory, chip), where it is (Azure region and VM size from the
 # instance metadata service, the egress IP), and how busy the job kept
-# it (the /proc/stat delta between the samples, which is exact: the
-# machine is the job's alone, so every container's work shows there).
+# it (the /proc/stat delta between the samples, which the machine being
+# the job's alone makes exact: every container's work shows there).
 # `make usage` costs runner minutes at an assumed utilisation and grid;
 # the figures these steps leave in every job log are what those factors
 # are recalibrated from, by hand, with the run URLs as the source.
 # Nothing reads them automatically: they live in the logs for as long as
 # GitHub keeps the run.
 #
-# `start` goes right after checkout (a local action needs the tree, so
-# checkout's own seconds are not in the delta); `end` goes last, with
-# `if: always()`, so a red job is measured too. Both are bounded (3 s
-# and 5 s curl ceilings) and cannot fail: a probe that gets no answer
-# prints so. The two jobs without a checkout, ci-ok and the Dependabot
+# One `uses:` right after checkout (a local action needs the tree, so
+# checkout's own seconds are not in the delta). The end sample is the
+# action's post step, which runs after every other step's post, among
+# them actions/cache's save (the tar of the Go caches, tens of seconds
+# in the lint and test jobs), and runs whatever the job's result: the
+# window is the job as the Actions API times it, less set-up and
+# checkout. A composite action has no post step, hence node. Both
+# probes are bounded (3 s and 5 s) and answer "no answer" instead of
+# failing; a post step that threw would fail the job, so neither phase
+# can. The two jobs without a checkout, ci-ok and the Dependabot
 # auto-merge, carry no sample; each runs a few seconds of shell.
 name: runner sample
 description: Logs the runner's specs, region and CPU time, for recalibrating usage/factors.json by hand.
 
-inputs:
-  phase:
-    description: "`start` or `end`"
-    required: true
-
 runs:
-  using: composite
-  steps:
-    - if: inputs.phase == 'start'
-      shell: bash
-      continue-on-error: true
-      run: |
-        set +e
-        now=$(date +%s)
-        stat=$(head -1 /proc/stat)
-        echo "::group::runner-sample start"
-        echo "epoch=$now"
-        echo "stat=$stat"
-        echo "clk_tck=$(getconf CLK_TCK)"
-        echo "nproc=$(nproc)"
-        awk '/^MemTotal/ {print "memtotal_kb=" $2}' /proc/meminfo
-        lscpu | grep -E '^(Architecture|Vendor ID|Model name|CPU\(s\)):'
-        # Only the three fields that place and size the machine: the
-        # full document carries GitHub's subscription and resource ids.
-        if compute=$(curl -sf --max-time 3 -H Metadata:true \
-            'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01'); then
-          echo "$compute" | jq -r '"azure_location=\(.location)", "azure_zone=\(.zone)", "azure_vmsize=\(.vmSize)"' \
-            || echo "azure=unreadable answer"
-        else
-          echo "azure=no answer"
-        fi
-        echo "egress_ip=$(curl -sf --max-time 5 https://api.ipify.org || echo unknown)"
-        sed 's/^/cgroup_/' /sys/fs/cgroup/cpu.stat 2>/dev/null
-        echo "::endgroup::"
-        printf '%s\n%s\n' "$now" "$stat" > "$RUNNER_TEMP/runner-sample"
-        exit 0
-
-    - if: inputs.phase == 'end'
-      shell: bash
-      continue-on-error: true
-      run: |
-        set +e
-        now=$(date +%s)
-        stat=$(head -1 /proc/stat)
-        echo "::group::runner-sample end"
-        echo "epoch=$now"
-        echo "stat=$stat"
-        sed 's/^/cgroup_/' /sys/fs/cgroup/cpu.stat 2>/dev/null
-        if [ -s "$RUNNER_TEMP/runner-sample" ]; then
-          # /proc/stat's cpu line: user nice system idle iowait irq
-          # softirq steal guest guest_nice, in clock ticks. Busy is
-          # user+nice+system+irq+softirq (guest time is inside user);
-          # steal is the hypervisor's, not the job's, and stays out.
-          echo "$(sed -n 2p "$RUNNER_TEMP/runner-sample") $stat" | awk \
-            -v wall="$((now - $(sed -n 1p "$RUNNER_TEMP/runner-sample")))" \
-            -v n="$(nproc)" -v hz="$(getconf CLK_TCK)" '{
-              busy0 = $2 + $3 + $4 + $7 + $8
-              busy1 = $13 + $14 + $15 + $18 + $19
-              cpu = (busy1 - busy0) / hz
-              printf "wall_s=%d\ncpu_s=%.1f\nutilisation=%.3f\n", wall, cpu, (wall > 0 && n > 0) ? cpu / (wall * n) : 0
-            }'
-        else
-          echo "delta=no start sample"
-        fi
-        echo "::endgroup::"
-        exit 0
+  using: node24
+  main: main.js
+  post: post.js
