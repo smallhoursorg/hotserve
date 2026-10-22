@@ -292,7 +292,7 @@ func TestNothingIsAskedBeforeThePreflightPasses(t *testing.T) {
 		break_ func(b *box)
 		want   string
 	}{
-		{"restic missing", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Restic } }, "restic is not installed at /usr/bin/restic: apt install restic"},
+		{"restic missing", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Restic } }, "restic is not installed at /usr/bin/restic: apt install restic — the backup program Debian ships, which hotserve-backup runs"},
 		{"sqlite3 missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/sqlite3" } }, "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
 		{"hotserve missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
 		{"this command elsewhere", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Self } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},

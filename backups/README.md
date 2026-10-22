@@ -3,7 +3,9 @@
 Backs up what hotserve's apps declare: the SQLite databases and the
 files under each app's `shared/` that its `backup` block names
 ([liveswap/README.md](../liveswap/README.md#declaring-backups)), into
-one [restic](https://restic.net) repository off the box.
+one [restic](https://restic.net) repository off the box. restic is the
+backup program Debian ships; `hotserve-backup` runs it and never links
+it.
 
 It is a program of its own, `hotserve-backup`, and not part of the
 server: hotserve validates a declaration and does nothing else with it,

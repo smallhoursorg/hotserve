@@ -133,7 +133,7 @@ mv /usr/bin/restic /usr/bin/restic.aside
 systemctl start $S >"$OUT" 2>&1 && fail "the service exited 0 without restic" || pass "the service exits non-zero without restic"
 [ "$(prop $S Result)" = exit-code ] && [ "$(failed_units)" = "$S " ] && pass "the run's service is failed, in systemctl --failed" || fail "after a run without restic: $(systemctl show -p ActiveState,Result $S | tr '\n' ' '); failed: $(failed_units)"
 journalctl --sync >/dev/null 2>&1
-journalctl -u $S --no-pager | grep -q "restic is not installed at /usr/bin/restic: apt install restic" && pass "and the journal names the package to install, in setup's words" || fail "the journal: $(journalctl -u $S --no-pager | tail -5)"
+journalctl -u $S --no-pager | grep -q "restic is not installed at /usr/bin/restic: apt install restic — the backup program Debian ships, which hotserve-backup runs" && pass "and the journal names the package to install, in setup's words" || fail "the journal: $(journalctl -u $S --no-pager | tail -5)"
 mv /usr/bin/restic.aside /usr/bin/restic
 systemctl reset-failed $S
 [ "$(units_left)" = 0 ] && pass "no unit was started for it" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"

@@ -265,10 +265,13 @@ func accountReady(ctx context.Context) (passwd, error) {
 
 // programs are what the units run, and where. A unit whose command is
 // not there ends 203/EXEC, which says nothing of what to install: setup
-// and a run each refuse first, in the same words.
+// and a run each refuse first, in the same words. The restic line is
+// the first place an operator who has not met restic is told its name,
+// so it says once what it is; no other line does (docs/backups.md and
+// README.md say it once each, at their first mention).
 func programsInstalled(cfg Config) error {
 	for _, p := range []struct{ name, path, fix string }{
-		{"restic", cfg.Restic, ": apt install restic"},
+		{"restic", cfg.Restic, ": apt install restic — the backup program Debian ships, which hotserve-backup runs"},
 		{"sqlite3", dump.Program(), ": apt install sqlite3"},
 		{"hotserve", plan.Program(), ""},
 		{"hotserve-backup", cfg.Self, ", where the units run it"},
