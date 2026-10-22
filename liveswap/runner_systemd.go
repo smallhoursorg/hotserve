@@ -574,7 +574,7 @@ func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 			lift = def
 		}
 	}
-	if err := r.conn.SetUnitProperties(ctx, sh.unit, capProperties(caps, lift)); err != nil {
+	if err := r.conn.SetUnitProperties(ctx, sh.unit, capProperties(caps, true, lift)); err != nil {
 		return fmt.Errorf("setting the caps of unit %s: %w", sh.unit, err)
 	}
 	sh.caps.Store(&applied)

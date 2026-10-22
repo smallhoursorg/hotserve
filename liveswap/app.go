@@ -1543,6 +1543,13 @@ func (ma *managedApp) publishInstance(c collaborators, inst *instance) error {
 	ma.current = inst
 	ma.mu.Unlock()
 	ma.activeSocket.Store(inst.sock)
+	// The instance was started from the spec its launch snapshotted;
+	// a reload in between (a deploy's fetch and soak are long) changed
+	// the caps on the instance it was replacing, not on this one.
+	// Reconciled here, against the spec as it is now, so the serving
+	// instance carries the accepted configuration's caps whichever
+	// path published it.
+	ma.syncCaps()
 	return ma.persistState(c, inst)
 }
 

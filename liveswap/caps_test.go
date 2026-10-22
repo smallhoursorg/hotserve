@@ -42,7 +42,7 @@ func TestCapPropertiesAtStartEmitOnlyWhatIsSet(t *testing.T) {
 // (which would lift the manager's own bound from the unit).
 func TestCapPropertiesLiveLiftWhatIsUnset(t *testing.T) {
 	got := map[string]any{}
-	for _, p := range capProperties(resourceCaps{cpuQuota: 50}, 2273) {
+	for _, p := range capProperties(resourceCaps{cpuQuota: 50}, true, 2273) {
 		got[p.Name] = p.Value.Value()
 	}
 	for name, want := range map[string]any{
@@ -56,11 +56,30 @@ func TestCapPropertiesLiveLiftWhatIsUnset(t *testing.T) {
 		}
 	}
 	got = map[string]any{}
-	for _, p := range capProperties(resourceCaps{tasksMax: 40}, 2273) {
+	for _, p := range capProperties(resourceCaps{tasksMax: 40}, true, 2273) {
 		got[p.Name] = p.Value.Value()
 	}
 	if got["TasksMax"] != uint64(40) {
 		t.Errorf("a set tasks cap must win over the lift: TasksMax = %v", got["TasksMax"])
+	}
+	// A kept tasks cap does not hold the memory and CPU resets back,
+	// and neither does an unreadable default (liftTasksTo 0): the two
+	// resets go, and only TasksMax is left as it is.
+	for _, lift := range []uint64{2273, 0} {
+		got = map[string]any{}
+		for _, p := range capProperties(resourceCaps{tasksMax: 40}, true, lift) {
+			got[p.Name] = p.Value.Value()
+		}
+		if got["MemoryMax"] != infinityUSec || got["MemorySwapMax"] != infinityUSec || got["CPUQuotaPerSecUSec"] != infinityUSec {
+			t.Errorf("lift %d: removed memory/CPU caps not reset: %v", lift, got)
+		}
+	}
+	got = map[string]any{}
+	for _, p := range capProperties(resourceCaps{memoryMax: 1 << 20}, true, 0) {
+		got[p.Name] = p.Value.Value()
+	}
+	if _, has := got["TasksMax"]; has {
+		t.Errorf("TasksMax sent with no default to lift to: %v", got)
 	}
 }
 
@@ -197,6 +216,36 @@ func TestSyncCapsFailureIsAWarning(t *testing.T) {
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/b.tgz", version: "v2"}))
 	if last := rig.runner.started[len(rig.runner.started)-1]; last.caps != capped.caps {
 		t.Fatalf("the launch after a failed sync carried %+v, want %+v", last.caps, capped.caps)
+	}
+}
+
+// A deploy launches from the spec it snapshotted at its start; a
+// reload during its fetch or soak changes the caps on the instance it
+// is replacing (or on none, for a first deploy), not on the one about
+// to be published. Publication reconciles against the spec as it is
+// now, so the serving instance carries the accepted configuration's
+// caps whichever path published it.
+func TestAReloadDuringADeployReachesTheInstanceItPublishes(t *testing.T) {
+	rig := newTestRig(t)
+	held, release := rig.holdFetch(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"})
+	}()
+	held()
+	capped := testSpec(t)
+	capped.caps = resourceCaps{cpuQuota: 150}
+	rig.ma.configure(new(int), capped, nil, zap.NewNop(), &fetchClients{}, userManager) // nothing runs yet: nothing to sync
+	release(nil)
+	must(t, <-done)
+	if last := rig.runner.started[len(rig.runner.started)-1]; last.caps.any() {
+		t.Fatalf("the deploy launched with %+v, want the snapshot's none (the point of the test)", last.caps)
+	}
+	if len(rig.runner.setCaps) != 1 || rig.runner.setCaps[0] != capped.caps {
+		t.Fatalf("SetCaps calls = %+v, want the reload's caps once, on the published instance", rig.runner.setCaps)
+	}
+	if got := rig.ma.status().Caps; got == nil || got.CPUQuota != 150 {
+		t.Fatalf("status caps = %+v, want cpu_quota 150 on the serving instance", got)
 	}
 }
 

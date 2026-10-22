@@ -1258,7 +1258,7 @@ func TestIntegrationSystemdCapsHoldAndChangeLive(t *testing.T) {
 		t.Errorf("pid changed from %d to %d: the caps must apply without a restart", pid, got)
 	}
 	if delegated {
-		for file, want := range map[string]string{"memory.max": "134217728", "pids.max": "max", "cpu.max": "25000 100000"} {
+		for file, want := range map[string]string{"memory.max": "134217728", "pids.max": def, "cpu.max": "25000 100000"} {
 			if got := kernel(file); got != want {
 				t.Errorf("kernel %s = %q after SetCaps, want %q", file, got, want)
 			}

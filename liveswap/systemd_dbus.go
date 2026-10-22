@@ -63,8 +63,8 @@ type userManagerClient struct {
 	// would stall the runner.
 	sandboxMu  sync.Mutex
 	sandboxGen uint64 // generation the host was measured capable for; 0 = never
-	// defaultTasksMax is the manager's DefaultTasksMax= as last read
-	// (DefaultTasksMax); 0 = not yet.
+	// defaultTasksMax is the manager's DefaultTasksMax= as read with the
+	// connection (get), like nofile; 0 = unreadable or infinity.
 	defaultTasksMax atomic.Uint64
 }
 
@@ -187,6 +187,19 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 		conn.Close()
 		return nil, err
 	}
+	// The manager's DefaultTasksMax, read the same way for the same
+	// reason: it is what an unset tasks_max is lifted to, and what a
+	// unit with none reports (SetCaps, unitCaps). Published with the
+	// connection, so a manager restarted with another value is read
+	// again on the redial. 0 = unreadable or infinity: nothing to lift
+	// to, and no number a unit's TasksMax reads back as.
+	var tasksMax uint64
+	if v, err := conn.GetManagerProperty("DefaultTasksMax"); err == nil {
+		tasksMax = parseManagerUint(v)
+	} else if !conn.Connected() {
+		conn.Close()
+		return nil, err
+	}
 	for _, nc := range raws {
 		if derr := nc.SetDeadline(time.Time{}); derr != nil {
 			conn.Close()
@@ -202,7 +215,8 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	}
 	c.conn = conn
 	c.nofile.Store(nofile) // published with the connection it was read from
-	c.generation.Add(1)    // ... as is the generation the sandbox cache keys on
+	c.defaultTasksMax.Store(tasksMax)
+	c.generation.Add(1) // ... as is the generation the sandbox cache keys on
 	return conn, nil
 }
 
@@ -334,7 +348,7 @@ func unitProperties(u unitSpec) []sddbus.Property {
 			{Path: "/usr/bin/rm", Args: []string{"rm", "-f", u.Socket}, IgnoreFailure: true},
 		})})
 	}
-	props = append(props, capProperties(u.Caps, 0)...)
+	props = append(props, capProperties(u.Caps, false, 0)...)
 	return append(props, sandboxProperties(u.Sandbox)...)
 }
 
@@ -347,16 +361,18 @@ const usecPerPercent = 10_000
 const infinityUSec = ^uint64(0)
 
 // capProperties renders resourceCaps as the unit's cgroup properties.
-// At a start (liftTasksTo 0) only what is set is emitted, so an app
-// with no caps gets exactly the manager's defaults. Live (SetCaps)
-// every one is, so a cap a reload removed is lifted from the running
-// unit rather than kept: memory and CPU to infinity, their defaults,
-// and an unset tasks cap to liftTasksTo, the manager's DefaultTasksMax
-// — never infinity, which would lift the manager's own bound too.
-// memory_max comes with MemorySwapMax=0: a cap an app can spill past
-// into swap bounds nothing, and lifting the cap lifts that too.
-func capProperties(c resourceCaps, liftTasksTo uint64) []sddbus.Property {
-	every := liftTasksTo > 0
+// At a start (live=false) only what is set is emitted, so an app with
+// no caps gets exactly the manager's defaults. Live (SetCaps) every
+// cap is, so a cap a reload removed is lifted from the running unit
+// rather than kept: memory and CPU to infinity, their defaults, and an
+// unset tasks cap to liftTasksTo, the manager's DefaultTasksMax —
+// never infinity, which would lift the manager's own bound too; with
+// liftTasksTo 0 (the default unreadable) TasksMax alone is left as it
+// is, and the memory and CPU resets still go. memory_max comes with
+// MemorySwapMax=0: a cap an app can spill past into swap bounds
+// nothing, and lifting the cap lifts that too.
+func capProperties(c resourceCaps, live bool, liftTasksTo uint64) []sddbus.Property {
+	every := live
 	var props []sddbus.Property
 	if c.memoryMax > 0 || every {
 		mem, swap := infinityUSec, infinityUSec
@@ -368,7 +384,7 @@ func capProperties(c resourceCaps, liftTasksTo uint64) []sddbus.Property {
 			sddbus.Property{Name: "MemorySwapMax", Value: godbus.MakeVariant(swap)},
 		)
 	}
-	if c.tasksMax > 0 || every {
+	if c.tasksMax > 0 || (every && liftTasksTo > 0) {
 		tasks := liftTasksTo
 		if c.tasksMax > 0 {
 			tasks = uint64(c.tasksMax)
@@ -602,40 +618,24 @@ func (c *userManagerClient) SetUnitProperties(ctx context.Context, name string, 
 	return err
 }
 
-// DefaultTasksMax reads the manager's DefaultTasksMax= off the Manager
-// object, resolved to a number (the manager resolves its own
-// percentage), and keeps it for the connection's life: the manager
-// does not change it without a reload of its own, which drops the
-// connection. go-systemd renders the variant as text ("@t 2273"); the
-// number is its last word.
+// DefaultTasksMax is the manager's DefaultTasksMax= as read with the
+// connection (get), resolved to a number: the manager resolves its own
+// percentage, and a unit with no TasksMax= reports exactly this. The
+// read happened under the dial's deadlines, so nothing here can wait
+// on a manager that has stopped answering; a dropped connection reads
+// it again on the redial, which is also when a manager restarted with
+// another value is seen.
 func (c *userManagerClient) DefaultTasksMax(_ context.Context) (uint64, error) {
-	if v := c.defaultTasksMax.Load(); v > 0 {
-		return v, nil
-	}
-	conn, err := c.get()
-	if err != nil {
+	if _, err := c.get(); err != nil {
 		return 0, err
 	}
-	s, err := conn.GetManagerProperty("DefaultTasksMax")
-	if err != nil {
-		c.dropIfDisconnected(conn, err)
-		return 0, err
+	v := c.defaultTasksMax.Load()
+	if v == 0 {
+		// Unreadable, or infinity (a manager configured with
+		// DefaultTasksMax=infinity): no number to lift a tasks cap to,
+		// and none a unit's TasksMax ever reads back as.
+		return 0, errors.New("the manager's DefaultTasksMax is unreadable or infinity")
 	}
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return 0, fmt.Errorf("DefaultTasksMax reads as %q", s)
-	}
-	v, err := strconv.ParseUint(words[len(words)-1], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("DefaultTasksMax reads as %q: %w", s, err)
-	}
-	if v == 0 || v == infinityUSec {
-		// infinity (a manager configured with DefaultTasksMax=infinity)
-		// is a bound of nothing: a lift to it is a lift, and a unit's
-		// TasksMax never reads back as it.
-		return 0, fmt.Errorf("the manager's DefaultTasksMax is %s, not a number a unit's TasksMax could be lifted to", words[len(words)-1])
-	}
-	c.defaultTasksMax.Store(v)
 	return v, nil
 }
 

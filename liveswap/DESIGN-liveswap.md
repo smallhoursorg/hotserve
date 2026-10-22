@@ -812,8 +812,11 @@ instance and the pre_start — rendered by `capProperties`
 none of the properties, so the manager's defaults stand unchanged. A
 running instance gets a reload's values through `SetUnitProperties`
 (runtime) rather than at its next launch: `syncCaps` (app.go) runs
-after every `configure` (App.Start), after a reattach (ensureRunning)
-and after a candidate's rollback (Cleanup), compares the spec's caps
+with every install of a spec (`configure`, `rollbackConfig`), after a
+reattach (ensureRunning) and at every publication of an instance
+(`publishInstance`: a deploy launches from the spec it snapshotted,
+and a reload during its fetch or soak would otherwise reach only the
+instance being replaced), compares the spec's caps
 with the handle's — what the manager last applied, or read back at
 reattach (`propCaps`) — and sends every cap when they differ: an
 unset memory or CPU cap as infinity, their default, and an unset
