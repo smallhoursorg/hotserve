@@ -187,8 +187,11 @@ func TestHowAFetchEnds(t *testing.T) {
 		10: "no repository",
 		11: "locked",
 		12: "password is wrong",
-		1:  "out of room", // of a restore, 1 is first of all this fetch's own
-		3:  "exit 3",
+		// Of a restore, 1 covers causes restic does not tell apart by
+		// status [measured]: the detail names none, and ends at the
+		// journal pointer.
+		1: "restic could not restore all of it (exit 1); `journalctl -u ",
+		3: "exit 3",
 	} {
 		t.Run(fmt.Sprint(exit), func(t *testing.T) {
 			b := restoreBox(t)

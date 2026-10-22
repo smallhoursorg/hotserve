@@ -897,10 +897,18 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 	if !o.OK() {
 		detail, wide := resticFailure(o)
 		if o.Result == "exit-code" && o.ExitStatus == 1 {
-			// Of a restore, 1 is also every error that is this fetch's own
-			// — no room on the disk, above all: a fetch is the whole app,
-			// under the state dir — and the repository has just answered.
-			detail, wide = fmt.Sprintf("restic could not restore all of it (exit 1): %s may be out of room — a fetch needs as much there as the app's data takes — or the storage stopped answering", x.cfg.StateDir), false
+			// Of a restore, 1 is every failure that is this fetch's own
+			// — a pack damaged or gone from the storage, a key that may
+			// not write the lock (after restic's quarter of an hour of
+			// retries), a disk that filled during the fetch (room was
+			// checked before it) — and restic gives them all the one
+			// status [measured]. So no cause is named: the journal has
+			// restic's words, which do name it. A storage that stops
+			// answering mid-fetch never gets here: restic retries for
+			// as long as it stays silent [measured]. Not
+			// repository-wide: the repository has just answered the
+			// listing.
+			detail, wide = "restic could not restore all of it (exit 1)", false
 		}
 		err := fmt.Errorf("fetching snapshot %s: %s; `journalctl -u %s` has restic's own words", record.Short(id), detail, x.name("fetch", app))
 		if wide {
