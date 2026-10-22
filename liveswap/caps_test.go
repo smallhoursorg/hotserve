@@ -3,6 +3,7 @@ package liveswap
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -348,6 +349,61 @@ func TestWatcherAndReadBackRefreshEnforcement(t *testing.T) {
 	if st := h.state(); len(st.CapsUnenforced) != 0 {
 		t.Fatalf("no memory cap left, yet %v is unenforced", st.CapsUnenforced)
 	}
+}
+
+// A status read takes the caps and the enforcement list together: a
+// reader racing a writer never sees a memory cap paired with a list
+// computed before that cap existed, on a host whose memory controller
+// is absent — which would show the cap as in effect for an instant.
+func TestStateReadsCapsAndEnforcementTogether(t *testing.T) {
+	root := t.TempDir()
+	cg := "/app.slice/x.service"
+	if err := os.MkdirAll(root+cg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("pids cpu\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := cgroupRoot
+	cgroupRoot = root
+	t.Cleanup(func() { cgroupRoot = old })
+	r := newSystemdRunner(newFakeSystemdConn(), zap.NewNop())
+	t.Cleanup(r.close)
+	h := &systemdHandle{unit: "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service", done: make(chan struct{})}
+	r.setCapsState(h, &resourceCaps{cpuQuota: 50}, &cg)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				r.setCapsState(h, &resourceCaps{cpuQuota: 50, memoryMax: 1 << 20}, nil)
+			} else {
+				r.setCapsState(h, &resourceCaps{cpuQuota: 50}, nil)
+			}
+		}
+	}()
+	for i := 0; i < 2000; i++ {
+		st := h.state()
+		if st.Caps.memoryMax > 0 && !slices.Contains(st.CapsUnenforced, "memory_max") {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("read %d: a memory cap shown with a list that does not name it: %+v", i, st)
+		}
+		if st.Caps.memoryMax == 0 && len(st.CapsUnenforced) != 0 {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("read %d: no memory cap, yet the list names %v", i, st.CapsUnenforced)
+		}
+	}
+	close(stop)
+	wg.Wait()
 }
 
 // A cap whose controller does not reach the unit's cgroup is held by

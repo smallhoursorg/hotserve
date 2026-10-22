@@ -284,7 +284,9 @@ type systemdHandle struct {
 	// by the watcher's backfill, and unenforced the directives whose
 	// controller does not reach it (unenforcedCaps). Written only by
 	// setCapsState, under capsLock, so the list is always the one
-	// computed from the caps beside it; read lock-free by state.
+	// computed from the caps beside it; state takes the same lock to
+	// read the two together, so a status never pairs new caps with the
+	// list computed for the old ones.
 	cgroup     atomic.Pointer[string]
 	unenforced atomic.Pointer[[]string]
 	capsLock   sync.Mutex
@@ -297,12 +299,14 @@ func (h *systemdHandle) state() handleState {
 	if argv := h.argv.Load(); argv != nil {
 		st.Command = *argv
 	}
+	h.capsLock.Lock()
 	if caps := h.caps.Load(); caps != nil {
 		st.Caps = *caps
 	}
 	if u := h.unenforced.Load(); u != nil {
 		st.CapsUnenforced = *u
 	}
+	h.capsLock.Unlock()
 	return st
 }
 
