@@ -187,7 +187,7 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		set  func(b *box)
 		want string
 	}{
-		{"restic", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/restic" } }, "restic is not installed at /usr/bin/restic: apt install restic — the backup program Debian ships, which hotserve-backup runs"},
+		{"restic", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/restic" } }, "restic, the backup program hotserve-backup runs, is not installed at /usr/bin/restic: apt install restic"},
 		{"sqlite3", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/sqlite3" } }, "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
 		{"hotserve", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
 		{"hotserve-backup", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve-backup" } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
@@ -303,7 +303,7 @@ func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
 	}
 	st, err = record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
 	must(t, err)
-	if st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "restic is not installed") || !strings.Contains(st.Warning, "could not be read and was replaced") {
+	if st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "is not installed at /usr/bin/restic") || !strings.Contains(st.Warning, "could not be read and was replaced") {
 		t.Fatalf("the record: last drill %+v, warning %q", st.LastDrill, st.Warning)
 	}
 }

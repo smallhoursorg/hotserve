@@ -3,10 +3,10 @@
 The package ships `hotserve-backup`: an hourly backup of what each
 app's Caddyfile block declares — its SQLite databases, copied safely
 while the app runs, and the files under its `shared/` — into one
-[restic](https://restic.net) repository off the box (restic is the
-backup program Debian ships; `hotserve-backup` runs it and never links
-it), and a weekly drill that restores every app's newest snapshot to
-prove a restore would work. This page is how to set it up, check on it, restore, rebuild a
+[restic](https://restic.net) repository off the box, and a weekly drill
+that restores every app's newest snapshot to prove a restore would
+work. restic is a backup program Debian ships; `hotserve-backup` runs
+it. This page is how to set it up, check on it, restore, rebuild a
 box, keep the repository small, and recover from an attack. How it
 works, and everything it refuses, is
 [backups/README.md](../backups/README.md).

@@ -292,7 +292,7 @@ func TestNothingIsAskedBeforeThePreflightPasses(t *testing.T) {
 		break_ func(b *box)
 		want   string
 	}{
-		{"restic missing", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Restic } }, "restic is not installed at /usr/bin/restic: apt install restic — the backup program Debian ships, which hotserve-backup runs"},
+		{"restic missing", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Restic } }, "restic, the backup program hotserve-backup runs, is not installed at /usr/bin/restic: apt install restic"},
 		{"sqlite3 missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/sqlite3" } }, "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
 		{"hotserve missing", func(b *box) { b.haveProgram = func(p string) bool { return p != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
 		{"this command elsewhere", func(b *box) { b.haveProgram = func(p string) bool { return p != b.cfg.Self } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
@@ -583,7 +583,7 @@ func TestAProgramIsOneEveryAccountCanRun(t *testing.T) {
 func TestAResticThatCannotRunIsNotInstalled(t *testing.T) {
 	b, m := setupBox(t)
 	b.haveProgram = func(p string) bool { return p != b.cfg.Restic }
-	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || !strings.Contains(err.Error(), "restic is not installed") {
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || !strings.Contains(err.Error(), "is not installed at /usr/bin/restic") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(m.asked) != 0 {

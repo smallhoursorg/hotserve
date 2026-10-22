@@ -54,7 +54,7 @@ setup "$REPO" </dev/null && fail "setup with no terminal exited 0" || { says "as
 echo "=== setup 2: what is knowable is refused before any prompt, and before the account is made ==="
 id hotserve-backup >/dev/null 2>&1 && fail "fixture: the hotserve-backup account exists before setup ran, so nothing below can show setup making it" || pass "fixture: no hotserve-backup account before setup"
 mv /usr/bin/restic /usr/bin/restic.aside
-at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup without restic exited 0" || { says "restic is not installed at /usr/bin/restic: apt install restic — the backup program Debian ships, which hotserve-backup runs" && pass "without restic, setup names the package, and says what it is" || fail "without restic: $(cat "$OUT")"; }
+at_tty hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup without restic exited 0" || { says "restic, the backup program hotserve-backup runs, is not installed at /usr/bin/restic: apt install restic" && pass "without restic, setup says what restic is and names the package" || fail "without restic: $(cat "$OUT")"; }
 says "Storage key id" && fail "a prompt was asked before the preflight passed" || pass "and asked nothing"
 id hotserve-backup >/dev/null 2>&1 && fail "the account was made before the preflight passed" || pass "and made no account"
 mv /usr/bin/restic.aside /usr/bin/restic
