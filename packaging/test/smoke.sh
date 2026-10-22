@@ -1450,32 +1450,50 @@ for u in $TIMERS; do
 done
 # A drill the timer fired in these seconds (a Sunday 03:30 and its
 # offset) is running still, and its timer has no next elapse until it
-# ends [M86]: let it end.
-for _ in $(seq 600); do
-	[ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" = activating ] || break
+# ends [M86]: read the elapse once there is one.
+i=0
+until dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer) && [ -n "$dnext" ] || [ "$i" -ge 600 ]; do
+	i=$((i + 1))
 	sleep 1
 done
-dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer)
+[ -n "$dnext" ] || die "reinstalled after remove: the drill the timer fired is still running after 600s: $(journalctl -u hotserve-backup-drill.service --no-pager | tail -5)"
 dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03:30:00" +%s)))
 [ "$(date -d "$dnext" +%a)" = Sun ] && [ "$dpast" -ge 0 ] && [ "$dpast" -le 600 ] \
 	|| die "reinstalled after remove: the drill's next elapse is '$dnext' (${dpast}s past 03:30 of its day), not a Sunday between 03:30 and 03:40: a catch-up"
 # A firing is the service's main process starting [M61]. One inside the
 # install is a catch-up — unless the timer's own elapse fell in these
 # seconds (the hour and this box's offset, or a Sunday 03:30 and its
-# offset). A catch-up fires as the timer starts: its LastTriggerUSec is
-# the timer's ActiveEnterTimestamp, to the second. A scheduled firing's
-# is later [M86].
+# offset): then the trigger is that elapse, a period before the next
+# one, to the second or within AccuracySec (1s) after it. A catch-up's
+# trigger is off the calendar: the manager's start and the offset
+# [M68], or the timer's activation [M86]. The next elapse is empty
+# while the fired run lasts: it is read once the run has ended.
 for u in hotserve-backup.service hotserve-backup-drill.service; do
 	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
 	t=${u%.service}.timer
+	case $t in hotserve-backup.timer) period=3600 ;; *) period=604800 ;; esac
+	i=0
+	until next=$(systemctl show -p NextElapseUSecRealtime --value "$t") && [ -n "$next" ] || [ "$i" -ge 600 ]; do
+		i=$((i + 1))
+		sleep 1
+	done
+	[ -n "$next" ] || die "reinstalled after remove: $u ran inside the install and is still running after 600s: $(journalctl -u "$u" --no-pager | tail -5)"
 	last=$(systemctl show -p LastTriggerUSec --value "$t")
-	since=$(( $(date -d "${last:-@0}" +%s) - $(date -d "$(systemctl show -p ActiveEnterTimestamp --value "$t")" +%s) ))
-	[ "$since" -gt 2 ] \
-		|| die "reinstalled after remove: $u ran inside the install, ${since}s after its timer started (last trigger '$last'): a catch-up"
-	echo "reinstalled after remove: $u ran inside the install ${since}s after its timer started, at the timer's own elapse: a scheduled run, not a catch-up"
+	[ -n "$last" ] || die "reinstalled after remove: $u ran inside the install, and not from its timer: $(journalctl -u "$u" --no-pager | tail -5)"
+	late=$(( $(date -d "$last" +%s) - $(date -d "$next" +%s) + period ))
+	[ "$late" -ge 0 ] && [ "$late" -le 5 ] \
+		|| die "reinstalled after remove: $u ran inside the install, and not at its timer's elapse (last trigger '$last', next elapse '$next', ${late}s after the elapse a period before the next): a catch-up"
+	echo "reinstalled after remove: $u ran inside the install at its timer's elapse (last trigger $last, ${late}s after it): a scheduled run, not a catch-up"
 done
 echo "reinstalled after remove: the stamps are new, and nothing caught up"
 timeout 300 systemctl enable --now hotserve || die "hotserve did not start after the reinstall"
+# A drill the timer fired since the check above holds the run lock, and
+# a run that meets it fails (hotserve-backup-drill.service): let it end.
+i=0
+until [ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" != activating ] || [ "$i" -ge 600 ]; do
+	i=$((i + 1))
+	sleep 1
+done
 systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
 echo "reinstalled after remove: the timers enabled and running again, the same credential file, a run works"
