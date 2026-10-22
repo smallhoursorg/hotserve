@@ -7,7 +7,7 @@ one [restic](https://restic.net) repository off the box. restic is a
 backup program Debian ships; `hotserve-backup` runs it and never links
 it.
 
-It is a program of its own, `hotserve-backup`, and not part of the
+`hotserve-backup` is a program of its own, and not part of the
 server: hotserve validates a declaration and does nothing else with it,
 and nothing here talks to hotserve. The two share a declaration format
 (`liveswap/backupdecl`) and nothing more — `hotserve-backup` links no
