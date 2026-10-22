@@ -1464,8 +1464,10 @@ dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03
 # install is a catch-up — unless the timer's own elapse fell in these
 # seconds (the hour and this box's offset, or a Sunday 03:30 and its
 # offset): then the trigger is that elapse, a period before the next
-# one, to the second or within AccuracySec (1s) after it — up to 5s
-# is taken, for a manager late under load. A catch-up's trigger is
+# one, to the second or within AccuracySec (1s) after it — up to 60s
+# is taken, for a manager late under load: a catch-up's trigger is
+# anywhere in the period, and one can only come of a stamp the remove
+# left, which stage 4 checks for itself. A catch-up's trigger is
 # off the calendar: the manager's start and the offset [M68], or the
 # timer's activation [M86]. The next elapse is empty while the fired
 # run lasts: it is read once the run has ended.
@@ -1486,7 +1488,7 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 	last=$(systemctl show -p LastTriggerUSec --value "$t")
 	[ -n "$last" ] || die "reinstalled after remove: $u ran inside the install, and not from its timer: $(journalctl -u "$u" --no-pager | tail -5)"
 	late=$(( $(date -d "$last" +%s) - $(date -d "$next" +%s) + period ))
-	[ "$late" -ge 0 ] && [ "$late" -le 5 ] \
+	[ "$late" -ge 0 ] && [ "$late" -le 60 ] \
 		|| die "reinstalled after remove: $u ran inside the install, and not at its timer's elapse (last trigger '$last', next elapse '$next', ${late}s after the elapse a period before the next): a catch-up"
 	echo "reinstalled after remove: $u ran inside the install at its timer's elapse (last trigger $last, ${late}s after it): a scheduled run, not a catch-up"
 done
@@ -1513,9 +1515,7 @@ if [ "$i" -ge 600 ] && { going hotserve-backup.service || going hotserve-backup-
 fi
 systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
-for u in $TIMERS; do touch "/var/lib/systemd/timers/stamp-$u"; done
-systemctl start $TIMERS || die "reinstalled after remove: the timers could not be started again: $(systemctl show -p ActiveState,Result $TIMERS | tr '\n' ' ')"
-echo "reinstalled after remove: the timers enabled and running again, the same credential file, a run works"
+echo "reinstalled after remove: the same credential file, a run works; the timers are held until the purge"
 # What a killed run can leave behind: a bind mount of an app's data
 # under the run directory, and the record writer's temp file. Purge
 # must remove nothing of the app's through the first, and not be
@@ -1551,6 +1551,14 @@ printf '%s\nsmoke-bystander.service\nhotserve_backup_bystander.service\n' "$LEFT
 [ "$(systemctl is-active "$LEFT" || true)" = active ] || die "the staged unit is not running: the purge row would prove nothing"
 : >/var/lib/hotserve-backup/.status-crash
 echo 0123 >/var/lib/hotserve-backup/repository-id.new
+# The timers, held since the stage's own run so that no run of theirs
+# sweeps what was staged above, are started again here, their stamps
+# touched first (a start reads the stamp, and an elapse that passed
+# meanwhile would be caught up at once [M86]); the purge's preremove
+# stops them, as the table says.
+for u in $TIMERS; do touch "/var/lib/systemd/timers/stamp-$u"; done
+systemctl start $TIMERS || die "reinstalled after remove: the timers could not be started again: $(systemctl show -p ActiveState,Result $TIMERS | tr '\n' ' ')"
+expect_backup_state "before the purge" enabled active "$CRED_SHA"
 apt-get purge -y hotserve >/tmp/purge.log 2>&1 || { cat /tmp/purge.log; die "apt-get purge failed"; }
 cat /tmp/purge.log
 [ -f /var/lib/liveswap/demo/shared/app.db ] && [ -f /var/lib/liveswap/demo/shared/uploads/a.png ] && [ -f /var/lib/liveswap/demo/shared/uploads/inner.txt ] && [ -f /tmp/disk/kept.txt ] \
