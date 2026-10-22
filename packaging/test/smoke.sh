@@ -1470,12 +1470,13 @@ dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03
 # timer's activation [M86]. The next elapse is empty while the fired
 # run lasts: it is read once the run has ended.
 for u in hotserve-backup.service hotserve-backup-drill.service; do
-	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
 	t=${u%.service}.timer
-	# The period is the unit's OnCalendar= by hand: held to the unit.
+	# The period is the unit's OnCalendar= by hand: held to the unit, on
+	# every run, fired or not.
 	case $t in hotserve-backup.timer) period=3600; cal='\*-\*-\* \*:00:00' ;; *) period=604800; cal='Sun \*-\*-\* 03:30:00' ;; esac
 	systemctl show -p TimersCalendar --value "$t" | grep -q "OnCalendar=$cal ;" \
 		|| die "reinstalled after remove: $t's calendar is '$(systemctl show -p TimersCalendar --value "$t")', not the ${period}s period this check takes"
+	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
 	i=0
 	until next=$(systemctl show -p NextElapseUSecRealtime --value "$t") && [ -n "$next" ] || [ "$i" -ge 600 ]; do
 		i=$((i + 1))
@@ -1499,13 +1500,17 @@ timeout 300 systemctl enable --now hotserve || die "hotserve did not start after
 # stamp, and an elapse that passed while they were held would
 # otherwise be caught up at once [M61, M86], into the purge's staging.
 systemctl stop $TIMERS || die "reinstalled after remove: the timers could not be stopped: $(systemctl show -p ActiveState,Result $TIMERS | tr '\n' ' ')"
+# Going: activating, or deactivating — a stop's grace still holds the
+# run lock.
+going() { case $(systemctl show -p ActiveState --value "$1") in activating|deactivating) return 0 ;; *) return 1 ;; esac; }
 i=0
-until [ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] && [ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" != activating ] || [ "$i" -ge 600 ]; do
+until ! going hotserve-backup.service && ! going hotserve-backup-drill.service || [ "$i" -ge 600 ]; do
 	i=$((i + 1))
 	sleep 1
 done
-[ "$i" -lt 600 ] \
-	|| die "reinstalled after remove: a run or drill the timer fired is still running after 600s ($(systemctl show -p ActiveState --value hotserve-backup.service), $(systemctl show -p ActiveState --value hotserve-backup-drill.service)): $(journalctl -u hotserve-backup.service -u hotserve-backup-drill.service --no-pager | tail -5)"
+if [ "$i" -ge 600 ] && { going hotserve-backup.service || going hotserve-backup-drill.service; }; then
+	die "reinstalled after remove: a run or drill the timer fired is still running after 600s ($(systemctl show -p ActiveState --value hotserve-backup.service), $(systemctl show -p ActiveState --value hotserve-backup-drill.service)): $(journalctl -u hotserve-backup.service -u hotserve-backup-drill.service --no-pager | tail -5)"
+fi
 systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
 for u in $TIMERS; do touch "/var/lib/systemd/timers/stamp-$u"; done
