@@ -9,14 +9,16 @@
 # is reached trivially inside the container. dbus is here because
 # logind (loginctl enable-linger in postinstall) needs the system bus;
 # libpam-systemd is NOT — it is a package Depends, and the smoke test
-# proves apt resolves it.
+# proves apt resolves it. kmod is: every Debian box has it (the kernel's
+# module autoload runs its modprobe), and the smoke test reads the
+# shipped modprobe.d file back through it.
 ARG BASE_IMAGE=debian:13
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus ca-certificates curl \
+		systemd systemd-sysv dbus ca-certificates curl kmod \
 	&& rm -rf /var/lib/apt/lists/*
 
 # The Debian image forbids maintainer scripts to start services

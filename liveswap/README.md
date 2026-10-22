@@ -391,7 +391,7 @@ either delivers it or hotserve does not start with an app configured:
 | PID namespace (`PrivatePIDs=`) — supervisor, user manager and siblings **invisible and unsignalable** |
 | Deny-by-default filesystem: the whole host filesystem replaced by an empty read-only tmpfs, only named paths bound back |
 | hotserve's keys and sockets, other apps, and every path nothing named — **absent**, not merely unreadable |
-| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter less `io_uring_setup`, the native syscall ABI only, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only for `socket()` (`socketpair()` is not filtered: #315), no nested namespaces |
+| Private `/tmp`, minimal `/dev`, read-only cgroupfs, no capabilities, `@system-service` syscall filter less `io_uring_setup`, the native syscall ABI only, `AF_INET`/`AF_INET6`/`AF_UNIX`/`AF_NETLINK` only, with the module-backed protocols under them made unavailable by the package's modprobe.d file (`sctp`, `l2tp_ip`, `l2tp_ip6`, `smc`, and `dccp`, `tipc`, `rds` against a root-loaded module; the package's doing, not a check hotserve makes: #315), no nested namespaces |
 
 `PrivatePIDs=` needs systemd 257, which Debian 13 — the supported
 host — ships, and the `.deb` refuses to install on anything older.

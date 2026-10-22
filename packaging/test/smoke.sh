@@ -193,6 +193,32 @@ systemctl is-active --quiet hotserve-box-apply.path \
 # accept `libpam-systemd (>= 257)`.
 dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxF 'systemd (>= 257)' \
 	|| die "the package does not depend on systemd (>= 257): apt would install it where no app can run"
+# The kernel modules the package makes unavailable, as the shipped
+# modprobe.d file says (liveswap/DESIGN-sandbox.md, "Module-backed
+# protocols"; liveswap/sandbox_promises_test.go owns the list, so
+# nothing here names a module or a count). Read back through modprobe,
+# by module name: `-n -v` prints the install line it would run for the
+# name without running it, so a file it would not parse, or that is
+# not in force, fails here. The kernel asks modprobe for an alias
+# (net-pf-2-proto-132 → sctp on Debian 13's tree), which this
+# container, with no module tree, cannot resolve; that step is
+# modprobe's own, and the dependency case was measured once against
+# Debian's tree (`modprobe dccp_ipv4` stops at dccp's line).
+conf=/usr/lib/modprobe.d/hotserve.conf
+[ "$(stat -c '%a %U:%G' "$conf" 2>&1)" = "644 root:root" ] \
+	|| die "$conf is not installed 0644 root:root: $(stat -c '%a %U:%G' "$conf" 2>&1)"
+n=0
+while read -r directive module cmd; do
+	case "$directive" in '' | '#'*) continue ;; esac
+	[ "$directive $cmd" = "install /bin/false" ] \
+		|| die "$conf: '$directive $module $cmd' is not an 'install <module> /bin/false' line"
+	case "$(modprobe -n -v "$module" 2>&1)" in
+	"install /bin/false"*) ;;
+	*) die "modprobe -n -v $module prints '$(modprobe -n -v "$module" 2>&1)', want 'install /bin/false': the shipped file is not in force" ;;
+	esac
+	n=$((n + 1))
+done <"$conf"
+[ "$n" -gt 0 ] || die "$conf has no install line: the package blocks nothing"
 # The tree as the shipped tmpfiles.d file says, read back off the disk
 # (the file itself is held to the Paths table by box/units_test.go).
 conf=/usr/lib/tmpfiles.d/hotserve-box.conf

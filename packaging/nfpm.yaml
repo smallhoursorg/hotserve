@@ -77,6 +77,15 @@ contents:
     dst: /usr/lib/tmpfiles.d/hotserve-box.conf
     file_info:
       mode: 0644
+  # The kernel modules no app may load (the file's own comment says
+  # which and why; liveswap/DESIGN-sandbox.md, "Module-backed
+  # protocols"). Under /usr/lib, not /etc: an operator's
+  # /etc/modprobe.d/hotserve.conf masks it whole, and dpkg replaces
+  # it on upgrade and removes it on remove without asking.
+  - src: packaging/hotserve.modprobe
+    dst: /usr/lib/modprobe.d/hotserve.conf
+    file_info:
+      mode: 0644
   # The starter config. It is not a conffile: postinstall installs it
   # at /etc/hotserve/Caddyfile where nothing stands, replaces it there
   # only while that file is byte-identical to the starter postinstall

@@ -181,10 +181,14 @@ func TestNoIPCNamespaceWhileControlProcessesCannotJoinIt(t *testing.T) {
 //     executable is refused at the deploy's pre-flight instead
 //     (TestCheckMachineRefusesA32BitExecutable).
 //
-// One is open, and nothing here pins it: socketpair(2), which the
-// filter does not cover, in a family that supports it, AF_TIPC among
-// them (owed: #315). Denying socketpair is not an option: Node's
-// child_process uses it.
+// The third call that makes a socket, socketpair(2), the filter does
+// not cover either, and on Debian 13 it gives an app no socket outside
+// AF_UNIX: only AF_TIPC implements it besides in 6.12, and tipc has
+// no autoload alias, so it loads only by root's hand, which the
+// package's modprobe.d file refuses too
+// (TestPackageBlocksTheModuleBackedProtocols, #315). It still loads
+// any aliased family's module, an accepted residual. Denying
+// socketpair was never an option: Node's child_process uses it.
 //
 // The filter's order is half the promise. The manager builds a unit's
 // filter in the mode of the first SystemCallFilter= it reads: the
@@ -219,6 +223,43 @@ func TestTwoRoutesAroundTheAddressFamilyFilterAreClosed(t *testing.T) {
 	}
 	if !denied {
 		t.Errorf("io_uring_setup is still allowed: an io_uring ring opens sockets RestrictAddressFamilies= never sees: %+v", filters)
+	}
+}
+
+// Promise: "the `.deb` MUST ship `/usr/lib/modprobe.d/hotserve.conf`
+// with `install <module> /bin/false`" for the module-backed protocols
+// an admitted family lets an app name (DESIGN-sandbox.md,
+// "Module-backed protocols"). The family list says nothing about the
+// protocol number, and the kernel loads a protocol's module on the
+// first socket() that names it, as any user: sctp, l2tp_ip, l2tp_ip6
+// and smc are modules on Debian 13, carry the alias, and gate nothing
+// at creation; dccp, tipc and rds load only by root's hand (Debian
+// strips the first two's aliases) and complete the CIS Debian set. This
+// holds the shipped file to that list, in order and with nothing else
+// in it; the install-test lane reads the installed file back through
+// `modprobe -n -v`. The file lives in packaging/ because the `.deb`
+// ships it, as box/units_test.go reads the applier's units from there.
+func TestPackageBlocksTheModuleBackedProtocols(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "packaging", "hotserve.modprobe"))
+	if err != nil {
+		t.Fatalf("the package's modprobe.d file: %v", err)
+	}
+	want := []string{"dccp", "sctp", "l2tp_ip", "l2tp_ip6", "smc", "tipc", "rds"}
+	var got []string
+	for n, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) != 3 || f[0] != "install" || f[2] != "/bin/false" {
+			t.Errorf("line %d: %q is not an `install <module> /bin/false` line: anything else would load, or hide the refusal", n+1, line)
+			continue
+		}
+		got = append(got, f[1])
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the package blocks %v, want %v (the design's list; change both together)", got, want)
 	}
 }
 

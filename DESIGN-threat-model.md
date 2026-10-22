@@ -992,9 +992,16 @@ it binds nothing of an app's and has no socket.
   opens a socket of any family without that call, so no unit can set
   up a ring; and on amd64 the x86-32 ABI's `socketcall()` is not
   filtered at all, so no unit runs that ABI (the pre-flight refuses a
-  32-bit executable). One is open: `socketpair(2)`, which the list does
-  not filter, in a module-backed family that supports it, such as
-  `AF_TIPC` (owed: #315).
+  32-bit executable). `socketpair(2)` gives no socket outside
+  `AF_UNIX`: only `AF_TIPC` implements it besides in 6.12, and `tipc`
+  has no autoload alias, so it loads only by root's hand, which the
+  package's modprobe.d file refuses as well. The list filters no
+  protocol number, and the kernel loads a protocol's module on the
+  first `socket()` naming it, so the `.deb` makes the module-backed
+  protocols under `AF_INET`/`AF_INET6` unavailable
+  (`/usr/lib/modprobe.d/hotserve.conf`: `sctp`, `l2tp_ip`, `l2tp_ip6`,
+  `smc`, and `dccp`, `tipc` and `rds` against a root-loaded module).
+  Module loads that give no socket stay (Residual risks; #315).
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
   restarter of apps; hotserve.service itself is restarted by systemd
   after a crash, never after a refused start), `KillMode=control-group`,
@@ -1162,6 +1169,24 @@ does not isolate the runtime.
   of a unit gets its own user namespace, so the unit's `ExecStopPost=`
   cannot join the IPC namespace its main process made and fails
   226/NAMESPACE (measured), and it would leave `/dev/shm` shared.
+- **Kernel module loads an app can trigger** — open, accepted by
+  decision (owner, 2026-10-22; S3 × O3 × D5 = 45;
+  liveswap/DESIGN-sandbox.md, "Module-backed protocols"). `AF_NETLINK`
+  is admitted for `getifaddrs()`, and a `socket(AF_NETLINK, SOCK_RAW,
+  n)` loads the module for protocol `n` as any user (`nfnetlink`,
+  `xfrm_user`, `crypto_user`, `ib_core`, `scsi_transport_iscsi` on
+  Debian 13), as a generic-netlink `GETFAMILY` by name loads any
+  module with a family alias; `socketpair()` loads any aliased
+  family's module and runs its create path, then fails with no socket.
+  A compromised app reaches those modules' init and request parsers
+  and the few requests they answer unprivileged: `crypto_user`'s
+  `GETALG` report, `sock_diag`'s socket dumps; `nfnetlink` and
+  `xfrm_user` refuse it at their first check. systemd has no filter
+  for a protocol argument; blocking `nfnetlink` breaks nftables; a
+  longer modprobe.d list (the family modules, `crypto_user`) is
+  possible and not decided. The protocols under `AF_INET`/`AF_INET6`
+  that would give a live socket are closed by the package's modprobe.d
+  file.
 - **A syscall filter the kernel refused** — accepted by decision (user,
   2026-10-19; S5 × O5 × D5 = 125, scores to fix). On a host whose user
   manager already runs under a long outer seccomp chain, the kernel can
@@ -1358,3 +1383,8 @@ Dated one-liners; the full text of each is in git.
   routes to a socket of a family `RestrictAddressFamilies=` leaves out;
   `socketpair(2)` is the one left (#315). Sibling IPC joined the
   residual risks (#311).
+- 2026-10-22 (#315) — `socketpair(2)` gives no socket outside `AF_UNIX`
+  on Debian 13 (`tipc`, the one other family implementing it, has no
+  autoload alias). The `.deb` makes the module-backed protocols under
+  `AF_INET`/`AF_INET6` unavailable through modprobe.d; module loads
+  that give no socket joined the residual risks, accepted by decision.

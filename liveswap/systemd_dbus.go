@@ -430,8 +430,11 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		{Name: "LockPersonality", Value: godbus.MakeVariant(true)},
 		// AF_NETLINK stays: getifaddrs() — Node's os.networkInterfaces(),
 		// Go's net.Interfaces(), which frameworks call at startup — needs
-		// a read-only netlink socket, and with an empty capability set
-		// netlink cannot change anything.
+		// a netlink socket. A route, link or address change needs
+		// CAP_NET_ADMIN, which the empty capability set denies; what a
+		// generic-netlink family admits unprivileged is its own rule,
+		// and the modules a netlink socket can load are an accepted
+		// residual (DESIGN-sandbox.md, "Module-backed protocols").
 		{Name: "RestrictAddressFamilies", Value: godbus.MakeVariant(allowList{true, []string{"AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"}})},
 		{Name: "SystemCallFilter", Value: godbus.MakeVariant(allowList{true, []string{"@system-service"}})},
 		// Less io_uring_setup, which @system-service admits through @aio.
