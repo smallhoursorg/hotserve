@@ -583,7 +583,7 @@ func TestAProgramIsOneEveryAccountCanRun(t *testing.T) {
 func TestAResticThatCannotRunIsNotInstalled(t *testing.T) {
 	b, m := setupBox(t)
 	b.haveProgram = func(p string) bool { return p != b.cfg.Restic }
-	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || !strings.Contains(err.Error(), "is not installed at /usr/bin/restic") {
+	if _, err := b.setup(t, m, "s3:http://e2e-s3:9000/box"); err == nil || !strings.Contains(err.Error(), "restic, the backup program hotserve-backup runs, is not installed") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(m.asked) != 0 {

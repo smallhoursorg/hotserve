@@ -303,7 +303,7 @@ func TestADrillStoppedWhileItWaitsIsNoVerdict(t *testing.T) {
 	}
 	st, err = record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
 	must(t, err)
-	if st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "is not installed at /usr/bin/restic") || !strings.Contains(st.Warning, "could not be read and was replaced") {
+	if st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, "restic, the backup program hotserve-backup runs, is not installed") || !strings.Contains(st.Warning, "could not be read and was replaced") {
 		t.Fatalf("the record: last drill %+v, warning %q", st.LastDrill, st.Warning)
 	}
 }
