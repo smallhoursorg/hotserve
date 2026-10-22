@@ -315,7 +315,9 @@ boxes, and any CI that gives it what the Actions job does can run it:
 
 The rules above hold on any host: a merge button that squashes,
 rebases or writes its own merge commit lands a commit no listed key
-signed.
+signed. hotserve's
+[Deploying from outside GitHub](https://github.com/smallhoursorg/hotserve/blob/main/docs/outside-github.md)
+walks through both ways, and an app's deploy from the same runner.
 
 ## More than one box
 

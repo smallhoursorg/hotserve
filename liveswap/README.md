@@ -751,6 +751,10 @@ Presets:
   control, for non-CI deploys. Generate it with `hotserve
   deploy-keygen`, mint tokens with `hotserve deploy-token`.
 
+[docs/outside-github.md](../docs/outside-github.md) walks through the
+`gitlab`, `oidc` and `local` presets end to end: a key's two halves,
+a job on another CI, and the token's format for minting it elsewhere.
+
 Sub-directives: `audience` (required for OIDC — never trust an
 unaudienced token; for `local`, the name of this box, see below),
 `claim <name> <value>` (exact-match, repeatable — pin `repository`,

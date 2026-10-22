@@ -1,0 +1,341 @@
+# Deploying from outside GitHub
+
+[Your first deploy](first-deploy.md) deploys from GitHub Actions, with
+a token GitHub mints for each run and nothing stored anywhere. The box
+takes more than that: a token from any other CI's OpenID Connect
+(OIDC) issuer, GitLab's among them, or a token you mint yourself with
+a key, from a runner that has no OIDC at all, or from a laptop. This
+page walks through those: choosing the trust, a key end to end, an
+app's deploy and the box's own config from another runner, and
+minting a token where there is no Linux `hotserve` to mint it with.
+
+Everything here is the box's `deploy_trust` block, whose reference is
+in [liveswap/README.md](../liveswap/README.md#deploy-authentication-deploy_trust).
+Names are the ones from the first page.
+
+## 1. Choosing the trust
+
+A deploy, and a push of the box's config, carries one bearer token,
+and the box accepts it if a `deploy_trust` block for that app (or the
+`box` block, for config) verifies it. Four presets:
+
+| Preset | Who mints the token | What the box stores | What it needs pinned |
+|---|---|---|---|
+| `github` | GitHub Actions, per run | nothing | `audience`, and `claim repository` with `claim ref` |
+| `gitlab` | GitLab CI, per job (`id_tokens:`); `issuer https://gitlab.example.com` for a self-hosted instance, `https://gitlab.com` otherwise | nothing | `audience`, and `claim project_path` with `claim ref_path` |
+| `oidc` | any other OIDC issuer: `issuer <url>` | nothing | `audience`, `issuer`, and `subject` (the issuer's own form of `sub`) |
+| `local` | you, with `hotserve deploy-token` and a private key | the public half of your key, a file on the box | `public_key`, and `audience` (the box's name) |
+
+What each costs:
+
+- **OIDC** stores nothing. The box fetches the issuer's public keys
+  over https and checks each token against them; a token is minted
+  for the job and dies with it. An `audience` alone is refused when
+  the config loads: every project on the issuer can mint a token for
+  any audience, so the block must also pin who, with an identity claim
+  (`repository`, `project_path`, or `sub` for the generic preset). Pin
+  the branch too, or a workflow edited on any branch deploys; the box
+  warns about a block that does not.
+- **A key** is a stored secret: the private half sits in the runner's
+  secret store, or on a laptop, and whoever reads it can deploy until
+  you remove the public half from the box. For an app, the key is the
+  whole deploy credential. Pinning a `claim` on a `local` block adds
+  nothing to that: the key's holder writes the claims when they mint,
+  so a pin only says what the token must contain, not who holds the
+  key. For the box's config the key is weaker than it looks: a push
+  applies only when a key on the box's own `signer` list signed every
+  commit, so a stolen deploy key sends config but cannot land any.
+
+Use OIDC where the runner has it. A key is for a runner that does
+not, and for a laptop.
+
+## 2. A key, end to end
+
+On a Linux machine with `hotserve` on it, or in a container
+([section 5](#5-minting-without-a-linux-hotserve)):
+
+```sh
+hotserve deploy-keygen --out example.key
+```
+
+```
+wrote private key example.key (0600) and public key example.key.pub
+```
+
+An ed25519 pair: the private key as PKCS#8 PEM, the public key as
+PKIX PEM. The command never overwrites: a name that exists is refused,
+so a second key gets a second `--out`.
+
+**Where each half goes.** The public key is a file the box reads, so
+it goes to the box over SSH, as root, before the config that names it:
+
+```sh
+scp example.key.pub root@box.example.com:/etc/hotserve/example.pub
+```
+
+Then, in the box's repository, the app's block trusts it:
+
+```caddyfile
+app example {
+	# …
+	deploy_trust local {
+		public_key /etc/hotserve/example.pub
+		audience deploy.example.com
+	}
+}
+```
+
+Commit, signed, and push: the box validates the file (the key must
+already be there, or the push is refused naming the path), installs
+it and reloads. The `audience` names this box: a token minted for
+another box that trusts the same key is refused here, and the box
+warns at load about a `local` block with none.
+
+The private key goes into the runner's secret store (a GitLab CI
+variable of type *File*, say), or stays in a directory of your own on
+the laptop. Nowhere else: not in the app's repository, not on the
+box.
+
+**The check job.** The box repository's `make check` runs `hotserve
+validate` on each box's file as it stands in the checkout, and
+validating loads every `public_key` from the path the file names. On
+the runner that path is empty, and the check fails naming it. The
+public key is public, so commit a copy beside the file and put it in
+place in the check job before `make check`:
+
+```sh
+sudo install -D -m 644 deploy.example.com/example.pub /etc/hotserve/example.pub
+```
+
+**Minting.** One token per run, as late as the step that uses it:
+
+```sh
+HOTSERVE_TOKEN=$(hotserve deploy-token --key example.key --audience deploy.example.com)
+```
+
+The token lives for `--ttl` from now, five minutes unless you say
+otherwise, and whoever reads it can deploy until then. The box refuses
+one minted to live longer than its block's `max_token_ttl`, 24 hours
+unless the block sets one, and the command warns on stderr above an
+hour. `--subject <name>` puts a `sub` claim in it, which the box's
+journal and deploy records show as `deployed_by`; `--claims k=v,k2=v2`
+adds any other claim.
+
+**One key per app, and one for the box.** A key is the credential for
+what trusts it, so give each app its own, and the box's `box` block
+another. A key removed from one block then stops one thing.
+
+**Rotation.** Make the new pair, copy its public half to the box under
+a new name, and add a second `deploy_trust local` block beside the old
+one, pointing at it. Push that. Swap the runner's secret for the new
+private key. Then remove the old block, push again, and delete the old
+`.pub` from the box. Two blocks accept either token in between, so no
+run is refused on the way. A key you believe stolen skips the overlap:
+remove its block and push.
+
+## 3. An app's deploy from another runner
+
+The app templates deploy with `scripts/deploy.sh`, which runs anywhere
+there is `sh`, `curl` and git. Outside GitHub
+Actions it reads the token from `HOTSERVE_TOKEN` and otherwise behaves
+as the first page describes. What it takes:
+
+| Variable | What it is |
+|---|---|
+| `HOTSERVE_URL` | the app's webhook, `https://deploy.example.com/example`; `https://` only, since the request carries the token |
+| `HOTSERVE_TOKEN` | the token (section 2's, or the CI's own OIDC token) |
+| `VERSION` | the release's version; the commit's first 12 characters unless set. Versions are immutable on the box, so the default deploys once per commit |
+
+There are two ways to hand the box the release:
+
+- **Push the tarball in the request** — `scripts/deploy.sh app.tar.gz`
+  with a file. No release host, no `artifact_allowlist` entry, and the
+  bytes come straight from the authenticated caller, capped at the
+  app's `max_artifact_size`. This is the path for a runner that
+  publishes nothing, and for a laptop. The checkout must be clean of
+  uncommitted changes to tracked files, or the script refuses to label
+  the build with the commit's name: set `VERSION` for an uncommitted
+  build.
+- **Give the box a URL** — `scripts/deploy.sh https://…/app.tar.gz`.
+  The box fetches it, so the URL's host must be in the box's
+  `artifact_allowlist`, path pinned on a shared host. Two more
+  variables then help: `ARTIFACT_AUTH_HEADER`, sent verbatim as
+  `Authorization` on the fetch, for a private host; and
+  `ARTIFACT_SHA256`, the tarball's digest as `sha256sum` prints it, so
+  the box refuses a download that hashes to anything else. The GitHub
+  workflow sends both.
+
+A job on **GitLab CI**, with the Node template's build and GitLab's
+own token (`id_tokens:` sets the variable it names to a fresh OIDC
+token for the job, with the audience given):
+
+```yaml
+deploy:
+  stage: deploy
+  image: node:26
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  id_tokens:
+    HOTSERVE_TOKEN:
+      aud: hotserve
+  variables:
+    HOTSERVE_URL: https://deploy.example.com/example
+  script:
+    - npm run bundle
+    - scripts/deploy.sh app.tar.gz
+```
+
+and the app's block on the box:
+
+```caddyfile
+deploy_trust gitlab {
+	audience hotserve
+	claim project_path your-group/example
+	claim ref_path refs/heads/main
+}
+```
+
+That shape is written from GitLab's documentation of its ID tokens and
+their claims, and from the box's code. It has not been run against a
+real GitLab project; if you do, say so in an issue.
+
+Any **other OIDC issuer** (CircleCI, Buildkite, a Kubernetes cluster)
+is the `oidc` preset: its `issuer`, the `audience` you asked the
+provider to mint for, and the `subject` the provider puts in `sub`,
+whose form is the provider's own. The box requires the subject: with
+only an audience, every workload on the issuer could deploy.
+
+```caddyfile
+deploy_trust oidc {
+	issuer https://oidc.circleci.com/org/<org-id>
+	audience hotserve
+	subject <the provider's sub for this project>
+}
+```
+
+With a **key** on a runner without OIDC, the job mints its own token
+and the rest is the same:
+
+```sh
+HOTSERVE_TOKEN=$(hotserve deploy-token --key "$DEPLOY_KEY" --audience deploy.example.com) \
+HOTSERVE_URL=https://deploy.example.com/example scripts/deploy.sh app.tar.gz
+```
+
+where `DEPLOY_KEY` is the path the secret store wrote the private key
+to, and `hotserve` is on the runner's `PATH`
+([section 5](#5-minting-without-a-linux-hotserve) has how it gets there).
+One token serves the one request, so the default five minutes is
+enough: the box checks it when the request arrives, however long the
+deploy then takes.
+
+A **401** from any of these means the box's block for the app does
+not accept the token, and the script prints what the token was minted
+with, for you to hold against the block. The box's own answer says no
+more, by design; its journal names the check that refused it
+(`journalctl -u hotserve`, the `webhook auth failed` lines).
+
+## 4. The box's config from another runner
+
+Only the workflow file in the box's repository is GitHub's. `bin/apply`
+is what talks to each box, and any runner that gives it what the
+Actions job does can run it:
+
+- **A checkout with its full history.** The box checks every commit
+  between the one it runs and the one being sent, and `bin/apply`
+  bundles them from the checkout; a shallow clone is refused with a
+  message saying so. On GitLab, that is the project's *Git shallow
+  clone* setting, or `GIT_DEPTH` set to `0` on the job.
+- **`hotserve` on `PATH`.** `bin/apply` runs `hotserve box webhook` to
+  read each box's address from its file; `bin/install-hotserve
+  default` installs the latest release's binary with `sudo` (a Linux
+  runner; `curl`, `sha256sum` and `tar` must be there), or
+  [section 5](#5-minting-without-a-linux-hotserve) says where the
+  binary comes from. `HOTSERVE=/path/to/hotserve` names it when it is
+  not on `PATH`.
+- **`HOTSERVE_TOKEN`**, a token the `box` block's `deploy_trust`
+  accepts, carrying a `sha` claim that names the commit being sent.
+  The box refuses a bundle for any other commit. `bin/apply` sends
+  this one token with every request, the result polls included, and a
+  push can be polled for up to 30 minutes, so the token must outlive
+  the run: `--ttl 1h`.
+
+With a key, the `box` block trusts it like an app's would, and the
+job mints:
+
+```sh
+HOTSERVE_TOKEN=$(hotserve deploy-token --key "$BOX_KEY" --audience hotserve --ttl 1h --claims sha=$(git rev-parse HEAD)) bin/apply
+```
+
+hotserve's own end-to-end suite runs `bin/apply`, unchanged, this
+way: a `deploy_trust local` block on the box, a token naming the
+commit, every answer the real box's.
+
+With **GitLab's token** the `sha` claim comes for free: GitLab's ID
+tokens carry the pipeline's commit as `sha`, so a `box` block of
+
+```caddyfile
+box {
+	deploy_trust gitlab {
+		audience hotserve
+		claim project_path your-group/boxes
+		claim ref_path refs/heads/main
+	}
+	# signers
+}
+```
+
+and a job with `id_tokens: { HOTSERVE_TOKEN: { aud: hotserve } }`, a
+full clone, `hotserve` installed, and `bin/apply` as its script, is
+the Actions job on GitLab. Untested, as above.
+
+Whatever mints the token, the rules of the box's repository hold: a
+commit no listed key signed is refused, and so is a merge button that
+rewrites one. The runner sends config; the signatures decide whether
+it lands.
+
+## 5. Minting without a Linux `hotserve`
+
+hotserve is built for Linux on amd64 and arm64, and nothing else:
+`hotserve deploy-token` does not run on a Mac. Two ways round it.
+
+**A Linux container.** Each release's bare binary is on its releases
+page as `hotserve_<version>_linux_<arch>.tar.gz`, beside a
+`checksums.txt`, and runs in any Debian 13 container. With the private
+key in the current directory:
+
+```sh
+docker run --rm -v "$PWD:/w" -w /w debian:13-slim sh -c '
+  apt-get -qq update && apt-get -qq install -y curl ca-certificates >/dev/null &&
+  v=0.3.1 && arch=$(dpkg --print-architecture) &&
+  curl -fsSLO https://github.com/smallhoursorg/hotserve/releases/download/v$v/hotserve_${v}_linux_$arch.tar.gz &&
+  curl -fsSLO https://github.com/smallhoursorg/hotserve/releases/download/v$v/checksums.txt &&
+  sha256sum -c --ignore-missing checksums.txt >/dev/null &&
+  tar -xzf hotserve_${v}_linux_$arch.tar.gz hotserve &&
+  ./hotserve deploy-token --key example.key --audience deploy.example.com'
+```
+
+Set `v` to the release the box runs, from its releases page. The same
+tarball is how a runner that is not Debian gets its `hotserve`: unpack
+it and put the binary on `PATH`.
+
+**Any JWT library.** A `local` token is a plain JSON Web Token, so
+anything that signs one can mint it, in any language on any machine:
+
+- Signed with the private key from `deploy-keygen` (ed25519, PKCS#8
+  PEM), algorithm `EdDSA`. The box accepts no other algorithm on a
+  `local` block.
+- Header `{"alg":"EdDSA","typ":"JWT"}`.
+- Claims the box checks:
+  - `aud`: the block's `audience`, as a string or in an array;
+  - `iat` and `exp`, both required, in seconds; `exp` at most
+    `max_token_ttl` after `iat`, and not yet past, with 60 seconds of
+    leeway for clock skew;
+  - every `claim` the block pins, as a string that matches exactly
+    (`sub` for `subject`), and for the box's config `sha`, the full
+    commit id, which the handler compares with the bundle's.
+- An `nbf`, if you add one, is checked with the same leeway. Anything
+  else is carried, not checked. `deploy-token` adds a random `jti` and
+  the `--subject` and `--claims` you give it.
+
+A token minted this way is accepted exactly as `deploy-token`'s is, and
+refused for the same reasons, which the box's journal names.
