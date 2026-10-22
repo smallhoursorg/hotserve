@@ -1472,7 +1472,10 @@ dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03
 for u in hotserve-backup.service hotserve-backup-drill.service; do
 	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
 	t=${u%.service}.timer
-	case $t in hotserve-backup.timer) period=3600 ;; *) period=604800 ;; esac
+	# The period is the unit's OnCalendar= by hand: held to the unit.
+	case $t in hotserve-backup.timer) period=3600; cal='\*-\*-\* \*:00:00' ;; *) period=604800; cal='Sun \*-\*-\* 03:30:00' ;; esac
+	systemctl show -p TimersCalendar --value "$t" | grep -q "OnCalendar=$cal ;" \
+		|| die "reinstalled after remove: $t's calendar is '$(systemctl show -p TimersCalendar --value "$t")', not the ${period}s period this check takes"
 	i=0
 	until next=$(systemctl show -p NextElapseUSecRealtime --value "$t") && [ -n "$next" ] || [ "$i" -ge 600 ]; do
 		i=$((i + 1))
@@ -1501,8 +1504,8 @@ until [ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != ac
 	i=$((i + 1))
 	sleep 1
 done
-[ "$(systemctl show -p ActiveState --value hotserve-backup.service)" != activating ] && [ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" != activating ] \
-	|| die "reinstalled after remove: a run or drill the timer fired is still running after 600s: $(journalctl -u hotserve-backup.service -u hotserve-backup-drill.service --no-pager | tail -5)"
+[ "$i" -lt 600 ] \
+	|| die "reinstalled after remove: a run or drill the timer fired is still running after 600s ($(systemctl show -p ActiveState --value hotserve-backup.service), $(systemctl show -p ActiveState --value hotserve-backup-drill.service)): $(journalctl -u hotserve-backup.service -u hotserve-backup-drill.service --no-pager | tail -5)"
 systemctl start hotserve-backup.service || die "a run after the reinstall failed: $(journalctl -u hotserve-backup.service --no-pager | tail -20)"
 [ "$(systemctl show -p Result --value hotserve-backup.service)" = success ] || die "the run after the reinstall ended '$(systemctl show -p Result --value hotserve-backup.service)'"
 for u in $TIMERS; do touch "/var/lib/systemd/timers/stamp-$u"; done
