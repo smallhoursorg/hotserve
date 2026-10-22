@@ -645,8 +645,8 @@ func TestADrillOfOneAppFailingIsThatAppsOwnAndAnInterruptIsNoVerdict(t *testing.
 	b.install = `{"plan":{"files":["uploads"]},"items":[{"kind":"files","path":"uploads","class":"ok"}]}`
 	failBlog := true
 	b.before = func(s unit.Spec) {
-		// Exit 1 of a fetch is a full disk before it is anything else:
-		// the app after it is drilled all the same.
+		// Exit 1 of a fetch is that fetch's own, whatever restic's
+		// words name: the app after it is drilled all the same.
 		if strings.Contains(s.Name, "_fetch_blog_") && failBlog {
 			b.outcome["fetch"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 		} else {

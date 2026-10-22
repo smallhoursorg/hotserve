@@ -61,9 +61,11 @@ records() { rr snapshots --no-lock --json --host hotserve --tag hotserve-clean 2
 # db_pack <snapshot>: the pack that holds the first blob of blog's
 # database in that snapshot, from the snapshot's own tree and the
 # repository's index — data a fetch of blog must read; not a tree, which
-# a run after must still be able to read, and not a record's.
+# a run after must still be able to read, and not a record's. The
+# sqlite tree holds one node, the database's copy, so its first content
+# blob is the database's whatever else the node carries.
 db_pack() {
-	blob=$(rr cat tree --no-lock "$1:/backup/blog/sqlite" 2>/dev/null | tr -d ' \n' | sed -n 's/.*"name":"app.db"[^}]*"content":\["\([0-9a-f]\{64\}\)".*/\1/p')
+	blob=$(rr cat tree --no-lock "$1:/backup/blog/sqlite" 2>/dev/null | tr -d ' \n' | grep -o '"content":\["[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4)
 	[ -n "$blob" ] || return 1
 	for i in $(rr list index --no-lock 2>/dev/null); do
 		rr cat index --no-lock "$i" 2>/dev/null | tr -d '\n' | sed 's/{"id":"\([0-9a-f]\{64\}\)","blobs":\[/\n\1 /g' | grep "\"id\":\"$blob\"" | cut -d' ' -f1
@@ -118,7 +120,13 @@ hotserve-backup status >/root/status.out 2>&1 && grep -q "repository last checke
 
 echo "=== check 3: a pack gone from the storage is damage, and backups go on ==="
 pack=$(db_pack "$blog_id")
-[ -n "$pack" ] || fail "fixture: no pack holding blog's database in the index"
+# Fatal, not a fail: with no pack the delete below would answer 204 for
+# a key that is not there, and the rest of this check would read a sound
+# repository.
+[ -n "$pack" ] || {
+	echo "FATAL: no pack holding blog's database in the index: $(rr cat tree --no-lock "$blog_id:/backup/blog/sqlite" 2>&1 | head -c 400)"
+	exit 1
+}
 code=$(s3_delete "checkrepo/data/$(echo "$pack" | cut -c1-2)/$pack")
 [ "$code" = 204 ] && pass "fixture: pack $(echo "$pack" | cut -c1-8), holding blog's database, deleted through the storage's API" || fail "fixture: the delete answered $code"
 if drill; then fail "a drill of a repository missing a pack exited 0"; else pass "a drill of a repository missing a pack exits non-zero"; fi
@@ -128,6 +136,10 @@ if drill; then fail "a drill of a repository missing a pack exited 0"; else pass
 # names no cause, and points at restic's words.
 short=$(echo "$blog_id" | cut -c1-8)
 says "^blog: restore not proven: snapshot $short: fetching snapshot $short: restic could not restore all of it (exit 1); \`journalctl -u hotserve_backup_fetch_blog_[0-9a-f]*\.service\` has restic's own words (last proven: snapshot $short, on " && pass "blog's restore is not proven: its fetch failed, and the drill points at restic's own words, naming no cause" || fail "blog's line: $(grep '^blog:' "$OUT")"
+# That failure is blog's own: shop, whose pack is there, is drilled and
+# proven all the same (a fetch's exit 1 was once repository-wide, and
+# one app's full disk skipped every app after it).
+says "^shop: restore proven: snapshot " && pass "and shop is proven all the same: a fetch's exit 1 is that app's own" || fail "shop's line: $(grep '^shop:' "$OUT")"
 # A second check reads the group after the first's; and the count is
 # restic's — two where the pack gone is in the group read as well.
 says "^repository: its structure, and data group $NEXT: damaged: restic check found [0-9][0-9]* errors*; a prune run off the box, or the storage failing, during the check looks the same, and the next check reads this group again; restic's own words: \`journalctl -u hotserve_backup_repocheck_[0-9a-f]*.service\`$" && pass "and says damaged, how much, and where restic's words are, of the group after the last one read, $NEXT" || fail "the drill said: $(cat "$OUT")"
