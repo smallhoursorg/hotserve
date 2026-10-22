@@ -280,11 +280,14 @@ type systemdHandle struct {
 	// unit could not be read back (readBackCaps): caps is then the
 	// last known, not the applied, and no sync may take it as such.
 	capsUnknown atomic.Bool
-	// cgroup is the unit's cgroup path as read at adopt or reattach,
-	// and unenforced the directives whose controller does not reach it
-	// (unenforcedCaps); written with caps, read by state.
+	// cgroup is the unit's cgroup path as read at adopt, at reattach or
+	// by the watcher's backfill, and unenforced the directives whose
+	// controller does not reach it (unenforcedCaps). Written only by
+	// setCapsState, under capsLock, so the list is always the one
+	// computed from the caps beside it; read lock-free by state.
 	cgroup     atomic.Pointer[string]
 	unenforced atomic.Pointer[[]string]
+	capsLock   sync.Mutex
 	done       chan struct{}
 	exit       atomic.Pointer[unitStatus] // final status, set before done closes
 }
@@ -342,18 +345,35 @@ func unenforcedCaps(root, cg string, caps resourceCaps) []string {
 	return missing
 }
 
-// noteUnenforced records which of caps the unit's cgroup cannot
-// enforce, and says so once in the journal: a cap that reads as set
-// and bounds nothing is the "looks configured, quietly weaker" shape
-// this code refuses to present as effective (status lists them apart).
-func (r *systemdRunner) noteUnenforced(h *systemdHandle, caps resourceCaps) {
+// setCapsState is the one writer of a handle's caps, cgroup path and
+// unenforced list. Under the handle's lock, so the watcher's backfill
+// of the cgroup path and a reload's SetCaps cannot leave the list
+// computed from the other's caps: whichever writes last recomputes
+// from both as they then are. A nil caps or cgroup leaves that field
+// as it is. A cap that reads as set and bounds nothing is the "looks
+// configured, quietly weaker" shape this code refuses to present as
+// effective: it is said once in the journal per change of the list,
+// and status lists such caps apart.
+func (r *systemdRunner) setCapsState(h *systemdHandle, caps *resourceCaps, cgroup *string) {
+	h.capsLock.Lock()
+	defer h.capsLock.Unlock()
+	if caps != nil {
+		h.caps.Store(caps)
+	}
+	if cgroup != nil && *cgroup != "" {
+		h.cgroup.Store(cgroup)
+	}
+	var cur resourceCaps
+	if c := h.caps.Load(); c != nil {
+		cur = *c
+	}
 	cg := ""
 	if p := h.cgroup.Load(); p != nil {
 		cg = *p
 	}
-	missing := unenforcedCaps(cgroupRoot, cg, caps)
-	h.unenforced.Store(&missing)
-	if len(missing) > 0 {
+	missing := unenforcedCaps(cgroupRoot, cg, cur)
+	prev := h.unenforced.Swap(&missing)
+	if len(missing) > 0 && (prev == nil || strings.Join(*prev, ",") != strings.Join(missing, ",")) {
 		r.log().Warn("resource caps the host does not enforce: the user manager does not delegate their controller to the unit's cgroup, so the kernel bounds nothing; status lists them as caps_unenforced",
 			zap.String("unit", h.unit), zap.Strings("caps", missing), zap.String("cgroup", cg))
 	}
@@ -656,13 +676,12 @@ func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 		r.readBackCaps(sh)
 		return fmt.Errorf("setting the caps of unit %s: %w", sh.unit, err)
 	}
-	sh.caps.Store(&applied)
+	r.setCapsState(sh, &applied, nil)
 	// Settled only for what was written: a tasks cap left as it was
 	// (no default to lift to) stays as uncertain as it was.
 	if caps.tasksMax > 0 || lift > 0 {
 		sh.capsUnknown.Store(false)
 	}
-	r.noteUnenforced(sh, applied)
 	return nil
 }
 
@@ -679,7 +698,10 @@ func (r *systemdRunner) readBackCaps(sh *systemdHandle) {
 		return
 	}
 	caps := r.unitCaps(ctx, us)
-	sh.caps.Store(&caps)
+	// The cgroup path with it, and the enforcement recomputed from
+	// what the manager says the unit now carries: a cap the failed
+	// write did apply is listed as the host enforces it, or not.
+	r.setCapsState(sh, &caps, &us.ControlGroup)
 	sh.capsUnknown.Store(false)
 }
 
@@ -705,8 +727,7 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
 		h.setArgv(st.ExecStart)
-		h.cgroup.Store(&st.ControlGroup)
-		r.noteUnenforced(h, caps)
+		r.setCapsState(h, nil, &st.ControlGroup)
 		// Spelled as sandboxProperties spells it (systemd_dbus.go):
 		// every unit gets PrivatePIDs=, so every unit has the
 		// intermediate PID to settle past.
@@ -1025,9 +1046,7 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		// while hotserve was down may no longer be: syncCaps (app.go)
 		// compares them with the spec's once the instance is current.
 		caps := r.unitCaps(ctx, us)
-		h.caps.Store(&caps)
-		h.cgroup.Store(&us.ControlGroup)
-		r.noteUnenforced(h, caps)
+		r.setCapsState(h, &caps, &us.ControlGroup)
 		go r.watch(h)
 		return h, true, nil
 	}
@@ -1179,6 +1198,12 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 		// that crashes before the first good poll would otherwise take
 		// its command to the grave. A terminal snapshot still has it.
 		h.setArgv(st.ExecStart)
+		// The cgroup path too, for the same reason: a start whose status
+		// read failed has none, and without it no later SetCaps can tell
+		// which of its caps the host enforces.
+		if h.cgroup.Load() == nil && st.ControlGroup != "" {
+			r.setCapsState(h, nil, &st.ControlGroup)
+		}
 		if st.running() {
 			// The handle follows the unit's MainPID: a read that failed
 			// right after start is repaired here, and so is the pid of a

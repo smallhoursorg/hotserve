@@ -284,6 +284,72 @@ func TestSetCapsFailureReadsTheUnitBack(t *testing.T) {
 	}
 }
 
+// A start whose status read failed has no cgroup path, so nothing can
+// say which of its caps the host enforces; the watcher backfills the
+// path on its first good read, and the enforcement with it. A
+// read-back after an ambiguous SetCaps recomputes it too, from what
+// the manager says the unit now carries.
+func TestWatcherAndReadBackRefreshEnforcement(t *testing.T) {
+	root := t.TempDir()
+	cg := "/user.slice/user-1000.slice/user@1000.service/app.slice/x.service"
+	if err := os.MkdirAll(root+cg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("pids cpu\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := cgroupRoot
+	cgroupRoot = root
+	t.Cleanup(func() { cgroupRoot = old })
+
+	f := newFakeSystemdConn()
+	f.defaultTasksMax = 2273
+	unit := "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service"
+	running := unitStatus{Name: unit, LoadState: "loaded", ActiveState: "active", MainPID: 4242, Sandboxed: true, ControlGroup: cg}
+	f.mu.Lock()
+	f.status[unit] = running
+	f.mu.Unlock()
+	r := newSystemdRunner(f, zap.NewNop())
+	r.poll = 10 * time.Millisecond
+	t.Cleanup(r.close)
+	// A handle adopted with no status read: caps, no cgroup path.
+	h := &systemdHandle{unit: unit, done: make(chan struct{})}
+	h.caps.Store(&resourceCaps{memoryMax: 1 << 20, tasksMax: 40})
+	if got := h.state().CapsUnenforced; got != nil {
+		t.Fatalf("with no cgroup path nothing can be claimed, got %v", got)
+	}
+	go r.watch(h)
+	deadline := time.Now().Add(2 * time.Second)
+	for strings.Join(h.state().CapsUnenforced, ",") != "memory_max" {
+		if time.Now().After(deadline) {
+			t.Fatalf("the watcher did not backfill the cgroup path and enforcement; state %+v", h.state())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// An ambiguous SetCaps whose read-back says the manager now holds a
+	// cpu cap as well: the list follows the read-back's caps.
+	f.mu.Lock()
+	f.setPropsErr = os.ErrDeadlineExceeded
+	running.Caps = resourceCaps{memoryMax: 1 << 20, cpuQuota: 50}
+	f.status[unit] = running
+	f.mu.Unlock()
+	if err := r.SetCaps(h, resourceCaps{memoryMax: 1 << 20, cpuQuota: 50}); err == nil {
+		t.Fatal("SetCaps must report the failure")
+	}
+	if st := h.state(); st.CapsUnknown || st.Caps != (resourceCaps{memoryMax: 1 << 20, cpuQuota: 50}) || strings.Join(st.CapsUnenforced, ",") != "memory_max" {
+		t.Fatalf("after the read-back: %+v", st)
+	}
+	// And a read-back that drops the memory cap drops it from the list.
+	f.mu.Lock()
+	running.Caps = resourceCaps{cpuQuota: 50}
+	f.status[unit] = running
+	f.mu.Unlock()
+	_ = r.SetCaps(h, resourceCaps{cpuQuota: 50})
+	if st := h.state(); len(st.CapsUnenforced) != 0 {
+		t.Fatalf("no memory cap left, yet %v is unenforced", st.CapsUnenforced)
+	}
+}
+
 // A cap whose controller does not reach the unit's cgroup is held by
 // the manager and enforced by nobody: it is named as unenforced, and
 // status lists it apart from the caps in effect rather than as one.
