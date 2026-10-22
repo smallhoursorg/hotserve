@@ -720,7 +720,7 @@ when, and then per app:
   running, starting or stopping, by what it does, to which app, since
   when. A unit whose command is still running is `activating` to
   systemd, which is not failed. The process that starts those units is
-  not one of them: between two units, `no unit … is running` is what
+  not one of them: between two units, `nothing running now` is what
   is said. Where the manager cannot be asked, that is said instead.
 
 It exits 0 only if the last run finished within 3 hours and did not end

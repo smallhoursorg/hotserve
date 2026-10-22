@@ -212,7 +212,7 @@ func TestWhatStatusSays(t *testing.T) {
 			running: []Running{{Role: "upload", App: "blog", State: "activating", Since: ago(3 * time.Hour)}},
 			healthy: true,
 			says:    []string{"running: upload of blog, since 2026-09-20 12:00 UTC"},
-			never:   []string{"failed", "no unit of"},
+			never:   []string{"failed", "nothing running"},
 		},
 		"a unit of the whole run": {
 			st:      with(func(*record.App) {}),
@@ -223,10 +223,10 @@ func TestWhatStatusSays(t *testing.T) {
 			st: with(func(*record.App) {}), runningErr: errors.New("dial unix /run/dbus/system_bus_socket: no such file"),
 			healthy: true,
 			says:    []string{"could not ask systemd what is running", "system_bus_socket"},
-			never:   []string{"no unit of"},
+			never:   []string{"nothing running"},
 		},
 		"nothing running": {
-			st: with(func(*record.App) {}), healthy: true, says: []string{"no unit of a run, a restore or a drill is running"},
+			st: with(func(*record.App) {}), healthy: true, says: []string{"nothing running now"},
 		},
 		// Nothing else ages a record whose apps are all pending, or that
 		// has none: a timer that died three weeks ago would read as "no
@@ -271,7 +271,7 @@ func TestWhatStatusSays(t *testing.T) {
 		},
 		"a unit whose name says nothing here is still running": {
 			st: with(func(*record.App) {}), unknown: []string{"hotserve_backup_newrole_x_y.service"}, healthy: true,
-			says: []string{"running: hotserve_backup_newrole_x_y.service"}, never: []string{"no unit of"},
+			says: []string{"running: hotserve_backup_newrole_x_y.service"}, never: []string{"nothing running"},
 		},
 		"a drill that could not begin": {
 			st: func() *record.Status {

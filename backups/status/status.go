@@ -216,7 +216,7 @@ func Report(in Input) (lines []string, healthy bool) {
 	case runningErr != nil:
 		say("could not ask systemd what is running: %s", record.Text(runningErr.Error()))
 	case len(running) == 0 && len(in.Unrecognised) == 0:
-		say("no unit of a run, a restore or a drill is running")
+		say("nothing running now")
 	}
 	for _, r := range running {
 		what := record.Text(r.Role)
