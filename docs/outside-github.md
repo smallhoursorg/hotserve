@@ -321,7 +321,12 @@ box {
 
 and a job with `id_tokens: { HOTSERVE_TOKEN: { aud: hotserve } }`, a
 full clone, `hotserve` installed, and `bin/apply` as its script, is
-the Actions job on GitLab. Untested, as above.
+the Actions job on GitLab. One more line it needs: GitLab sets the
+token's expiry to the job's `timeout:`, or to five minutes when the
+job sets none ([GitLab's ID token documentation](https://docs.gitlab.com/ci/secrets/id_token_authentication/)),
+and `bin/apply` polls a push with that one token for up to 30
+minutes, so give the job a `timeout:` above that. Untested, as
+above.
 
 Whatever mints the token, the rules of the box's repository hold: a
 commit no listed key signed is refused, and so is a merge button that
@@ -335,9 +340,9 @@ hotserve is built for Linux on amd64 and arm64, and nothing else:
 
 **A Linux container.** Each release's bare binary is on its releases
 page as `hotserve_<version>_linux_<arch>.tar.gz`, beside a
-`checksums.txt`, and runs in any Debian 13 container. With the private
-key in the current directory, which the container sees read-only at
-`/w` and writes nothing into:
+`checksums.txt`, and runs in any Debian 13 container. To mint, with
+the private key in the current directory, which the container sees
+read-only at `/w` and writes nothing into:
 
 ```sh
 docker run --rm -v "$PWD:/w:ro" -w /tmp debian:13-slim sh -c '
@@ -350,11 +355,14 @@ docker run --rm -v "$PWD:/w:ro" -w /tmp debian:13-slim sh -c '
   ./hotserve deploy-token --key /w/example.key --audience deploy.example.com'
 ```
 
-Set `v` to the release the box runs, from its releases page. Each run
-downloads the release again; a token a day is fine that way, a token
-an hour wants the binary kept in an image of your own. The same
-tarball is how a runner that is not Debian gets its `hotserve`: unpack
-it and put the binary on `PATH`.
+Set `v` to the release the box runs, from its releases page. The same
+command makes a key: mount the directory writable, `-v "$PWD:/w"`, and
+end with `./hotserve deploy-keygen --out /w/example.key` in place of
+the last line; the pair lands in the current directory, the private
+half mode 0600. Each run downloads the release again; a token a day is
+fine that way, a token an hour wants the binary kept in an image of
+your own. The same tarball is how a runner that is not Debian gets its
+`hotserve`: unpack it and put the binary on `PATH`.
 
 **Any JWT library.** A `local` token is a plain JSON Web Token, so
 anything that signs one can mint it, in any language on any machine:
