@@ -635,6 +635,11 @@ func (a *App) Validate() error {
 		if cfg.MemoryMax > 0 && cfg.MemoryMax < minMemoryMax {
 			return fmt.Errorf("app %s: memory_max must be at least %s, got %d bytes", name, humanize.Bytes(minMemoryMax), cfg.MemoryMax)
 		}
+		if cfg.MemoryMax == infinityUSec {
+			// systemd's "infinity" on the bus: a cap of nothing that the
+			// handle would report as a cap, and a reattach as none.
+			return fmt.Errorf("app %s: memory_max %d is systemd's infinity, not a cap; leave it out for no cap", name, cfg.MemoryMax)
+		}
 		if cfg.CPUQuota > maxCPUQuota {
 			return fmt.Errorf("app %s: cpu_quota must be at most %d%%, got %d%%", name, maxCPUQuota, cfg.CPUQuota)
 		}

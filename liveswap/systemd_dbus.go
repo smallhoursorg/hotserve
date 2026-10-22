@@ -703,6 +703,7 @@ func statusFromProps(props map[string]any) unitStatus {
 		ExecMainStatus: propInt(props, "ExecMainStatus"),
 		StopTimeout:    usecDuration(propInt(props, "TimeoutStopUSec")),
 		Caps:           propCaps(props),
+		ControlGroup:   propString(props, "ControlGroup"),
 	}
 }
 

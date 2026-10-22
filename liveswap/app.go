@@ -1643,8 +1643,15 @@ type statusSnapshot struct {
 	Running bool   `json:"running"`
 	// Caps is what the running unit is bounded to, as the manager last
 	// applied them: set at the unit's start, changed live by a reload
-	// (syncCaps), or read back at reattach. Absent when none is set.
+	// (syncCaps), or read back at reattach. Absent when none is set,
+	// and without any cap the host does not enforce.
 	Caps *capsSnapshot `json:"caps,omitempty"`
+	// CapsUnenforced names the configured caps the host does not
+	// enforce: the user manager does not delegate their controller to
+	// the unit's cgroup, so the manager holds the value and the kernel
+	// bounds nothing (not the case on Debian 13). Absent when every
+	// cap is enforced.
+	CapsUnenforced []string `json:"caps_unenforced,omitempty"`
 	// Deploys is the outcome of the latest deploy of each version a
 	// record is kept for (deploys.go), newest first; the whole record
 	// is GET /<app>?deploy=<version>. Serialized before last_deploy:
@@ -1680,6 +1687,30 @@ type capsSnapshot struct {
 	CPUQuota  int    `json:"cpu_quota,omitempty"`
 }
 
+// capsForStatus splits the unit's caps into the ones in effect and the
+// ones the host does not enforce (named, not valued: a value the
+// kernel ignores is not a cap). nil caps when nothing is in effect.
+func capsForStatus(caps resourceCaps, unenforced []string) (*capsSnapshot, []string) {
+	off := map[string]bool{}
+	for _, name := range unenforced {
+		off[name] = true
+	}
+	s := &capsSnapshot{}
+	if !off["memory_max"] {
+		s.MemoryMax = caps.memoryMax
+	}
+	if !off["tasks_max"] {
+		s.TasksMax = caps.tasksMax
+	}
+	if !off["cpu_quota"] {
+		s.CPUQuota = caps.cpuQuota
+	}
+	if *s == (capsSnapshot{}) {
+		s = nil
+	}
+	return s, unenforced
+}
+
 func (ma *managedApp) status() statusSnapshot {
 	c := ma.snapshot()
 	var deploys []deploySummary
@@ -1708,7 +1739,7 @@ func (ma *managedApp) status() statusSnapshot {
 		s.Unit = hs.Unit
 		s.Running = c.runner.Alive(ma.current.handle)
 		if hs.Caps.any() && !hs.CapsUnknown {
-			s.Caps = &capsSnapshot{MemoryMax: hs.Caps.memoryMax, TasksMax: hs.Caps.tasksMax, CPUQuota: hs.Caps.cpuQuota}
+			s.Caps, s.CapsUnenforced = capsForStatus(hs.Caps, hs.CapsUnenforced)
 		}
 	}
 	// After current: the watchdog records a restart before it installs

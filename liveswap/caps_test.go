@@ -269,10 +269,68 @@ func TestSetCapsFailureReadsTheUnitBack(t *testing.T) {
 	}
 	f.mu.Lock()
 	f.statusErr, f.setPropsErr = nil, nil
+	f.defaultTasksMax = 0 // no default to lift a tasks cap to
 	f.mu.Unlock()
+	// A success that wrote no TasksMax (nothing to lift to) settles
+	// nothing about the tasks cap: still unknown.
 	must(t, r.SetCaps(h, resourceCaps{cpuQuota: 50}))
-	if st := h.state(); st.CapsUnknown || st.Caps != (resourceCaps{cpuQuota: 50}) {
-		t.Fatalf("a successful SetCaps must settle the caps, got %+v (unknown=%v)", st.Caps, st.CapsUnknown)
+	if st := h.state(); !st.CapsUnknown {
+		t.Fatalf("a SetCaps that left TasksMax untouched must keep the caps unknown, got %+v", st)
+	}
+	// One that writes TasksMax settles them.
+	must(t, r.SetCaps(h, resourceCaps{cpuQuota: 50, tasksMax: 40}))
+	if st := h.state(); st.CapsUnknown || st.Caps != (resourceCaps{cpuQuota: 50, tasksMax: 40}) {
+		t.Fatalf("a successful SetCaps that wrote TasksMax must settle the caps, got %+v (unknown=%v)", st.Caps, st.CapsUnknown)
+	}
+}
+
+// A cap whose controller does not reach the unit's cgroup is held by
+// the manager and enforced by nobody: it is named as unenforced, and
+// status lists it apart from the caps in effect rather than as one.
+func TestUnenforcedCapsNamesTheMissingControllers(t *testing.T) {
+	root := t.TempDir()
+	cg := "/user.slice/user-1000.slice/user@1000.service/app.slice/x.service"
+	if err := os.MkdirAll(root+cg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	all := resourceCaps{memoryMax: 1 << 20, tasksMax: 40, cpuQuota: 50}
+	// No controllers file: no information, nothing claimed.
+	if got := unenforcedCaps(root, cg, all); got != nil {
+		t.Fatalf("unreadable controllers claimed %v", got)
+	}
+	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("pids\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := unenforcedCaps(root, cg, all); strings.Join(got, ",") != "memory_max,cpu_quota" {
+		t.Fatalf("unenforced = %v, want memory_max and cpu_quota (only pids is delegated)", got)
+	}
+	if got := unenforcedCaps(root, cg, resourceCaps{tasksMax: 40}); got != nil {
+		t.Fatalf("a cap whose controller is there read as unenforced: %v", got)
+	}
+	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("cpu memory pids\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := unenforcedCaps(root, cg, all); got != nil {
+		t.Fatalf("every controller delegated, yet %v", got)
+	}
+	// Status: the unenforced ones are named, not valued.
+	caps, off := capsForStatus(all, []string{"memory_max", "cpu_quota"})
+	if caps == nil || caps.MemoryMax != 0 || caps.CPUQuota != 0 || caps.TasksMax != 40 || strings.Join(off, ",") != "memory_max,cpu_quota" {
+		t.Fatalf("status split = %+v / %v, want tasks_max alone in effect", caps, off)
+	}
+	if caps, _ := capsForStatus(resourceCaps{memoryMax: 1 << 20}, []string{"memory_max"}); caps != nil {
+		t.Fatalf("nothing in effect must read as no caps, got %+v", caps)
+	}
+}
+
+// systemd's infinity, written as a number in a JSON config, is no cap:
+// the handle would report it as one and a reattach as none.
+func TestValidateRefusesInfinityAsAMemoryCap(t *testing.T) {
+	cfg := defaultedApp(t)
+	cfg.MemoryMax = infinityUSec
+	a := &App{Root: "/var/lib/liveswap", ArtifactAllowlist: []string{"github.com/smallhoursorg/"}, DeployTrust: githubTrust(), Apps: map[string]*AppConfig{"blog": cfg}}
+	if err := a.Validate(); err == nil || !strings.Contains(err.Error(), "systemd's infinity, not a cap") {
+		t.Fatalf("want the infinity refusal, got %v", err)
 	}
 }
 

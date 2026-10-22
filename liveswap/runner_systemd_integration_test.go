@@ -1234,8 +1234,16 @@ func TestIntegrationSystemdCapsHoldAndChangeLive(t *testing.T) {
 				t.Errorf("kernel %s = %q, want %q", file, got, want)
 			}
 		}
+		if got := h.state().CapsUnenforced; len(got) != 0 {
+			t.Errorf("every controller reaches the unit, yet the handle names %v as unenforced", got)
+		}
 	} else {
 		t.Log("the memory controller does not reach the unit's cgroup in this container; the kernel's view is the e2e lane's to assert")
+		// What the handle must say about it: the manager holds the
+		// caps, the kernel enforces none of them.
+		if got := h.state().CapsUnenforced; !slices.Contains(got, "memory_max") {
+			t.Errorf("the memory controller is absent, yet the handle names %v as unenforced", got)
+		}
 	}
 
 	// A lifted tasks cap goes to the manager's own default, which is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -159,6 +160,9 @@ type unitStatus struct {
 	// Caps is what the unit is bounded to as the manager holds it
 	// (MemoryMax=, TasksMax=, CPUQuota=); "infinity" reads as unset.
 	Caps resourceCaps
+	// ControlGroup is the unit's cgroup path under /sys/fs/cgroup, as
+	// the manager reports it; where the caps are, or are not, enforced.
+	ControlGroup string
 }
 
 // stopBudget is how long a stop of this unit can take before the
@@ -276,8 +280,13 @@ type systemdHandle struct {
 	// unit could not be read back (readBackCaps): caps is then the
 	// last known, not the applied, and no sync may take it as such.
 	capsUnknown atomic.Bool
-	done        chan struct{}
-	exit        atomic.Pointer[unitStatus] // final status, set before done closes
+	// cgroup is the unit's cgroup path as read at adopt or reattach,
+	// and unenforced the directives whose controller does not reach it
+	// (unenforcedCaps); written with caps, read by state.
+	cgroup     atomic.Pointer[string]
+	unenforced atomic.Pointer[[]string]
+	done       chan struct{}
+	exit       atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
@@ -288,7 +297,66 @@ func (h *systemdHandle) state() handleState {
 	if caps := h.caps.Load(); caps != nil {
 		st.Caps = *caps
 	}
+	if u := h.unenforced.Load(); u != nil {
+		st.CapsUnenforced = *u
+	}
 	return st
+}
+
+// cgroupRoot is where the kernel's cgroup tree is mounted; a variable
+// for the unit tests, which point it at a directory of their own.
+var cgroupRoot = "/sys/fs/cgroup"
+
+// unenforcedCaps names the caps among caps whose controller does not
+// reach the unit's cgroup: the manager accepts and reports MemoryMax=
+// on a host whose user@.service does not delegate the memory
+// controller (a container, say), and the kernel then bounds nothing.
+// Debian 13, Ubuntu 24.04 and 26.04 and Fedora 43 delegate cpu,
+// memory and pids (measured), so on a supported host this is empty.
+// An unreadable cgroup.controllers is no information: nothing is
+// claimed either way.
+func unenforcedCaps(root, cg string, caps resourceCaps) []string {
+	if cg == "" || !caps.any() {
+		return nil
+	}
+	// cg is the manager's own report of the unit's cgroup path, under
+	// the cgroup root; nothing of an app's or a request's reaches it.
+	b, err := os.ReadFile(filepath.Join(root, cg, "cgroup.controllers")) //nolint:gosec // path from the manager, under the cgroup root
+	if err != nil {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, c := range strings.Fields(string(b)) {
+		have[c] = true
+	}
+	var missing []string
+	if caps.memoryMax > 0 && !have["memory"] {
+		missing = append(missing, "memory_max")
+	}
+	if caps.tasksMax > 0 && !have["pids"] {
+		missing = append(missing, "tasks_max")
+	}
+	if caps.cpuQuota > 0 && !have["cpu"] {
+		missing = append(missing, "cpu_quota")
+	}
+	return missing
+}
+
+// noteUnenforced records which of caps the unit's cgroup cannot
+// enforce, and says so once in the journal: a cap that reads as set
+// and bounds nothing is the "looks configured, quietly weaker" shape
+// this code refuses to present as effective (status lists them apart).
+func (r *systemdRunner) noteUnenforced(h *systemdHandle, caps resourceCaps) {
+	cg := ""
+	if p := h.cgroup.Load(); p != nil {
+		cg = *p
+	}
+	missing := unenforcedCaps(cgroupRoot, cg, caps)
+	h.unenforced.Store(&missing)
+	if len(missing) > 0 {
+		r.log().Warn("resource caps the host does not enforce: the user manager does not delegate their controller to the unit's cgroup, so the kernel bounds nothing; status lists them as caps_unenforced",
+			zap.String("unit", h.unit), zap.Strings("caps", missing), zap.String("cgroup", cg))
+	}
 }
 
 // setArgv records the command the manager reports, if it is not
@@ -589,7 +657,12 @@ func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 		return fmt.Errorf("setting the caps of unit %s: %w", sh.unit, err)
 	}
 	sh.caps.Store(&applied)
-	sh.capsUnknown.Store(false)
+	// Settled only for what was written: a tasks cap left as it was
+	// (no default to lift to) stays as uncertain as it was.
+	if caps.tasksMax > 0 || lift > 0 {
+		sh.capsUnknown.Store(false)
+	}
+	r.noteUnenforced(sh, applied)
 	return nil
 }
 
@@ -632,6 +705,8 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
 		h.setArgv(st.ExecStart)
+		h.cgroup.Store(&st.ControlGroup)
+		r.noteUnenforced(h, caps)
 		// Spelled as sandboxProperties spells it (systemd_dbus.go):
 		// every unit gets PrivatePIDs=, so every unit has the
 		// intermediate PID to settle past.
@@ -951,6 +1026,8 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		// compares them with the spec's once the instance is current.
 		caps := r.unitCaps(ctx, us)
 		h.caps.Store(&caps)
+		h.cgroup.Store(&us.ControlGroup)
+		r.noteUnenforced(h, caps)
 		go r.watch(h)
 		return h, true, nil
 	}

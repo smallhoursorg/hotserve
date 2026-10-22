@@ -878,6 +878,19 @@ What the design rests on:
   default `apparmor_restrict_unprivileged_userns=1` (exit 218); with
   it 0 every number above matched Debian.
 
+A cap the host cannot enforce is named, not refused: the manager
+accepts `MemoryMax=` on a unit whose cgroup the memory controller does
+not reach (a container's user manager), so at adopt and reattach the
+runner reads the unit's `cgroup.controllers` (`unenforcedCaps`), warns
+once, and status lists those caps as `caps_unenforced` rather than
+under `caps`. Refusing the launch, as the sandbox probe does for its
+namespaces, was considered and not taken: a cap is availability, not
+isolation, the hosts in question are outside the support matrix, and
+a refusal would turn a host change into an outage for every capped
+app. The infinity sentinel (2^64−1) is refused as a `memory_max` at
+validation: the handle would report it as a cap and a reattach as
+none.
+
 Accepted: `memory_max` applies to the pre_start too — a migration
 needing more than the server is raised like any other cap, and the
 deploy's response names the OOM kill. A cap the manager refuses to

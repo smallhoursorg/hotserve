@@ -351,6 +351,16 @@ percent). A reload that removes one lifts it the same way. Should the
 manager refuse the change, the journal says so and the caps apply at
 the app's next launch.
 
+A cap is only as real as the controller behind it: on a host whose
+user manager does not delegate the memory, pids or cpu controller to
+its units (some containers), systemd accepts and reports the cap and
+the kernel bounds nothing. hotserve reads the unit's own
+`cgroup.controllers` when it starts or reattaches, warns in the
+journal, and lists such caps in status as `caps_unenforced` instead of
+under `caps`. Debian 13 delegates all three (measured, as do Ubuntu
+24.04/26.04 and Fedora 43), so on a supported box the field never
+appears.
+
 To bound every app at once — the whole `hotserve` user against Caddy —
 set the caps on the user's slice instead, from the console:
 `systemctl set-property user-$(id -u hotserve).slice MemoryMax=2G CPUQuota=300%`

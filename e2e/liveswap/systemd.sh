@@ -357,6 +357,12 @@ if [ "$(json_num "$s" memory_max)" = "256000000" ] && [ "$(json_num "$s" tasks_m
 else
 	fail "status does not report the caps: $s"
 fi
+# And names none as unenforced: this host delegates every controller
+# the three caps need (the probe's rows above read the kernel's values).
+case "$s" in
+*caps_unenforced*) fail "status names a cap the host does not enforce: $s" ;;
+*) pass "status names no unenforced cap: every controller reaches the unit" ;;
+esac
 # The syscall filter the manager built: an allow list (no leading ~)
 # that still holds io_uring_enter, the rest of @aio, and not
 # io_uring_setup, whose ring would open sockets RestrictAddressFamilies=

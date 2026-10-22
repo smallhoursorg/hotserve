@@ -239,4 +239,9 @@ type handleState struct {
 	// unit could not be read back. A sync re-sends rather than trusts
 	// an equality, and status reports no caps as in effect.
 	CapsUnknown bool `json:"-"`
+	// CapsUnenforced names the caps in Caps whose controller does not
+	// reach the unit's cgroup (unenforcedCaps): the manager holds them,
+	// the kernel bounds nothing. Status lists them apart from the caps
+	// in effect.
+	CapsUnenforced []string `json:"-"`
 }
