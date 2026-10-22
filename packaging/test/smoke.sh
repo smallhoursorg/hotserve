@@ -1448,13 +1448,31 @@ for u in $TIMERS; do
 	[ "/var/lib/systemd/timers/stamp-$u" -nt /tmp/before-reinstall ] \
 		|| die "reinstalled after remove: the stamp of $u is not this install's: $(ls -la --time-style=full-iso /var/lib/systemd/timers/)"
 done
+# A drill the timer fired in these seconds (a Sunday 03:30 and its
+# offset) is running still, and its timer has no next elapse until it
+# ends [M86]: let it end.
+for _ in $(seq 600); do
+	[ "$(systemctl show -p ActiveState --value hotserve-backup-drill.service)" = activating ] || break
+	sleep 1
+done
 dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer)
 dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03:30:00" +%s)))
 [ "$(date -d "$dnext" +%a)" = Sun ] && [ "$dpast" -ge 0 ] && [ "$dpast" -le 600 ] \
 	|| die "reinstalled after remove: the drill's next elapse is '$dnext' (${dpast}s past 03:30 of its day), not a Sunday between 03:30 and 03:40: a catch-up"
+# A firing is the service's main process starting [M61]. One inside the
+# install is a catch-up — unless the timer's own elapse fell in these
+# seconds (the hour and this box's offset, or a Sunday 03:30 and its
+# offset). A catch-up fires as the timer starts: its LastTriggerUSec is
+# the timer's ActiveEnterTimestamp, to the second. A scheduled firing's
+# is later [M86].
 for u in hotserve-backup.service hotserve-backup-drill.service; do
-	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] \
-		|| die "reinstalled after remove: $u ran inside the install"
+	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
+	t=${u%.service}.timer
+	last=$(systemctl show -p LastTriggerUSec --value "$t")
+	since=$(( $(date -d "${last:-@0}" +%s) - $(date -d "$(systemctl show -p ActiveEnterTimestamp --value "$t")" +%s) ))
+	[ "$since" -gt 2 ] \
+		|| die "reinstalled after remove: $u ran inside the install, ${since}s after its timer started (last trigger '$last'): a catch-up"
+	echo "reinstalled after remove: $u ran inside the install ${since}s after its timer started, at the timer's own elapse: a scheduled run, not a catch-up"
 done
 echo "reinstalled after remove: the stamps are new, and nothing caught up"
 timeout 300 systemctl enable --now hotserve || die "hotserve did not start after the reinstall"
