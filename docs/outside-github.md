@@ -263,9 +263,15 @@ box holds the token against: the key, the audience, the subject and
 claims the block pins. Outside GitHub Actions it cannot print the
 values the token carries, which are the issuer's, or whatever
 `deploy-token` was given, so hold those against the block yourself.
-The box's own answer says no more, by design; its journal names the
-check that refused it (`journalctl -u hotserve`, the `webhook auth
-failed` lines).
+With an issuer's token there is a third cause, and a key's token never
+meets it: the box could not consult the token's issuer (an outage
+there), or had fetched its keys in the minute before the issuer
+changed them, and no token waits on an issuer, so the first OIDC token
+after a hotserve restart or reload can reach a box that holds no keys
+yet. The box's journal says which, and a re-run goes through. The
+box's own answer says no more, by design; its journal names the check
+that refused it (`journalctl -u hotserve`, the `webhook auth failed`
+lines).
 
 ## 4. The box's config from another runner
 
