@@ -29,13 +29,19 @@ and the box accepts it if a `deploy_trust` block for that app (or the
 What each costs:
 
 - **OIDC** stores nothing. The box fetches the issuer's public keys
-  over https and checks each token against them; a token is minted
-  for the job and dies with it. An `audience` alone is refused when
+  over https and checks each token against them. A token is minted for
+  the job and lives for as long as the issuer says, on the issuer's
+  clock: ending or cancelling the job revokes nothing, and a token that
+  leaks from a log deploys until that expiry. An `audience` alone is refused when
   the config loads: every project on the issuer can mint a token for
   any audience, so the block must also pin who, with an identity claim
   (`repository`, `project_path`, or `sub` for the generic preset). Pin
-  the branch too, or a workflow edited on any branch deploys; the box
-  warns about a block that does not.
+  the branch too, or a workflow edited on any branch deploys; for
+  `github` and `gitlab` the box warns at load about a block that does
+  not. The generic `oidc` preset gets no such warning, because the
+  shape of its `sub` is the issuer's: check what the subject you pin
+  scopes to, and when it names a project but no branch, pin a branch
+  claim of the issuer's own beside it.
 - **A key** is a stored secret: the private half sits in the runner's
   secret store, or on a laptop, and whoever reads it can deploy until
   you remove the public half from the box. For an app, the key is the
@@ -153,9 +159,11 @@ as the first page describes. What it takes:
 There are two ways to hand the box the release:
 
 - **Push the tarball in the request** — `scripts/deploy.sh app.tar.gz`
-  with a file. No release host, no `artifact_allowlist` entry, and the
-  bytes come straight from the authenticated caller, capped at the
-  app's `max_artifact_size`. This is the path for a runner that
+  with a file. No release host, and no `artifact_allowlist` entry has
+  to match it: the bytes come straight from the authenticated caller,
+  capped at the app's `max_artifact_size`. The directive itself stays
+  required, since an app with no allowlist at all is refused when the
+  config loads; keep the template's entry. This is the path for a runner that
   publishes nothing, and for a laptop. The tarball itself must be
   built on Linux, for the box's architecture: the Node template's
   executable is the builder's own Node, and the box refuses a
@@ -187,6 +195,9 @@ deploy:
   stage: deploy
   image: node:26
   tags: [saas-linux-small-arm64]
+  # One deploy at a time, as the template's workflow has it: the box
+  # answers a second deploy of the same app 409 while one is running.
+  resource_group: deploy
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   id_tokens:
