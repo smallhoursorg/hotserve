@@ -1451,8 +1451,12 @@ done
 # A drill the timer fired in these seconds (a Sunday 03:30 and its
 # offset) is running still, and its timer has no next elapse until it
 # ends [M86]: read the elapse once there is one.
+# A timer `running` has a run going; one `waiting` has a next elapse,
+# so the next read gets it (a run ending between two reads); any
+# other state is not waiting, and the wait ends at once.
+not_timing() { case $(systemctl show -p SubState --value "$1") in running|waiting) return 1 ;; *) return 0 ;; esac; }
 i=0
-until dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer) && [ -n "$dnext" ] || [ "$(systemctl show -p SubState --value hotserve-backup-drill.timer)" != running ] || [ "$i" -ge 600 ]; do
+until dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer) && [ -n "$dnext" ] || not_timing hotserve-backup-drill.timer || [ "$i" -ge 600 ]; do
 	i=$((i + 1))
 	sleep 1
 done
@@ -1480,7 +1484,7 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 		|| die "reinstalled after remove: $t's calendar is '$(systemctl show -p TimersCalendar --value "$t")', not the ${period}s period this check takes"
 	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
 	i=0
-	until next=$(systemctl show -p NextElapseUSecRealtime --value "$t") && [ -n "$next" ] || [ "$(systemctl show -p SubState --value "$t")" != running ] || [ "$i" -ge 600 ]; do
+	until next=$(systemctl show -p NextElapseUSecRealtime --value "$t") && [ -n "$next" ] || not_timing "$t" || [ "$i" -ge 600 ]; do
 		i=$((i + 1))
 		sleep 1
 	done
