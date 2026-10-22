@@ -58,13 +58,13 @@ first_drill() {
 }
 # records: the ids the repository's clean-run records vouch for.
 records() { rr snapshots --no-lock --json --host hotserve --tag hotserve-clean 2>/dev/null | grep -o '"vouches:[0-9a-f]\{64\}"' | cut -d: -f2 | tr -d '"'; }
-# db_pack <snapshot>: the pack that holds the first blob of blog's
-# database in that snapshot, from the snapshot's own tree and the
-# repository's index — data a fetch of blog must read; not a tree, which
-# a run after must still be able to read, and not a record's. The
-# sqlite tree holds one node, the database's copy, so its first content
-# blob is the database's whatever else the node carries.
-db_pack() {
+# blog_db_pack <snapshot>: the pack that holds the first blob of blog's
+# database in that snapshot of blog, from the snapshot's own tree and
+# the repository's index — data a fetch of blog must read; not a tree,
+# which a run after must still be able to read, and not a record's.
+# blog's sqlite tree holds one node, the database's copy, so its first
+# content blob is the database's whatever else the node carries.
+blog_db_pack() {
 	blob=$(rr cat tree --no-lock "$1:/backup/blog/sqlite" 2>/dev/null | tr -d ' \n' | grep -o '"content":\["[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4)
 	[ -n "$blob" ] || return 1
 	for i in $(rr list index --no-lock 2>/dev/null); do
@@ -119,7 +119,7 @@ says "^repository: its structure, and data group $GROUP: clean$" && pass "and sa
 hotserve-backup status >/root/status.out 2>&1 && grep -q "repository last checked .*: its structure, and data group $GROUP: clean" /root/status.out && pass "status says when it was checked, and is content" || fail "status: $(cat /root/status.out)"
 
 echo "=== check 3: a pack gone from the storage is damage, and backups go on ==="
-pack=$(db_pack "$blog_id")
+pack=$(blog_db_pack "$blog_id")
 # Fatal, not a fail: with no pack the delete below would answer 204 for
 # a key that is not there, and the rest of this check would read a sound
 # repository.
@@ -135,7 +135,9 @@ if drill; then fail "a drill of a repository missing a pack exited 0"; else pass
 # a disk that filled during the fetch [measured, #170] — so the drill
 # names no cause, and points at restic's words.
 short=$(echo "$blog_id" | cut -c1-8)
-says "^blog: restore not proven: snapshot $short: fetching snapshot $short: restic could not restore all of it (exit 1); \`journalctl -u hotserve_backup_fetch_blog_[0-9a-f]*\.service\` has restic's own words (last proven: snapshot $short, on " && pass "blog's restore is not proven: its fetch failed, and the drill points at restic's own words, naming no cause" || fail "blog's line: $(grep '^blog:' "$OUT")"
+says "^blog: restore not proven: snapshot $short: fetching snapshot $short: restic could not restore all of it (exit 1); \`journalctl -u hotserve_backup_fetch_blog_[0-9a-f]*\.service\` has restic's own words" && pass "blog's restore is not proven: its fetch failed, and the drill points at restic's own words, naming no cause" || fail "blog's line: $(grep '^blog:' "$OUT")"
+# What check 2's drill proved stays proven, and is named beside it.
+says "^blog: restore not proven: .* (last proven: snapshot $short, on " && pass "and names the snapshot last proven, check 2's" || fail "blog's line: $(grep '^blog:' "$OUT")"
 # That failure is blog's own: shop, whose pack is there, is drilled and
 # proven all the same (a fetch's exit 1 was once repository-wide, and
 # one app's full disk skipped every app after it).

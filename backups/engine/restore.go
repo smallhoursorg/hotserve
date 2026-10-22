@@ -911,7 +911,7 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 			// blame the storage or the key and are repository-wide:
 			// here the repository has just answered the listing, and
 			// the next app is drilled all the same.
-			detail = "restic could not restore all of it (exit 1)"
+			detail, wide = "restic could not restore all of it (exit 1)", false
 		} else {
 			detail, wide = resticFailure(o)
 		}
