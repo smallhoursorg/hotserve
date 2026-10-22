@@ -1452,11 +1452,11 @@ done
 # offset) is running still, and its timer has no next elapse until it
 # ends [M86]: read the elapse once there is one.
 i=0
-until dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer) && [ -n "$dnext" ] || [ "$i" -ge 600 ]; do
+until dnext=$(systemctl show -p NextElapseUSecRealtime --value hotserve-backup-drill.timer) && [ -n "$dnext" ] || [ "$(systemctl show -p SubState --value hotserve-backup-drill.timer)" != running ] || [ "$i" -ge 600 ]; do
 	i=$((i + 1))
 	sleep 1
 done
-[ -n "$dnext" ] || die "reinstalled after remove: the drill the timer fired is still running after 600s: $(journalctl -u hotserve-backup-drill.service --no-pager | tail -5)"
+[ -n "$dnext" ] || die "reinstalled after remove: hotserve-backup-drill.timer has no next elapse and is '$(systemctl show -p SubState --value hotserve-backup-drill.timer)' (running: the drill it fired is still going after 600s; anything else: the timer is not waiting): $(journalctl -u hotserve-backup-drill.timer -u hotserve-backup-drill.service --no-pager | tail -5)"
 dpast=$(($(date -d "$dnext" +%s) - $(date -d "$(date -d "$dnext" '+%Y-%m-%d') 03:30:00" +%s)))
 [ "$(date -d "$dnext" +%a)" = Sun ] && [ "$dpast" -ge 0 ] && [ "$dpast" -le 600 ] \
 	|| die "reinstalled after remove: the drill's next elapse is '$dnext' (${dpast}s past 03:30 of its day), not a Sunday between 03:30 and 03:40: a catch-up"
@@ -1480,11 +1480,11 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 		|| die "reinstalled after remove: $t's calendar is '$(systemctl show -p TimersCalendar --value "$t")', not the ${period}s period this check takes"
 	[ "$(systemctl show -p ExecMainStartTimestampMonotonic --value "$u")" = 0 ] && continue
 	i=0
-	until next=$(systemctl show -p NextElapseUSecRealtime --value "$t") && [ -n "$next" ] || [ "$i" -ge 600 ]; do
+	until next=$(systemctl show -p NextElapseUSecRealtime --value "$t") && [ -n "$next" ] || [ "$(systemctl show -p SubState --value "$t")" != running ] || [ "$i" -ge 600 ]; do
 		i=$((i + 1))
 		sleep 1
 	done
-	[ -n "$next" ] || die "reinstalled after remove: $u ran inside the install and is still running after 600s: $(journalctl -u "$u" --no-pager | tail -5)"
+	[ -n "$next" ] || die "reinstalled after remove: $u ran inside the install, and $t has no next elapse and is '$(systemctl show -p SubState --value "$t")' (running: that run is still going after 600s; anything else: the timer is not waiting): $(journalctl -u "$t" -u "$u" --no-pager | tail -5)"
 	last=$(systemctl show -p LastTriggerUSec --value "$t")
 	[ -n "$last" ] || die "reinstalled after remove: $u ran inside the install, and not from its timer: $(journalctl -u "$u" --no-pager | tail -5)"
 	late=$(( $(date -d "$last" +%s) - $(date -d "$next" +%s) + period ))
