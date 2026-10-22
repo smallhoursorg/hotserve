@@ -107,6 +107,9 @@ place in the check job before `make check`:
 sudo install -D -m 644 deploy.example.com/example.pub /etc/hotserve/example.pub
 ```
 
+(A GitLab job on the Docker executor runs as root in an image with no
+`sudo`: drop the word there.)
+
 **Minting.** One token per run, as late as the step that uses it:
 
 ```sh
@@ -117,18 +120,19 @@ The token lives for `--ttl` from now, five minutes unless you say
 otherwise, and whoever reads it can deploy until then. The box refuses
 one minted to live longer than its block's `max_token_ttl`, 24 hours
 unless the block sets one, and the command warns on stderr above an
-hour. `--subject <name>` puts a `sub` claim in it, which the box's
-journal and deploy records show as `deployed_by`; `--claims k=v,k2=v2`
-adds any other claim.
+hour. `--subject <name>` puts a `sub` claim in it, which the deploy record
+and the app's status show as `deployed_by`, and the journal's `deploy
+authorized` line as `via`; `--claims k=v,k2=v2` adds any other claim.
 
 **One key per app, and one for the box.** A key is the credential for
 what trusts it, so give each app its own, and the box's `box` block
 another. A key removed from one block then stops one thing.
 
 **Rotation.** Make the new pair, copy its public half to the box under
-a new name, and add a second `deploy_trust local` block beside the old
-one, pointing at it. Push that. Swap the runner's secret for the new
-private key. Then remove the old block, push again, and delete the old
+a new name, add a second `deploy_trust local` block beside the old one,
+pointing at it, and a second `install` line in the check job for the
+new `.pub`. Push that. Swap the runner's secret for the new private
+key. Then remove the old block, push again, and delete the old
 `.pub` from the box. Two blocks accept either token in between, so no
 run is refused on the way. A key you believe stolen skips the overlap:
 remove its block and push.
@@ -152,27 +156,37 @@ There are two ways to hand the box the release:
   with a file. No release host, no `artifact_allowlist` entry, and the
   bytes come straight from the authenticated caller, capped at the
   app's `max_artifact_size`. This is the path for a runner that
-  publishes nothing, and for a laptop. The checkout must be clean of
-  uncommitted changes to tracked files, or the script refuses to label
-  the build with the commit's name: set `VERSION` for an uncommitted
-  build.
+  publishes nothing, and for a laptop. The tarball itself must be
+  built on Linux, for the box's architecture: the Node template's
+  executable is the builder's own Node, and the box refuses a
+  mismatch at deploy time (its message names a GitHub runner label,
+  which is the hint for the GitHub workflow; elsewhere, pick the
+  runner yourself). A Mac pushes a tarball built elsewhere. The
+  checkout must be clean of uncommitted changes to tracked files, or
+  the script refuses to label the build with the commit's name: set
+  `VERSION` for an uncommitted build.
 - **Give the box a URL** — `scripts/deploy.sh https://…/app.tar.gz`.
   The box fetches it, so the URL's host must be in the box's
   `artifact_allowlist`, path pinned on a shared host. Two more
   variables then help: `ARTIFACT_AUTH_HEADER`, sent verbatim as
   `Authorization` on the fetch, for a private host; and
-  `ARTIFACT_SHA256`, the tarball's digest as `sha256sum` prints it, so
-  the box refuses a download that hashes to anything else. The GitHub
-  workflow sends both.
+  `ARTIFACT_SHA256`, the tarball's digest, the first field of
+  `sha256sum`'s output (64 hex characters, nothing else), so the box
+  refuses a download that hashes to anything else. The GitHub workflow
+  sends both.
 
 A job on **GitLab CI**, with the Node template's build and GitLab's
 own token (`id_tokens:` sets the variable it names to a fresh OIDC
-token for the job, with the audience given):
+token for the job, with the audience given). The `tags:` line picks a
+runner of the box's architecture, here gitlab.com's hosted arm64
+runner for the first page's default box; gitlab.com's default runners
+are amd64, and an amd64 box needs no line:
 
 ```yaml
 deploy:
   stage: deploy
   image: node:26
+  tags: [saas-linux-small-arm64]
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
   id_tokens:
@@ -195,9 +209,12 @@ deploy_trust gitlab {
 }
 ```
 
-That shape is written from GitLab's documentation of its ID tokens and
-their claims, and from the box's code. It has not been run against a
-real GitLab project; if you do, say so in an issue.
+That shape is written from GitLab's documentation of its ID tokens,
+its claims and its runners, and from the box's code. It has not been
+run against a real GitLab project; if you do, say so in an issue. The
+same job publishing the tarball to GitLab's package registry for the
+box to fetch, with `curl` in place of the script, is in
+[liveswap/README.md](../liveswap/README.md#gitlab-ci).
 
 Any **other OIDC issuer** (CircleCI, Buildkite, a Kubernetes cluster)
 is the `oidc` preset: its `issuer`, the `audience` you asked the
@@ -229,10 +246,15 @@ enough: the box checks it when the request arrives, however long the
 deploy then takes.
 
 A **401** from any of these means the box's block for the app does
-not accept the token, and the script prints what the token was minted
-with, for you to hold against the block. The box's own answer says no
-more, by design; its journal names the check that refused it
-(`journalctl -u hotserve`, the `webhook auth failed` lines).
+not accept the token, or the URL names an app the box does not have (a
+typo in `HOTSERVE_URL` answers the same 401). The script says what the
+box holds the token against: the key, the audience, the subject and
+claims the block pins. Outside GitHub Actions it cannot print the
+values the token carries, which are the issuer's, or whatever
+`deploy-token` was given, so hold those against the block yourself.
+The box's own answer says no more, by design; its journal names the
+check that refused it (`journalctl -u hotserve`, the `webhook auth
+failed` lines).
 
 ## 4. The box's config from another runner
 
@@ -246,11 +268,13 @@ Actions job does can run it:
   message saying so. On GitLab, that is the project's *Git shallow
   clone* setting, or `GIT_DEPTH` set to `0` on the job.
 - **`hotserve` on `PATH`.** `bin/apply` runs `hotserve box webhook` to
-  read each box's address from its file; `bin/install-hotserve
-  default` installs the latest release's binary with `sudo` (a Linux
-  runner; `curl`, `sha256sum` and `tar` must be there), or
-  [section 5](#5-minting-without-a-linux-hotserve) says where the
-  binary comes from. `HOTSERVE=/path/to/hotserve` names it when it is
+  read each box's address from its file. `bin/install-hotserve
+  default` installs the latest release's binary on a Linux runner with
+  `curl`, `sha256sum`, `tar` and `sudo` on it; a GitLab job on the
+  Docker executor has no `sudo`, so `apt-get install -y sudo` first,
+  or take the release tarball yourself as
+  [section 5](#5-minting-without-a-linux-hotserve) does and put the
+  binary on `PATH`. `HOTSERVE=/path/to/hotserve` names it when it is
   not on `PATH`.
 - **`HOTSERVE_TOKEN`**, a token the `box` block's `deploy_trust`
   accepts, carrying a `sha` claim that names the commit being sent.
@@ -301,20 +325,23 @@ hotserve is built for Linux on amd64 and arm64, and nothing else:
 **A Linux container.** Each release's bare binary is on its releases
 page as `hotserve_<version>_linux_<arch>.tar.gz`, beside a
 `checksums.txt`, and runs in any Debian 13 container. With the private
-key in the current directory:
+key in the current directory, which the container sees read-only at
+`/w` and writes nothing into:
 
 ```sh
-docker run --rm -v "$PWD:/w" -w /w debian:13-slim sh -c '
+docker run --rm -v "$PWD:/w:ro" -w /tmp debian:13-slim sh -c '
   apt-get -qq update && apt-get -qq install -y curl ca-certificates >/dev/null &&
   v=0.3.1 && arch=$(dpkg --print-architecture) &&
   curl -fsSLO https://github.com/smallhoursorg/hotserve/releases/download/v$v/hotserve_${v}_linux_$arch.tar.gz &&
   curl -fsSLO https://github.com/smallhoursorg/hotserve/releases/download/v$v/checksums.txt &&
   sha256sum -c --ignore-missing checksums.txt >/dev/null &&
   tar -xzf hotserve_${v}_linux_$arch.tar.gz hotserve &&
-  ./hotserve deploy-token --key example.key --audience deploy.example.com'
+  ./hotserve deploy-token --key /w/example.key --audience deploy.example.com'
 ```
 
-Set `v` to the release the box runs, from its releases page. The same
+Set `v` to the release the box runs, from its releases page. Each run
+downloads the release again; a token a day is fine that way, a token
+an hour wants the binary kept in an image of your own. The same
 tarball is how a runner that is not Debian gets its `hotserve`: unpack
 it and put the binary on `PATH`.
 
@@ -328,8 +355,8 @@ anything that signs one can mint it, in any language on any machine:
 - Claims the box checks:
   - `aud`: the block's `audience`, as a string or in an array;
   - `iat` and `exp`, both required, in seconds; `exp` at most
-    `max_token_ttl` after `iat`, and not yet past, with 60 seconds of
-    leeway for clock skew;
+    `max_token_ttl` after `iat`; `exp` not yet past and `iat` not in
+    the future, each with 60 seconds of leeway for clock skew;
   - every `claim` the block pins, as a string that matches exactly
     (`sub` for `subject`), and for the box's config `sha`, the full
     commit id, which the handler compares with the bundle's.

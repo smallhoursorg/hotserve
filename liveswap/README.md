@@ -1457,6 +1457,9 @@ deploy:
         https://deploy.example.com/blog
 ```
 
+The same job with the template's `scripts/deploy.sh` pushing the
+tarball in the request, no registry and no read token, is in
+[docs/outside-github.md](../docs/outside-github.md#3-an-apps-deploy-from-another-runner).
 On gitlab.com that URL needs `artifact_allowlist
 gitlab.com/api/v4/projects/<project id>/` on the box. `SHA256` is the
 tarball's digest from the job's own copy, which the box holds the

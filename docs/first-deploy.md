@@ -181,11 +181,10 @@ directory: it holds the workflow that sends the config to the box, and
 a repository without it starts no run when pushed and reports no
 error. The ZIP and `git archive` keep it; Finder hides it, `cp dir/*`
 skips it, and GitHub's upload page leaves it out. The workflow that
-sends the config to the box is GitHub Actions; on another host, the
-box README's
-[Outside GitHub](../examples/box/README.md#outside-github) says what a
-CI job of your own needs, and the rest of this page reads as if the
-repository is on GitHub.
+sends the config to the box is GitHub Actions; on another host,
+[Deploying from outside GitHub](outside-github.md#4-the-boxs-config-from-another-runner)
+says what a CI job of your own needs, and the rest of this page reads
+as if the repository is on GitHub.
 
 **Add your key as the first signer:**
 
