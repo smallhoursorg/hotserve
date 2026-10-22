@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"go.uber.org/zap"
@@ -129,8 +131,12 @@ func TestReattachReadsTheDefaultTasksMaxAsUnset(t *testing.T) {
 	f := newFakeSystemdConn()
 	f.defaultTasksMax = 2273
 	unit := "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service"
-	f.status[unit] = unitStatus{Name: unit, LoadState: "loaded", ActiveState: "active", MainPID: 4242, Sandboxed: true,
-		Caps: resourceCaps{memoryMax: 64 << 20, tasksMax: 2273}}
+	setStatus := func(caps resourceCaps) { // under the fake's lock: a reattached handle's watcher reads it
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.status[unit] = unitStatus{Name: unit, LoadState: "loaded", ActiveState: "active", MainPID: 4242, Sandboxed: true, Caps: caps}
+	}
+	setStatus(resourceCaps{memoryMax: 64 << 20, tasksMax: 2273})
 	r := newSystemdRunner(f, zap.NewNop())
 	t.Cleanup(r.close)
 	h, ok, err := r.Reattach(handleState{Unit: unit})
@@ -141,7 +147,7 @@ func TestReattachReadsTheDefaultTasksMaxAsUnset(t *testing.T) {
 		t.Fatalf("reattached handle reports %+v, want the memory cap alone (2273 is the manager's default)", got)
 	}
 	// A tasks cap that is not the default is the operator's.
-	f.status[unit] = unitStatus{Name: unit, LoadState: "loaded", ActiveState: "active", MainPID: 4242, Sandboxed: true, Caps: resourceCaps{tasksMax: 512}}
+	setStatus(resourceCaps{tasksMax: 512})
 	h, _, _ = r.Reattach(handleState{Unit: unit})
 	if got := h.state().Caps; got != (resourceCaps{tasksMax: 512}) {
 		t.Fatalf("reattached handle reports %+v, want tasks_max 512", got)
@@ -246,6 +252,54 @@ func TestAReloadDuringADeployReachesTheInstanceItPublishes(t *testing.T) {
 	}
 	if got := rig.ma.status().Caps; got == nil || got.CPUQuota != 150 {
 		t.Fatalf("status caps = %+v, want cpu_quota 150 on the serving instance", got)
+	}
+}
+
+// Two syncs can start together: a publication's (the deploy's lock
+// held) and a reload's (configure, no lock of the deploy's). Without
+// serialization the publication could snapshot caps A, the reload
+// apply B in between, and A land last. syncCaps is one step per app,
+// so the reload's sync waits behind the publication's apply and then
+// applies B over it: the last applied is the latest spec.
+func TestOverlappingSyncsApplyTheLatestSpecLast(t *testing.T) {
+	rig := newTestRig(t)
+	held, release := rig.holdFetch(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/a.tgz", version: "v1"})
+	}()
+	held()
+	specA, specB := testSpec(t), testSpec(t)
+	specA.caps = resourceCaps{cpuQuota: 100}
+	specB.caps = resourceCaps{cpuQuota: 200}
+	// Installed during the fetch: the publication will find the
+	// instance without caps and apply A.
+	rig.ma.configure(new(int), specA, nil, zap.NewNop(), &fetchClients{}, userManager)
+	reloaded := make(chan struct{})
+	var once sync.Once
+	rig.runner.setCapsHook = func(caps resourceCaps) {
+		if caps != specA.caps {
+			return
+		}
+		// Inside the publication's apply of A: a reload installs B and
+		// syncs. Its sync must wait for this apply to end, so its B
+		// lands after A, not under it.
+		once.Do(func() {
+			go func() {
+				rig.ma.configure(new(int), specB, nil, zap.NewNop(), &fetchClients{}, userManager)
+				close(reloaded)
+			}()
+			time.Sleep(100 * time.Millisecond) // let the reload reach the sync and block there
+		})
+	}
+	release(nil)
+	must(t, <-done)
+	<-reloaded
+	if got := rig.runner.setCaps; len(got) != 2 || got[0] != specA.caps || got[1] != specB.caps {
+		t.Fatalf("SetCaps order = %+v, want A then B", got)
+	}
+	if got := rig.ma.status().Caps; got == nil || got.CPUQuota != 200 {
+		t.Fatalf("status caps = %+v, want the latest spec's cpu_quota 200 applied last", got)
 	}
 }
 

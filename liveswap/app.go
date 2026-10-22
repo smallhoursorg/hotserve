@@ -337,6 +337,12 @@ type managedApp struct {
 	// secretsLoaded set means the spec has no env_file.
 	secretsFrom   string
 	secretsLoaded bool
+
+	// capsMu serializes syncCaps: its snapshot, compare and apply are
+	// one step, so a publication's sync and a reload's cannot
+	// interleave and leave the older spec's caps applied last. Taken
+	// before specMu and mu, never while either is held.
+	capsMu sync.Mutex
 }
 
 func newManagedApp(name string) *managedApp {
@@ -1507,7 +1513,14 @@ func (l launch) startSpec(spec *appSpec, command []string) startSpec {
 // after a hotserve restart carries whatever it was started with, which
 // this brings up to date too. A failure is a warning, not an error:
 // the caps apply at the next launch regardless (startSpec).
+//
+// Serialized per app (capsMu): every install of a spec is followed by
+// a sync, and a sync that waits behind another snapshots the spec
+// after it, so whichever order a publication's and a reload's syncs
+// start in, the last to apply carries the latest spec.
 func (ma *managedApp) syncCaps() {
+	ma.capsMu.Lock()
+	defer ma.capsMu.Unlock()
 	c := ma.snapshot()
 	inst := ma.currentInstance()
 	if c.spec == nil || c.runner == nil || inst == nil || !c.runner.Alive(inst.handle) {

@@ -167,6 +167,10 @@ type fakeRunner struct {
 	sweeps          []handle
 	setCaps         []resourceCaps // every SetCaps, in order
 	setCapsErr      error          // SetCaps returns this (and sets nothing)
+	// setCapsHook, when set, runs inside SetCaps after the call is
+	// recorded and before the handle takes the caps, outside the
+	// runner's lock: a test's chance to overlap another sync with it.
+	setCapsHook func(resourceCaps)
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -240,11 +244,16 @@ func (r *fakeRunner) Wait(h handle) <-chan struct{} {
 
 func (r *fakeRunner) SetCaps(h handle, caps resourceCaps) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.setCapsErr != nil {
+		r.mu.Unlock()
 		return r.setCapsErr
 	}
 	r.setCaps = append(r.setCaps, caps)
+	hook := r.setCapsHook
+	r.mu.Unlock()
+	if hook != nil {
+		hook(caps)
+	}
 	if fh, ok := h.(*fakeHandle); ok {
 		fh.mu.Lock()
 		fh.caps = caps
