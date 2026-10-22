@@ -933,8 +933,10 @@ the mechanism:
    unit is a limit the app can rewrite in `/sys/fs/cgroup` (or escape
    by migrating its PIDs) unless that tree is read-only in its view.
    Runtimes only ever *read* it. `ProtectControlGroups=` is set on
-   every unit, so caps are real the moment they are set; none is set
-   today — the trigger is an app that needs bounding (#71).
+   every unit, so the caps an operator sets (`memory_max`, `tasks_max`,
+   `cpu_quota`, per app; DESIGN-liveswap.md "Resource caps") hold:
+   measured from inside the unit, the value reads back and the write
+   is EROFS.
 
 ## The shipped mechanism
 
@@ -1042,8 +1044,9 @@ between such a host and a silent loss of isolation. Deleting it would
 turn a measurement into a claim.
 
 **What it does not do**, by design: the network namespace is shared
-(egress open); there are no per-app UIDs; resource caps are unset.
-Each is in "Residual risks".
+(egress open); there are no per-app UIDs; resource caps are the
+operator's to set (`memory_max`, `tasks_max`, `cpu_quota` per app;
+none by default). Each is in "Residual risks".
 
 ## Reducing the asset (deploy auth)
 
@@ -1242,10 +1245,20 @@ does not isolate the runtime.
   namespaces, so the contract already allows it — as a per-app opt-in
   when an app that wants no network exists (it would also cut the app
   off from any database): #57.
-- **Resource exhaustion** — a runaway app can starve its siblings and
-  Caddy (fork bomb, memory leak). `ProtectControlGroups=` makes
-  `MemoryMax=`/`TasksMax=`/`CPUQuota=` real the moment they are set;
-  nothing sets them until an app needs bounding (#71).
+- **Resource exhaustion** — a runaway app stalls its *siblings*: under
+  a fork bomb a second app's requests ran to 10 s while hotserve, in
+  `system.slice`, kept a 5–9 ms median (the root splits CPU evenly
+  between the two slices), a leak is taken by the global OOM killer
+  (the app first: user-manager units run at `oom_score_adj` 200 and
+  hotserve.service at 0 — systemd's defaults, which hotserve does not
+  set and no test holds) and forks
+  are bounded by the user manager's default `TasksMax=` (measured;
+  DESIGN-liveswap.md "Resource caps"). Per-app `memory_max`,
+  `tasks_max` and `cpu_quota` bound an app the operator sets them on,
+  and `ProtectControlGroups=` keeps the app from rewriting them; none
+  is set by default, so an unbounded app is still the default, and a
+  ceiling for the apps as a whole is the operator's slice setting
+  (docs/hardening.md step 6).
 - **`state.json` must stay outside any writable sandbox view**
   (liveswap/state.go is read on relaunch for the version and the
   unit, and checked before either is used: a version that is not one,

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	sddbus "github.com/coreos/go-systemd/v22/dbus"
 	"go.uber.org/zap"
 )
 
@@ -96,6 +97,13 @@ type systemdConn interface {
 	ResetFailedUnit(ctx context.Context, name string) error
 	// ListUnits returns the loaded units whose names match the glob.
 	ListUnits(ctx context.Context, pattern string) ([]unitStatus, error)
+	// SetUnitProperties sets runtime properties on a loaded unit — the
+	// cgroup caps, which the manager applies to a running unit at once.
+	SetUnitProperties(ctx context.Context, name string, props []sddbus.Property) error
+	// DefaultTasksMax is the manager's own DefaultTasksMax=, resolved to
+	// a number: what a unit with no TasksMax= of its own is bounded to,
+	// and what the manager reports as such a unit's TasksMax.
+	DefaultTasksMax(ctx context.Context) (uint64, error)
 }
 
 // unitSpec is a transient service unit as the runner wants it. The
@@ -116,6 +124,7 @@ type unitSpec struct {
 	StartTimeout     time.Duration // TimeoutStartSec=; 0 sets none
 	Sandbox          *sandboxSpec
 	Socket           string // the app's socket, removed by the unit when it stops
+	Caps             resourceCaps
 }
 
 // unitStatus is a snapshot of one unit as the manager reports it.
@@ -147,6 +156,9 @@ type unitStatus struct {
 	// such a unit was started by something else, and adopting it would
 	// serve an app with no sandbox and no signal.
 	Sandboxed bool
+	// Caps is what the unit is bounded to as the manager holds it
+	// (MemoryMax=, TasksMax=, CPUQuota=); "infinity" reads as unset.
+	Caps resourceCaps
 }
 
 // stopBudget is how long a stop of this unit can take before the
@@ -185,16 +197,29 @@ func (s unitStatus) running() bool {
 func (s unitStatus) exitString() string {
 	switch s.ExecMainCode {
 	case 1: // CLD_EXITED
-		return fmt.Sprintf("exit status %d", s.ExecMainStatus)
+		return s.oomSuffix(fmt.Sprintf("exit status %d", s.ExecMainStatus))
 	case 2, 3: // CLD_KILLED, CLD_DUMPED
 		sig := syscall.Signal(s.ExecMainStatus)
-		return fmt.Sprintf("killed by signal %d (%s)", s.ExecMainStatus, sig)
+		return s.oomSuffix(fmt.Sprintf("killed by signal %d (%s)", s.ExecMainStatus, sig))
 	default:
 		if s.Result != "" && s.Result != "success" {
 			return "no process exit recorded (result " + s.Result + ")"
 		}
 		return "no process exit recorded"
 	}
+}
+
+// oomSuffix names the OOM kill the manager recorded for the unit
+// (Result=oom-kill), whatever the main process's own end looked like:
+// the kernel takes the process that asked for the memory, which under
+// a `sh -c` or `npm start` command is a child, and the manager then
+// stops the unit (OOMPolicy=stop) — so the main process reads as an
+// exit code or as the stop's SIGTERM, and only the Result says why.
+func (s unitStatus) oomSuffix(exit string) string {
+	if s.Result != "oom-kill" {
+		return exit
+	}
+	return exit + "; the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it"
 }
 
 const (
@@ -242,6 +267,11 @@ type systemdHandle struct {
 	// leaves pid unread) and the watcher repairs both — so it is
 	// atomic like pid, not plain like unit and startedAt.
 	argv atomic.Pointer[[]string]
+	// caps is what the unit is bounded to as the manager last applied
+	// it: the start spec's, the values read at reattach, or the last
+	// SetCaps. Atomic for the same reason as argv: status reads it
+	// while a reload's SetCaps writes it.
+	caps atomic.Pointer[resourceCaps]
 	done chan struct{}
 	exit atomic.Pointer[unitStatus] // final status, set before done closes
 }
@@ -250,6 +280,9 @@ func (h *systemdHandle) state() handleState {
 	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
 	if argv := h.argv.Load(); argv != nil {
 		st.Command = *argv
+	}
+	if caps := h.caps.Load(); caps != nil {
+		st.Caps = *caps
 	}
 	return st
 }
@@ -474,6 +507,7 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		StartTimeout:     spec.startTimeout,
 		Sandbox:          spec.sandbox,
 		Socket:           spec.socket,
+		Caps:             spec.caps,
 	}, nil
 }
 
@@ -508,12 +542,64 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 		st := r.reapFailed(readCtx, u.Name)
 		return nil, startExit(st.exitString(), u.Name, res, st.ExecMainPID)
 	}
-	return r.adopt(readCtx, u.Name, time.Now(), u.StopTimeout), nil
+	return r.adopt(readCtx, u.Name, time.Now(), u.StopTimeout, u.Caps), nil
+}
+
+// SetCaps sets the unit's caps as runtime properties — the manager
+// applies cgroup properties to a running unit at once (measured on
+// systemd 255, 257 and 259: the kernel's memory.max, pids.max and
+// cpu.max change with the process untouched). Every cap is sent, so a
+// cap a reload removed is lifted: memory and CPU to infinity, which is
+// their default, and tasks to the manager's DefaultTasksMax, which is
+// what an unset TasksMax= means (infinity would lift the manager's own
+// bound, 15% of threads-max, from the unit). With that default
+// unreadable the unit keeps its tasks cap, and the handle says so.
+func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
+	sh, ok := h.(*systemdHandle)
+	if !ok {
+		return errors.New("not a systemd handle")
+	}
+	ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
+	defer cancel()
+	lift := uint64(0)
+	applied := caps
+	if caps.tasksMax == 0 {
+		def, err := r.conn.DefaultTasksMax(ctx)
+		if err != nil || def == 0 {
+			r.log().Warn("the manager's DefaultTasksMax could not be read; the unit keeps its tasks cap until its next launch", zap.String("unit", sh.unit), zap.Error(err))
+			if have := sh.caps.Load(); have != nil {
+				applied.tasksMax = have.tasksMax
+			}
+		} else {
+			lift = def
+		}
+	}
+	if err := r.conn.SetUnitProperties(ctx, sh.unit, capProperties(caps, lift)); err != nil {
+		return fmt.Errorf("setting the caps of unit %s: %w", sh.unit, err)
+	}
+	sh.caps.Store(&applied)
+	return nil
+}
+
+// unitCaps is what the manager's report of a unit means as caps: a
+// TasksMax equal to the manager's default is no cap of the operator's
+// (the manager resolves an unset TasksMax= to its default and reports
+// the number, never "infinity"), so it reads as unset. With the
+// default unreadable the number stands, and a sync re-sends it.
+func (r *systemdRunner) unitCaps(ctx context.Context, us unitStatus) resourceCaps {
+	caps := us.Caps
+	if caps.tasksMax > 0 {
+		if def, err := r.conn.DefaultTasksMax(ctx); err == nil && uint64(caps.tasksMax) == def {
+			caps.tasksMax = 0
+		}
+	}
+	return caps
 }
 
 // adopt builds a watched handle for a unit known to be running.
-func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time, stopTimeout time.Duration) *systemdHandle {
+func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.Time, stopTimeout time.Duration, caps resourceCaps) *systemdHandle {
 	h := &systemdHandle{unit: unit, startedAt: startedAt, stopTimeout: stopTimeout, done: make(chan struct{})}
+	h.caps.Store(&caps)
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
 		h.setArgv(st.ExecStart)
@@ -610,7 +696,7 @@ func (r *systemdRunner) reconcileStart(u unitSpec, cause error) (handle, error) 
 		r.log().Warn("start reported an error but the unit is running; adopting it", zap.String("unit", unit), zap.Error(cause))
 		ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
 		defer cancel()
-		return r.adopt(ctx, unit, time.Now(), u.StopTimeout), nil
+		return r.adopt(ctx, unit, time.Now(), u.StopTimeout, u.Caps), nil
 	case err == nil:
 		if st.loaded() {
 			ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
@@ -831,6 +917,11 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		h := &systemdHandle{unit: st.Unit, startedAt: st.StartedAt, stopTimeout: us.StopTimeout, done: make(chan struct{})}
 		h.pid.Store(int64(us.MainPID))
 		h.setArgv(us.ExecStart)
+		// The caps the unit was started with, which a config changed
+		// while hotserve was down may no longer be: syncCaps (app.go)
+		// compares them with the spec's once the instance is current.
+		caps := r.unitCaps(ctx, us)
+		h.caps.Store(&caps)
 		go r.watch(h)
 		return h, true, nil
 	}

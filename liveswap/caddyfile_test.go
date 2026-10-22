@@ -47,6 +47,9 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 			deploy_log_lines 12
 			max_artifact_size 50MB
 			max_artifact_entries 20000
+			memory_max 512MB
+			tasks_max 256
+			cpu_quota 150%
 		}
 
 		app api {
@@ -106,6 +109,9 @@ func TestCaddyfileUnmarshalFullConfig(t *testing.T) {
 	if blog.DeployLogLines == nil || *blog.DeployLogLines != 12 {
 		t.Fatalf("deploy_log_lines wrong: %+v", blog.DeployLogLines)
 	}
+	if blog.MemoryMax != 512_000_000 || blog.TasksMax != 256 || blog.CPUQuota != 150 {
+		t.Fatalf("caps wrong: %+v", blog)
+	}
 	if blog.Watchdog != "off" ||
 		blog.WatchdogFailures != 4 ||
 		blog.WatchdogGrace != caddy.Duration(45*time.Second) ||
@@ -136,7 +142,7 @@ func TestCaddyfileUnmarshalEmptyAppBlockLeavesDefaultsToProvision(t *testing.T) 
 	if blog.HealthPath != "" || blog.HealthInterval != 0 || blog.Soak != nil ||
 		blog.Deadline != 0 || blog.Drain != 0 || blog.Grace != 0 ||
 		blog.Keep != 0 || blog.MaxArtifactSize != 0 || blog.MaxArtifactEntries != 0 || len(blog.DeployTrust) != 0 ||
-		blog.DeployLogLines != nil {
+		blog.DeployLogLines != nil || blog.MemoryMax != 0 || blog.TasksMax != 0 || blog.CPUQuota != 0 {
 		t.Fatalf("parser applied defaults it must not: %+v", blog)
 	}
 	if blog.Watchdog != "" || blog.WatchdogFailures != 0 || blog.WatchdogGrace != 0 ||
@@ -169,6 +175,11 @@ func TestCaddyfileRefusesZeroWhereItWouldReadAsUnset(t *testing.T) {
 		{"max_artifact_entries 0", "max_artifact_entries must be at least 1, got 0"},
 		{"max_artifact_size 0", "max_artifact_size must be at least 1 byte, got 0"},
 		{"max_artifact_size 0MB", "max_artifact_size must be at least 1 byte, got 0MB"},
+		{"memory_max 0", "memory_max must be at least 1.0 MB, got 0"},
+		{"memory_max 999999", "memory_max must be at least 1.0 MB, got 999999"},
+		{"tasks_max 0", "tasks_max must be at least 1, got 0"},
+		{"cpu_quota 0%", "cpu_quota must be at least 1%, got 0%"},
+		{"cpu_quota 100001%", "cpu_quota must be at most 100000% (a thousand CPUs' worth), got 100001%"},
 		{"drain -1s", "drain must be more than 0, got -1s"},
 		{"keep -2", "keep must be at least 1, got -2"},
 		// The two whose 0 is a setting still refuse what is below it.

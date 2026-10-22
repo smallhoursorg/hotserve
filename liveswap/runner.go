@@ -78,6 +78,11 @@ type runner interface {
 	// gone; any error means the caller must assume it may still run.
 	Stop(h handle, grace time.Duration) error
 
+	// SetCaps gives a running instance's unit the caps, replacing what
+	// it had: a cap now unset is lifted. nil once the manager has
+	// applied them, from when the handle's state reports them.
+	SetCaps(h handle, caps resourceCaps) error
+
 	// Reattach tries to re-adopt an instance from persisted state after
 	// a hotserve restart: the unit named in st is still running under
 	// the service manager. (nil, false, nil) means it was observed not
@@ -161,7 +166,46 @@ type startSpec struct {
 	// can mistake it for an app's unit — and so a configured app can
 	// never collide with it.
 	probe bool
+	// caps bounds the unit (resourceCaps); the zero value sets none.
+	caps resourceCaps
 }
+
+// resourceCaps is what an app's units are bounded to: the three cgroup
+// caps the Caddyfile sets per app (memory_max, tasks_max, cpu_quota),
+// zero meaning none. Every unit of the app gets them at its start —
+// the instance and the pre_start alike (capProperties,
+// systemd_dbus.go) — and a running instance gets a reload's changed
+// values through SetCaps rather than at its next launch. The sandbox's
+// read-only cgroupfs is what makes them the app's ceiling rather than
+// a suggestion: the user manager's subtree is owned by the app's own
+// uid, so without it an app could rewrite its own memory.max.
+//
+// Measured on Debian 13 (systemd 257), Ubuntu 24.04 (255) and 26.04
+// (259): the user manager is delegated exactly the cpu, memory and
+// pids controllers, so these three are the caps a user manager can
+// set, and each reads back from the kernel at the value given.
+type resourceCaps struct {
+	// memoryMax is the RAM the unit's whole tree may use, in bytes. At
+	// it the kernel kills the process that asked (the biggest, when it
+	// is the tree's), the unit fails with Result=oom-kill and the
+	// watchdog restarts the app. The unit gets no swap under it
+	// (MemorySwapMax=0): a cap an app could spill past into swap would
+	// bound nothing.
+	memoryMax uint64
+	// tasksMax is the threads and processes of the unit's whole tree.
+	// Past it a fork or thread creation fails with EAGAIN; a `sh -c`
+	// wrapped command dies on the first one (dash exits 2), which the
+	// watchdog reads as a crash. An unset value leaves the user
+	// manager's own default, 15% of the kernel's threads-max.
+	tasksMax int
+	// cpuQuota is CPU time in percent of one CPU: 200 is two CPUs'
+	// worth. Past it the unit waits for the next period; nothing is
+	// killed. Unset is no bound beyond the fair share every unit has.
+	cpuQuota int
+}
+
+// any reports whether one cap is set.
+func (c resourceCaps) any() bool { return c.memoryMax > 0 || c.tasksMax > 0 || c.cpuQuota > 0 }
 
 // handle identifies a running instance to its runner.
 type handle interface {
@@ -186,4 +230,8 @@ type handleState struct {
 	// Unit is the transient systemd unit running the instance; it is
 	// what Reattach looks up after a hotserve restart.
 	Unit string `json:"unit,omitempty"`
+	// Caps is what the unit is bounded to, as the manager last applied
+	// them: the start's, a SetCaps's, or the values read at reattach.
+	// Not persisted: the manager is the ledger, and status reads this.
+	Caps resourceCaps `json:"-"`
 }

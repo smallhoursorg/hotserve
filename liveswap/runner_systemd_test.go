@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	sddbus "github.com/coreos/go-systemd/v22/dbus"
 	godbus "github.com/godbus/dbus/v5"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -50,10 +51,43 @@ type fakeSystemdConn struct {
 	// read: listed, then gone by the time the reader looks.
 	vanishOnRead map[string]bool
 	stopDelay    time.Duration // StopUnit sleeps this long (concurrency tests)
+	// setProps records every SetUnitProperties call by unit, in order.
+	setProps    map[string][][]sddbus.Property
+	setPropsErr error // SetUnitProperties returns this
+	// defaultTasksMax is what DefaultTasksMax reports; 0 reads as the
+	// manager's default being unreadable (defaultTasksMaxErr, or a
+	// generic error when that is nil).
+	defaultTasksMax    uint64
+	defaultTasksMaxErr error
+}
+
+func (f *fakeSystemdConn) DefaultTasksMax(_ context.Context) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.defaultTasksMaxErr != nil {
+		return 0, f.defaultTasksMaxErr
+	}
+	if f.defaultTasksMax == 0 {
+		return 0, errors.New("fake: no DefaultTasksMax set")
+	}
+	return f.defaultTasksMax, nil
 }
 
 func newFakeSystemdConn() *fakeSystemdConn {
 	return &fakeSystemdConn{status: map[string]unitStatus{}}
+}
+
+func (f *fakeSystemdConn) SetUnitProperties(_ context.Context, name string, props []sddbus.Property) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.setPropsErr != nil {
+		return f.setPropsErr
+	}
+	if f.setProps == nil {
+		f.setProps = map[string][][]sddbus.Property{}
+	}
+	f.setProps[name] = append(f.setProps[name], props)
+	return nil
 }
 
 func (f *fakeSystemdConn) StartTransientUnit(ctx context.Context, u unitSpec) (string, error) {
@@ -1285,6 +1319,14 @@ func TestUnitStatusRunning(t *testing.T) {
 		{unitStatus{ExecMainCode: 1, ExecMainStatus: 3}, "exit status 3"},
 		{unitStatus{ExecMainCode: 1, ExecMainStatus: 0}, "exit status 0"},
 		{unitStatus{ExecMainCode: 2, ExecMainStatus: 9}, "killed by signal 9 (killed)"},
+		// The manager's Result names the OOM kill the main process's
+		// own end does not: the kernel takes the process that asked
+		// (a child, under `sh -c`), and the manager stops the unit, so
+		// the main process reads as a signal, an exit code or the
+		// stop's SIGTERM — and the suffix lands on all of them.
+		{unitStatus{ExecMainCode: 2, ExecMainStatus: 9, Result: "oom-kill"}, "killed by signal 9 (killed); the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it"},
+		{unitStatus{ExecMainCode: 1, ExecMainStatus: 137, Result: "oom-kill"}, "exit status 137; the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it"},
+		{unitStatus{ExecMainCode: 2, ExecMainStatus: 15, Result: "oom-kill"}, "killed by signal 15 (terminated); the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it"},
 		{unitStatus{ExecMainCode: 0, ExecMainStatus: 0}, "no process exit recorded"},
 		{unitStatus{ExecMainCode: 0, ExecMainStatus: 0, Result: "exec-condition"}, "no process exit recorded (result exec-condition)"},
 	} {

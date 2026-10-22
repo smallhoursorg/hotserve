@@ -98,10 +98,17 @@ type fakeHandle struct {
 	// argv is what this handle was started with, reported back the way
 	// the real runner reports the manager's ExecStart.
 	argv []string
+	// caps is what the "unit" is bounded to: the start spec's, then
+	// whatever SetCaps last set, as the real handle reports them.
+	caps resourceCaps
 	mu   sync.Mutex
 }
 
-func (h *fakeHandle) state() handleState { return handleState{PID: 4242, Command: h.argv} }
+func (h *fakeHandle) state() handleState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return handleState{PID: 4242, Command: h.argv, Caps: h.caps}
+}
 
 func (h *fakeHandle) isAlive() bool {
 	h.mu.Lock()
@@ -158,6 +165,8 @@ type fakeRunner struct {
 	sweepErr        error   // Sweep returns this
 	sweepErrs       []error // consumed one per Sweep call before sweepErr applies
 	sweeps          []handle
+	setCaps         []resourceCaps // every SetCaps, in order
+	setCapsErr      error          // SetCaps returns this (and sets nothing)
 }
 
 func (r *fakeRunner) Start(spec startSpec) (handle, error) {
@@ -166,7 +175,7 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 	if r.startErr != nil {
 		return nil, r.startErr
 	}
-	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), socket: spec.socket, argv: spec.command}
+	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), socket: spec.socket, argv: spec.command, caps: spec.caps}
 	if r.startDies != "" {
 		h.exit = r.startDies
 		h.kill()
@@ -191,9 +200,10 @@ func (r *fakeRunner) Exit(h handle) (string, int) {
 	if fh.isAlive() {
 		return "", fh.state().PID
 	}
+	pid := fh.state().PID // state takes the handle's lock too: read it first
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	return fh.exit, fh.state().PID
+	return fh.exit, pid
 }
 
 func (r *fakeRunner) RunOnce(_ context.Context, spec startSpec) error {
@@ -226,6 +236,21 @@ func (r *fakeRunner) Wait(h handle) <-chan struct{} {
 		return nil
 	}
 	return fh.done
+}
+
+func (r *fakeRunner) SetCaps(h handle, caps resourceCaps) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.setCapsErr != nil {
+		return r.setCapsErr
+	}
+	r.setCaps = append(r.setCaps, caps)
+	if fh, ok := h.(*fakeHandle); ok {
+		fh.mu.Lock()
+		fh.caps = caps
+		fh.mu.Unlock()
+	}
+	return nil
 }
 
 func (r *fakeRunner) Reattach(st handleState) (handle, bool, error) {

@@ -55,6 +55,13 @@
 			# heal the replacement (and re-probe) within seconds.
 			watchdog_grace 5s
 			keep 2
+			# Resource caps: scenario 4 reads them back from inside the
+			# sandbox and from the manager; 4b changes cpu_quota on a
+			# reload and reads the running unit's new cap. Wide enough
+			# that no scenario's demo release comes near them.
+			memory_max 256MB
+			tasks_max 256
+			cpu_quota 150%
 		}
 
 		# The Deno example (examples/deno), with the flags from its own

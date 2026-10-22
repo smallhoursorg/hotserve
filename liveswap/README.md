@@ -288,6 +288,9 @@ resolved at config load.
 | `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
+| `memory_max` | none | RAM for every unit of the app, e.g. `512MB` (at least `1MB`); at it the kernel kills the process that asked, the unit fails and the watchdog restarts the app. No swap under it. See [Resource caps](#resource-caps) |
+| `tasks_max` | none (the user manager's own default, 15% of threads-max) | Threads and processes of every unit of the app; past it a fork or thread fails with EAGAIN. Removing it on a reload puts the running unit back on the manager's default |
+| `cpu_quota` | none | CPU time for every unit of the app, in percent of one CPU: `200%` is two CPUs' worth, at most `100000%`; past it the app waits, nothing is killed |
 
 Every duration, count and size above must be more than `0`, except `soak`
 and `deploy_log_lines`, where `0` is a setting. A `0` elsewhere is
@@ -308,6 +311,54 @@ example unpacks to about 300 MB in two binaries, and it is the
 compressed tarball that has to fit `max_artifact_size`. A million tiny
 files fit the byte budget comfortably; refusing those is the entry
 cap's job.
+
+### Resource caps
+
+`memory_max`, `tasks_max` and `cpu_quota` bound every unit of the app —
+the instance and its `pre_start` alike — as the unit's own
+`MemoryMax=`, `TasksMax=` and `CPUQuota=`, which the sandbox's
+read-only cgroupfs keeps the app from rewriting. None is set unless
+you set it. What each one does when it is hit:
+
+| Cap hit | What happens | What you see |
+|---|---|---|
+| `memory_max` | The kernel kills the process that asked for the memory — under a `sh -c` or `npm start` command that is a child — and the manager then stops the unit (`Result=oom-kill`); the watchdog restarts the app, on its budget. A `pre_start` that hits it fails the deploy | `journalctl -t hotserve-<app>` shows the kill; the deploy's response or `watchdog.last_restart_cause` says `crash`, and the exit the runner records ends `; the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it` |
+| `tasks_max` | A `fork` or thread creation fails with `EAGAIN`. A runtime limps on; a `sh -c` wrapped `command` dies on the first refused fork (dash exits 2), which the watchdog reads as a crash | the app's own error, in its journal |
+| `cpu_quota` | The unit waits for the next 100 ms period. Nothing is killed | latency; `cpu.stat`'s `nr_throttled` in the unit's cgroup |
+
+Sizing, measured 2026-10-22: an idle Node server has 7 threads (11 under
+ten concurrent file reads, more with `UV_THREADPOOL_SIZE`), an idle
+Deno server 8, so a `tasks_max` under a few dozen breaks a runtime
+before it breaks a fork bomb. Without `tasks_max` a unit is already
+bounded at the user manager's default, 15% of the kernel's
+`threads-max` (2273 on a 2 GB box), and a fork bomb at that bound left
+the box operable: hotserve answered, a deploy started within 2 s,
+stopping the unit took 5 s. What it did do was stall the app's
+**siblings** — a second app's requests ran to 10 s — because every
+app's unit has the same CPU weight; `cpu_quota` on each app is what
+bounds that. Caddy itself is not starved: `system.slice` and
+`user.slice` split CPU 50/50 at the root. A leak without `memory_max`
+is killed by the kernel's global OOM killer, the app first — a
+user-manager unit runs at `oom_score_adj` 200 and hotserve.service at
+0, which is systemd's default for user managers and their units, not
+a setting of hotserve's — after the box has spent its free memory on
+it.
+
+A reload that changes a cap sets it on the running instance at once,
+through the manager — no restart; `GET /<app>` shows the values in
+effect as `caps` (`memory_max` in bytes, `tasks_max`, `cpu_quota` in
+percent). A reload that removes one lifts it the same way. Should the
+manager refuse the change, the journal says so and the caps apply at
+the app's next launch.
+
+To bound every app at once — the whole `hotserve` user against Caddy —
+set the caps on the user's slice instead, from the console:
+`systemctl set-property user-$(id -u hotserve).slice MemoryMax=2G CPUQuota=300%`
+applies at once and persists; a drop-in file plus `daemon-reload` is
+**not** re-applied to the live slice on Debian 13's systemd 257
+(measured; 255 and 259 do). It is the box's setting, not hotserve's,
+so the package does not write it — see
+[hardening step 6](../docs/hardening.md#6-a-ceiling-for-all-the-apps-together-if-you-want-one).
 
 ## Watchdog
 

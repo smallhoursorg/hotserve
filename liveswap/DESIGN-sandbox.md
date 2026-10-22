@@ -37,8 +37,10 @@ What this stops: lateral movement from one compromised app (sibling
 files/env/releases, TLS keys, admin socket, sibling `/proc`, signals).
 What this does NOT stop, stated honestly: theft of the compromised
 app's own secrets (its env is its env), network exfiltration (netns is
-shared by design), resource exhaustion (caps are unset until an app
-needs them — #71), install-time supply-chain attacks (those run in
+shared by design), resource exhaustion (the per-app caps are the
+operator's to set, none by default — DESIGN-liveswap.md "Resource
+caps"; the sandbox only keeps a set cap from being rewritten),
+install-time supply-chain attacks (those run in
 CI, not on the box), a syscall filter the kernel refused on a host
 that already filters the user manager, and IPC between siblings:
 every app shares the user manager's SysV IPC and POSIX message
@@ -630,9 +632,11 @@ testing that `/etc/ssl/private` stays out of the view.
 
 ## Non-goals
 
-- Resource limits (`MemoryMax=`, `TasksMax=`, `CPUQuota=`) — real the
-  moment they are set, because `/sys/fs/cgroup` is read-only in the
-  unit; unset by design until an app needs bounding (#71).
+- Resource limits are liveswap's (`memory_max`, `tasks_max`,
+  `cpu_quota`; DESIGN-liveswap.md, "Resource caps"). The sandbox's part
+  is that `/sys/fs/cgroup` is read-only in the unit, which is what
+  keeps a cap the app's own uid owns the cgroup of from being
+  rewritten by the app.
 - Network egress control — kernel sandboxes cannot scope by hostname.
   The sandbox is the kernel-enforced ceiling; a runtime's own
   `--allow-*` flags are the app narrowing itself inside it, enforced

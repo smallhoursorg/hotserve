@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/dustin/go-humanize"
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"go.uber.org/zap"
 )
@@ -251,6 +252,25 @@ type AppConfig struct {
 	// filling the disk for everything else on the box. A deploy warns
 	// at 75% of it. Default 100000; a CI-built artifact is thousands.
 	MaxArtifactEntries int `json:"max_artifact_entries,omitempty"`
+
+	// MemoryMax bounds the RAM every unit of the app may use (the
+	// instance and the pre_start alike), in bytes; the Caddyfile
+	// accepts 512MB. At it the kernel kills the process that asked, the
+	// unit fails and the watchdog restarts the app; it gets no swap
+	// under it. A running instance gets a reload's new value at once.
+	// Default none.
+	MemoryMax uint64 `json:"memory_max,omitempty"`
+
+	// TasksMax bounds the threads and processes of every unit of the
+	// app; past it a fork or thread fails with EAGAIN, which a `sh -c`
+	// wrapped command dies on. Default none: the user manager's own,
+	// 15% of the kernel's threads-max.
+	TasksMax int `json:"tasks_max,omitempty"`
+
+	// CPUQuota bounds the CPU time of every unit of the app, in percent
+	// of one CPU (200 is two CPUs' worth); past it the app waits, it is
+	// never killed. Default none.
+	CPUQuota int `json:"cpu_quota,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -489,6 +509,7 @@ func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 		deployLogLines:     *cfg.DeployLogLines,
 		maxArtifactSize:    cfg.MaxArtifactSize,
 		maxArtifactEntries: cfg.MaxArtifactEntries,
+		caps:               resourceCaps{memoryMax: cfg.MemoryMax, tasksMax: cfg.TasksMax, cpuQuota: cfg.CPUQuota},
 		allowInsecure:      a.AllowInsecureHTTP,
 		allowlist:          allowlist,
 		dirs:               newAppDirs(a.Root, name),
@@ -604,6 +625,18 @@ func (a *App) Validate() error {
 		}
 		if cfg.MaxArtifactEntries < 1 {
 			return fmt.Errorf("app %s: max_artifact_entries must be positive, got %d", name, cfg.MaxArtifactEntries)
+		}
+		// The Caddyfile refuses these at parse; a JSON config reaches
+		// here directly. 0 is unset for all three; the bounds are the
+		// parser's (minMemoryMax, maxCPUQuota).
+		if cfg.TasksMax < 0 || cfg.CPUQuota < 0 {
+			return fmt.Errorf("app %s: tasks_max and cpu_quota must not be negative, got %d and %d", name, cfg.TasksMax, cfg.CPUQuota)
+		}
+		if cfg.MemoryMax > 0 && cfg.MemoryMax < minMemoryMax {
+			return fmt.Errorf("app %s: memory_max must be at least %s, got %d bytes", name, humanize.Bytes(minMemoryMax), cfg.MemoryMax)
+		}
+		if cfg.CPUQuota > maxCPUQuota {
+			return fmt.Errorf("app %s: cpu_quota must be at most %d%%, got %d%%", name, maxCPUQuota, cfg.CPUQuota)
 		}
 	}
 	// Cross-app, so it needs every app's config and comes after the

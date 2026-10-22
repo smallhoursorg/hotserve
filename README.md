@@ -195,9 +195,6 @@ above for what an app can reach,
 settings, and [DESIGN-threat-model.md](DESIGN-threat-model.md) for why
 each one is there. What is still ahead:
 
-- **Resource caps.** `MemoryMax=`, `TasksMax=` and `CPUQuota=` hold
-  inside the unit already, and are left unset by design until an app
-  needs bounding (#71).
 - **Per-app UIDs.** Apps share the unprivileged `hotserve` user; giving
   each its own would need a small privileged helper, so it stays a
   later milestone.

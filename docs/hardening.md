@@ -197,3 +197,48 @@ with `Error running install command '/bin/false' for module <name>`
 on the hand run. The way back is
 `rm /etc/modprobe.d/hotserve-protocols.conf`; nothing else holds the
 setting.
+
+## 6. A ceiling for all the apps together, if you want one
+
+Each app can be bounded on its own (`memory_max`, `tasks_max` and
+`cpu_quota` in its block — [liveswap/README.md](../liveswap/README.md#resource-caps)),
+and that is what keeps one app's burst from stalling another. What
+that does not set is a ceiling for the apps *as a whole* against
+hotserve itself, which shares the box with them: hotserve runs in
+`system.slice` and every app under the `hotserve` user's slice, and
+the two halves already split the CPU evenly under load, but nothing
+bounds the apps' memory as a set. If you want that, set it on the
+user's slice. Like the steps before it this is the box's setting, so
+hotserve's package does not write it, and nothing in it stops or
+restarts an app.
+
+As root on the box, with the sizes that fit it (here a 4 GB box
+keeping 1 GB back):
+
+```sh
+systemctl set-property user-$(id -u hotserve).slice MemoryMax=3G CPUQuota=300%
+```
+
+It applies at once to everything under the slice and persists across
+reboots (systemd writes it under `/etc/systemd/system.control/`).
+Check it:
+
+```sh
+systemctl show user-$(id -u hotserve).slice -p MemoryMax,CPUQuotaPerSecUSec
+cat /sys/fs/cgroup/user.slice/user-$(id -u hotserve).slice/memory.max    # prints the bytes
+```
+
+Use `set-property`, not a drop-in file: on Debian 13's systemd 257 a
+drop-in under `/etc/systemd/system/user-<uid>.slice.d/` followed by
+`daemon-reload` shows the new value in `systemctl show` but does not
+re-apply it to the running slice (measured; systemd 255 and 259 do),
+so the ceiling would hold only from the next boot. The way back is
+`systemctl set-property user-$(id -u hotserve).slice MemoryMax=infinity CPUQuota=`,
+which lifts both at once; `systemctl revert user-$(id -u hotserve).slice`
+then removes the files `set-property` left under `system.control`. Not
+`revert` on its own: it removes the files but leaves the live ceiling
+in the kernel until the next boot (measured, systemd 257).
+
+What hitting the ceiling looks like: the kernel's OOM killer takes the
+largest process under the slice — one app's, which its watchdog
+restarts — and `journalctl -k` names it; the CPU quota only slows.

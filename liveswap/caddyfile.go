@@ -3,6 +3,7 @@ package liveswap
 import (
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
@@ -75,6 +76,9 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        max_artifact_size <size>
 //	        max_artifact_entries <n>
 //	        deploy_log_lines  <n>
+//	        memory_max        <size>
+//	        tasks_max         <n>
+//	        cpu_quota         <n>%
 //	    }
 //	}
 func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -283,6 +287,26 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if err := parseCountArg(d, &cfg.MaxArtifactEntries, 1); err != nil {
 				return err
 			}
+		case "memory_max":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			size, err := humanize.ParseBytes(d.Val())
+			if err != nil {
+				return d.Errf("invalid memory_max %q: %v", d.Val(), err)
+			}
+			if size < minMemoryMax {
+				return d.Errf("memory_max must be at least %s, got %s; leave it out for no cap", humanize.Bytes(minMemoryMax), d.Val())
+			}
+			cfg.MemoryMax = size
+		case "tasks_max":
+			if err := parseCountArg(d, &cfg.TasksMax, 1); err != nil {
+				return err
+			}
+		case "cpu_quota":
+			if err := parsePercentArg(d, &cfg.CPUQuota); err != nil {
+				return err
+			}
 		default:
 			return d.Errf("unknown app subdirective %q", d.Val())
 		}
@@ -308,6 +332,42 @@ func parseCountArg(d *caddyfile.Dispenser, out *int, least int) error {
 	}
 	if n < least {
 		return d.Errf("%s must be at least %d, got %d; leave it out for the default", name, least, n)
+	}
+	*out = n
+	return nil
+}
+
+// The bounds of the two caps whose value is a size or a percentage.
+// A memory_max under a megabyte is a unit nothing can exec in (the
+// kernel rounds memory.max to pages, and 1 byte is 0 of them), which
+// would be OOM-killed at every launch with nothing naming the cause; a
+// cpu_quota over a thousand CPUs' worth is more than any box, and past
+// it the quota's microseconds (percent × usecPerPercent) would
+// overflow into a small, silently wrong cap.
+const (
+	minMemoryMax = 1_000_000 // 1MB, in the SI units humanize parses
+	maxCPUQuota  = 100_000   // percent: 1000 CPUs' worth
+)
+
+// parsePercentArg reads one percentage written as systemd writes a CPU
+// quota — `200%`, two CPUs' worth — and refuses anything else, the
+// bare number included: a quota without its % reads as a count of
+// something, and 2 would be two percent of one CPU.
+func parsePercentArg(d *caddyfile.Dispenser, out *int) error {
+	name := d.Val()
+	if !d.NextArg() {
+		return d.ArgErr()
+	}
+	v := d.Val()
+	n, err := strconv.Atoi(strings.TrimSuffix(v, "%"))
+	if !strings.HasSuffix(v, "%") || err != nil {
+		return d.Errf("invalid %s %q: a percentage of one CPU, like 200%% for two CPUs' worth", name, v)
+	}
+	if n < 1 {
+		return d.Errf("%s must be at least 1%%, got %s; leave it out for no cap", name, v)
+	}
+	if n > maxCPUQuota {
+		return d.Errf("%s must be at most %d%% (a thousand CPUs' worth), got %s", name, maxCPUQuota, v)
 	}
 	*out = n
 	return nil

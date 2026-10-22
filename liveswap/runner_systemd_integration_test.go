@@ -1186,3 +1186,98 @@ func TestIntegrationSystemdSIGTERMReachesNamespaceInit(t *testing.T) {
 	}
 	t.Logf("SIGTERM honoured inside the PID namespace: handler ran, stop took %s of a %s grace", took, spec.grace)
 }
+
+// TestIntegrationSystemdCapsHoldAndChangeLive: the caps a unit starts
+// with read back from the manager at the values given; SetCaps changes
+// a running unit's with its process untouched, lifting what is now
+// unset; a reattach reads them back. The kernel's own view (the
+// cgroup files) is asserted where this lane's container delegates the
+// controllers, and the e2e lane asserts it from inside the sandbox.
+func TestIntegrationSystemdCapsHoldAndChangeLive(t *testing.T) {
+	r := integrationRunner(t)
+	spec := scriptApp(t, "exec sleep 300\n")
+	spec.caps = resourceCaps{memoryMax: 64 << 20, tasksMax: 40, cpuQuota: 50}
+	h, err := r.Start(spec)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Stop(h, spec.grace) })
+	unit := h.state().Unit
+	show := func() string {
+		return run(t, "systemctl", "--user", "show", unit, "-p", "MemoryMax,MemorySwapMax,TasksMax,CPUQuotaPerSecUSec")
+	}
+	expect := func(label string, wants ...string) {
+		t.Helper()
+		props := show()
+		for _, want := range wants {
+			if !strings.Contains(props, want+"\n") {
+				t.Errorf("%s: unit lacks %s:\n%s", label, want, props)
+			}
+		}
+	}
+	expect("at start", "MemoryMax=67108864", "MemorySwapMax=0", "TasksMax=40", "CPUQuotaPerSecUSec=500ms")
+	if got := h.state().Caps; got != spec.caps {
+		t.Errorf("handle reports %+v, want the start's %+v", got, spec.caps)
+	}
+	cg := strings.TrimSpace(run(t, "systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit))
+	kernel := func(file string) string {
+		b, err := os.ReadFile("/sys/fs/cgroup" + cg + "/" + file)
+		if err != nil {
+			return "absent"
+		}
+		return strings.TrimSpace(string(b))
+	}
+	delegated := kernel("memory.max") != "absent"
+	if delegated {
+		for file, want := range map[string]string{"memory.max": "67108864", "memory.swap.max": "0", "pids.max": "40", "cpu.max": "50000 100000"} {
+			if got := kernel(file); got != want {
+				t.Errorf("kernel %s = %q, want %q", file, got, want)
+			}
+		}
+	} else {
+		t.Log("the memory controller does not reach the unit's cgroup in this container; the kernel's view is the e2e lane's to assert")
+	}
+
+	// A lifted tasks cap goes to the manager's own default, which is
+	// what the manager reports for a unit that never had a TasksMax=
+	// — never to infinity, which would lift the manager's bound too.
+	def := strings.TrimSpace(run(t, "systemctl", "--user", "show", "-p", "DefaultTasksMax", "--value"))
+	if def == "" || def == "infinity" {
+		t.Fatalf("DefaultTasksMax = %q: the lift has no number to go to", def)
+	}
+	pid := h.state().PID
+	next := resourceCaps{memoryMax: 128 << 20, cpuQuota: 25} // tasks_max lifted
+	if err := r.SetCaps(h, next); err != nil {
+		t.Fatalf("SetCaps: %v", err)
+	}
+	expect("after SetCaps", "MemoryMax=134217728", "MemorySwapMax=0", "TasksMax="+def, "CPUQuotaPerSecUSec=250ms")
+	if got := h.state().Caps; got != next {
+		t.Errorf("handle reports %+v after SetCaps, want %+v", got, next)
+	}
+	if got := h.state().PID; got != pid {
+		t.Errorf("pid changed from %d to %d: the caps must apply without a restart", pid, got)
+	}
+	if delegated {
+		for file, want := range map[string]string{"memory.max": "134217728", "pids.max": "max", "cpu.max": "25000 100000"} {
+			if got := kernel(file); got != want {
+				t.Errorf("kernel %s = %q after SetCaps, want %q", file, got, want)
+			}
+		}
+	}
+	// A reattach reads the caps the unit carries, not the spec's.
+	if again, ok, err := r.Reattach(h.state()); err != nil || !ok {
+		t.Fatalf("reattach: ok=%v err=%v", ok, err)
+	} else if got := again.state().Caps; got != next {
+		t.Errorf("reattached handle reports %+v, want the unit's %+v", got, next)
+	}
+	if err := r.SetCaps(h, resourceCaps{}); err != nil {
+		t.Fatalf("SetCaps (lift): %v", err)
+	}
+	expect("lifted", "MemoryMax=infinity", "MemorySwapMax=infinity", "TasksMax="+def, "CPUQuotaPerSecUSec=infinity")
+	if delegated && kernel("memory.max") != "max" {
+		t.Errorf("kernel memory.max = %q after lifting, want max", kernel("memory.max"))
+	}
+	if got := h.state().Caps; got.any() {
+		t.Errorf("handle reports %+v after lifting, want none", got)
+	}
+}

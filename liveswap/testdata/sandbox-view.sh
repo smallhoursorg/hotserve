@@ -185,14 +185,30 @@ else
 	*) emit cgroup "denied: $(printf '%s' "$cgerr" | tr '\n' ' ')" ;;
 	esac
 fi
-# Reported, not asserted: whether the memory controller reaches the
-# unit's cgroup at all. That is the question resource caps (#71) stand
-# on, not this sandbox's. With no cgroup in the view there is nothing
-# to look in, and `absent` would read as "not delegated": skipped.
+# Whether the memory controller reaches the unit's cgroup at all: what
+# the caps below stand on (the e2e lane asserts it, the smoke lane's
+# container does not delegate it and reports it). With no cgroup in
+# the view there is nothing to look in, and `absent` would read as
+# "not delegated": skipped.
 if [ -n "$cg_seen" ]; then
 	exists cgroup_memory_max present absent "$cg/memory.max"
 else
 	emit cgroup_memory_max skipped
+fi
+# The caps, as the kernel holds them in this unit's own cgroup: what the
+# app's memory_max / tasks_max / cpu_quota set, or `max` where none
+# is. Read from in here because that is the claim — the cap the app
+# sees is the cap it is under, and (cgroup above) one it cannot change.
+# `absent` is a controller that does not reach the cgroup; skipped as
+# above with no cgroup in the view.
+if [ -n "$cg_seen" ]; then
+	emit cgroup_memory_max_value "$(cat "$cg/memory.max" 2>/dev/null || echo absent)"
+	emit cgroup_pids_max "$(cat "$cg/pids.max" 2>/dev/null || echo absent)"
+	emit cgroup_cpu_max "$(cat "$cg/cpu.max" 2>/dev/null || echo absent)"
+else
+	emit cgroup_memory_max_value skipped
+	emit cgroup_pids_max skipped
+	emit cgroup_cpu_max skipped
 fi
 writable tmp /tmp/.probe-w
 emit home "$HOME"

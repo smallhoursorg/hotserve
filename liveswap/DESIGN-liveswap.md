@@ -802,15 +802,97 @@ severity × occurrence × detection, then the fix's size and risk.
 |---|---|---|---|---|
 | A bind mount can give two apps one directory, or put one app's data inside another's: an fstab source another app also uses, or a whole app dir mounted at another's. A mount resolves to itself, so the launch check (`resolveBindSources`) passes it: blog launches on shop's data, writable, and nothing says so. | 5 | 5 | 5 | #308, to design: equal `(st_dev, st_ino)` alone misses a source nested in another's; when to check, what to refuse and what to say are open there. Until then, the README's bind-mount advice says the source must be the app's own |
 
+## Resource caps
+
+Per app, `memory_max`, `tasks_max` and `cpu_quota` (liveswap.go
+`AppConfig`) become the unit's `MemoryMax=` (with `MemorySwapMax=0`),
+`TasksMax=` and `CPUQuotaPerSecUSec=` on every unit of the app — the
+instance and the pre_start — rendered by `capProperties`
+(systemd_dbus.go) beside the sandbox set. A unit with none set gets
+none of the properties, so the manager's defaults stand unchanged. A
+running instance gets a reload's values through `SetUnitProperties`
+(runtime) rather than at its next launch: `syncCaps` (app.go) runs
+after every `configure` (App.Start), after a reattach (ensureRunning)
+and after a candidate's rollback (Cleanup), compares the spec's caps
+with the handle's — what the manager last applied, or read back at
+reattach (`propCaps`) — and sends every cap when they differ: an
+unset memory or CPU cap as infinity, their default, and an unset
+tasks cap as the manager's `DefaultTasksMax` (read once per
+connection), because an unset `TasksMax=` means that default, not
+infinity — infinity would lift the manager's own 15% bound from the
+unit. The same number is the reason a reattach cannot take the
+manager's word for a tasks cap as it stands: the manager reports an
+unset `TasksMax=` resolved to its default (a number, never
+"infinity"), so a reattach reads a `TasksMax` equal to
+`DefaultTasksMax` as unset (`unitCaps`). With the default unreadable
+a lift leaves the unit's tasks cap alone and the handle keeps
+reporting it. Status reports the handle's (`caps`). `memory_max` has
+a floor of 1 MB and `cpu_quota` a ceiling of 100000% (`minMemoryMax`,
+`maxCPUQuota`, caddyfile.go): below the one the unit cannot exec,
+above the other the quota's microseconds overflow.
+
+Measured 2026-10-22 on multipass VMs (2 vCPU, 2 GB, no swap): Debian
+13 (systemd 257), Ubuntu 24.04 (255), Ubuntu 26.04 (259), with the
+caps set on a sandboxed transient unit of a lingering user's manager.
+What the design rests on:
+
+- `user@.service` delegates `cpu memory pids` on all three, and on
+  Fedora 43 (258): the three caps are the whole set a user manager
+  can hold; the kernel reads back each value given, and a write from
+  inside the unit is EROFS (`ProtectControlGroups=`).
+- `set-property --runtime` on the running unit changed `memory.max`,
+  `pids.max` and `cpu.max` with the same pid, and cleared them to
+  `max` again — the live path.
+- A `MemoryMax=` hit ends as `Result=oom-kill`, `ActiveState=failed`
+  (`OOMPolicy=stop` is the default on all three), which the runner
+  already reads as a crash; `memory.oom.group` is 0, so the kernel
+  kills the one process, and the stop policy takes the unit.
+- `TasksMax=40` against a fork loop: a `sh -c` command died with
+  status 2 at the first refused fork; Python kept running with 39
+  children and 61 refusals. Idle threads: Node 7 (11 under ten file
+  reads), Deno 8.
+- Without caps: a fork bomb is bounded at `DefaultTasksMax=15%` of
+  threads-max (2273 at 2 GB) under a user slice at 33%; at the bound
+  the system manager answered in 0 s, a new user unit started in 0–2 s,
+  `stop` took 2–5 s. A leak was killed by the global OOM killer after
+  35–49 s, the leaker first (`oom_score_adj` 200 against hotserve's 0:
+  systemd's defaults for a user manager's units and a system service,
+  not hotserve's setting),
+  sibling and managers untouched; the box's responsiveness during
+  those seconds was not measured, and a box with swap would thrash
+  longer.
+- The real victim is a sibling: under the bomb a second app's requests
+  hit a 10 s timeout on Debian 13 and Ubuntu 24.04 (1.3 s on 26.04)
+  while a server in `system.slice` kept a 5–9 ms median (the root
+  splits CPU 50/50 between `system.slice` and `user.slice`).
+  `CPUQuota=50%` or `CPUWeight=10` on the offender brought the sibling
+  back under 200 ms.
+- `systemctl set-property user-<uid>.slice …` applies live and persists
+  on all three; a drop-in plus `daemon-reload` does not re-apply on
+  257 (the manager shows the new value, the kernel keeps the old) and
+  does on 255 and 259. Docs say set-property.
+- Ubuntu 24.04 and 26.04 refuse the sandboxed unit outright under their
+  default `apparmor_restrict_unprivileged_userns=1` (exit 218); with
+  it 0 every number above matched Debian.
+
+Accepted: `memory_max` applies to the pre_start too — a migration
+needing more than the server is raised like any other cap, and the
+deploy's response names the OOM kill. A cap the manager refuses to
+set live (a stale connection) applies at the next launch and the
+journal says so; the next reload, or a reattach, tries again, nothing
+in between does.
+
 ## Non-goals
 
 - Post-promote *auto*-revert. Rollback is an explicit operation —
   `POST /<app>?rollback=<version>` relaunches an on-disk release. The
   watchdog restarts the same version; it never auto-reverts.
 - Multi-node or any cluster awareness.
-- Resource limits — one unit property away (`MemoryMax=`, `TasksMax=`,
-  `CPUQuota=`; the sandbox makes cgroupfs read-only so they hold);
-  unset by design until an app needs them (#71).
+- Resource limits beyond the three a user manager can set (`memory_max`,
+  `tasks_max`, `cpu_quota` — see "Resource caps"): IO and cpuset caps
+  need controllers `user@.service` does not delegate (measured on
+  systemd 255, 257, 259); a CPU *weight* directive is one property
+  away and waits for a case.
 - Prometheus metrics (deploys_total, duration).
 - Deploy queueing; 409 + CI retry is the queue.
 - Windows.
