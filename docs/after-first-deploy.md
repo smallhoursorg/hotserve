@@ -5,8 +5,9 @@ is in git. This page has what comes next, running it: changing the
 config, secrets, the way back from an upgrade, day to day, and what to
 do at 3am. [Hardening the box](hardening.md) — SSH by key only, the
 SSH port shut to everyone but you, and, if you want them, an
-administrator who is not root and Debian's updates installed on their
-own — has a page of its own.
+administrator who is not root, Debian's updates installed on their
+own, and seven kernel network modules no app needs refused — has a
+page of its own.
 
 Names are the ones from the first page.
 

@@ -67,9 +67,3 @@ Dated one-liners; the full text of each is in git.
   runs v0.3.1: postinstall stops removing the AppArmor profile packages
   before the Debian-13-only matrix left, and the two residuals of
   taking a box to or from a release with the starter as a conffile go.
-- 2026-10-22 (#315) — The `.deb` ships `/usr/lib/modprobe.d/hotserve.conf`,
-  making seven kernel modules unavailable to every user of the box
-  (`install <module> /bin/false`; liveswap/DESIGN-sandbox.md,
-  "Module-backed protocols"); the smoke test reads it back through
-  `modprobe -n -v`. Host-wide; undone by an operator's file of the
-  same name in `/etc/modprobe.d` or by removing the package.

@@ -3,9 +3,10 @@
 [Your first deploy](first-deploy.md) leaves a working box with the
 doors a fresh server has. This page closes them: SSH by key only, the
 SSH port shut to everyone but you, and, if you want them, an
-administrator who is not root and Debian's updates for its release —
-security fixes and point releases — installed on their own. It is
-recommended, and none of it is needed to deploy.
+administrator who is not root, Debian's updates for its release —
+security fixes and point releases — installed on their own, and seven
+network protocols the kernel would otherwise load for any program
+refused. It is recommended, and none of it is needed to deploy.
 
 Nothing here changes how the box deploys or takes its config: app
 deploys authenticate with the workflow's token, and config with a
@@ -156,3 +157,43 @@ unattended-upgrade --dry-run -v    # what the next run would install; "No packag
 
 Every run, this dry run included, writes what it did to
 `/var/log/unattended-upgrades/unattended-upgrades.log`.
+
+## 5. Kernel modules no app needs, if you want them
+
+Every app runs with its network families cut to the four it needs
+(the sandbox table in [liveswap/README.md](../liveswap/README.md#sandbox)),
+but the kernel loads a protocol's module on the first socket that
+names it, for any program, and under those four families three such
+protocols are modules on Debian 13: SCTP, L2TP over IP and SMC. A
+compromised app could open one and reach kernel code nothing on a web
+server uses. This step tells the kernel's module loader to refuse
+them, and with them DCCP, TIPC and RDS, which the CIS Debian benchmark
+refuses on every server; those three load only by root's hand on
+Debian, and a loaded TIPC takes configuration from any program. Like
+steps 3 and 4 it is optional, and nothing in it stops or restarts an
+app. It is the box's setting, not hotserve's: it holds for every
+program on the box, which is why hotserve's package does not write it.
+Skip it on a box that also runs an L2TP VPN server or an SCTP
+workload, which a hotserve box does not.
+
+As root on the box:
+
+```sh
+printf 'install %s /bin/false\n' sctp l2tp_ip l2tp_ip6 smc dccp tipc rds > /etc/modprobe.d/hotserve-protocols.conf
+```
+
+Check that the loader reads it, and that none of the seven is loaded
+already — a loaded module stays until reboot:
+
+```sh
+modprobe -n -v sctp    # prints: install /bin/false
+lsmod | grep -Ew 'sctp|l2tp_ip|l2tp_ip6|smc|dccp|tipc|rds'    # prints nothing
+```
+
+What it does: `install <module> /bin/false` replaces loading the module
+with a command that fails, so the kernel's autoload, a hand
+`modprobe`, and a module that depends on one of the seven all stop,
+with `Error running install command '/bin/false' for module <name>`
+on the hand run. The way back is
+`rm /etc/modprobe.d/hotserve-protocols.conf`; nothing else holds the
+setting.

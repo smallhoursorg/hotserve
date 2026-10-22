@@ -110,8 +110,9 @@ on each signed push.
 changing the config, secrets (whose reference is
 [Secrets](docs/secrets.md)) and the way back, and
 [Hardening the box](docs/hardening.md) covers SSH by key only, the SSH
-port shut, and, optionally, an administrator who is not root and
-Debian's updates installed on their own.
+port shut, and, optionally, an administrator who is not root,
+Debian's updates installed on their own, and seven kernel network
+modules no app needs refused.
 The first two use the three directories below, which the e2e suite
 builds and deploys on every change, so what they say works:
 
