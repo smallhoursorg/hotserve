@@ -32,6 +32,9 @@ jobs:
         with:
           # Full history + tags so the build stamps the version from VCS.
           fetch-depth: 0
+      - uses: ./.github/actions/runner-sample
+        with:
+          phase: start
       - run: make build
       - run: make package VERSION="${GITHUB_REF_NAME#v}"
       # Raw binaries ship as per-arch tar.gz (binary + LICENSE + a
@@ -103,6 +106,10 @@ jobs:
           args=()
           case "$GITHUB_REF_NAME" in *-*) args+=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag "${args[@]}"
+      - if: always()
+        uses: ./.github/actions/runner-sample
+        with:
+          phase: end
 
   # Each example is also a template repository of its own
   # (smallhoursorg/hotserve-example-node, -deno, -box), for "Use this
@@ -157,7 +164,14 @@ jobs:
           # the example from the tag's tree.
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/runner-sample
+        with:
+          phase: start
       - env:
           GH_TOKEN: ${{ secrets.TEMPLATES_TOKEN }}
           RUNTIME: ${{ matrix.runtime }}
         run: sh .github/scripts/publish-template.sh "$RUNTIME" "$GITHUB_REF_NAME"
+      - if: always()
+        uses: ./.github/actions/runner-sample
+        with:
+          phase: end
