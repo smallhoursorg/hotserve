@@ -13,9 +13,7 @@ body:
   - type: input
     attributes:
       label: Version
-      description: The release you installed, and the output of `hotserve version`.
-    validations:
-      required: true
+      description: The release you installed, and the output of `hotserve version`. Skip it if you have not installed hotserve yet.
   - type: input
     attributes:
       label: Host
@@ -25,5 +23,5 @@ body:
   - type: textarea
     attributes:
       label: Journal
-      description: The relevant lines from `journalctl -u hotserve -n 50 --no-pager`. Redact secrets.
+      description: The relevant lines from `journalctl -u hotserve -n 50 --no-pager`, and for an app's own output `journalctl -t hotserve-<app> -n 50 --no-pager`. Redact secrets.
       render: text

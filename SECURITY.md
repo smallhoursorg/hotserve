@@ -14,8 +14,8 @@ Please use GitHub's private vulnerability reporting:
 
 This opens a private draft advisory that only you and the maintainer
 can see. Please do not post anything you believe is a security
-problem in a public discussion — a public report on a deploy server puts every
-operator at risk before a fix exists.
+problem in a public discussion — a public report on a deploy server
+puts every operator at risk before a fix exists.
 
 What helps: the config that reproduces it (redact your secrets), the
 version (`hotserve version`; up to v0.3.1 it names only the Caddy it
@@ -58,7 +58,9 @@ through it.
   localhost port. The full attacker/asset/attack-path analysis is in
   [DESIGN-threat-model.md](DESIGN-threat-model.md).
 - Reports against a host outside the supported matrix (Debian 13) are
-  welcome but are triaged as bugs, not advisories: the sandbox is
+  welcome in
+  [Discussions](https://github.com/smallhoursorg/hotserve/discussions),
+  and are triaged as bugs, not advisories: the sandbox is
   probe-gated, so a host that cannot deliver it refuses to start
   rather than claiming an isolation it does not have.
 - Vulnerabilities in Caddy itself belong upstream:

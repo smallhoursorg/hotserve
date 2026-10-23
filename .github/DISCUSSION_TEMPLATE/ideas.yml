@@ -1,0 +1,12 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem? Please do not post it here — follow
+        [SECURITY.md](https://github.com/smallhoursorg/hotserve/blob/main/SECURITY.md).
+  - type: textarea
+    attributes:
+      label: The idea
+      description: What you would like hotserve to do, and the problem it solves for you.
+    validations:
+      required: true
