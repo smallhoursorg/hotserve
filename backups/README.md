@@ -27,7 +27,7 @@ its restore proven, and
 `hotserve-backup validate <Caddyfile>` says whether a run could plan
 from a Caddyfile before it goes live. The `hotserve` package carries
 the program, an hourly timer for the run and a Sunday one for the
-drill ("On a fresh box", below), and recommends Debian 13's `restic`
+drill ("On a fresh box", below), and depends on Debian 13's `restic`
 and `sqlite3`; `setup` and every run need those, and systemd 257
 (`PrivatePIDs=`), which is Debian 13's, and say so before anything
 else.
@@ -40,10 +40,11 @@ line; `hotserve-backup.timer`, hourly — on the hour plus an offset of
 up to ten minutes that is this box's own and stays the same — and
 `hotserve-backup-drill.timer`, Sunday between 03:30 and 03:40 — an
 offset of the same kind — both enabled, both catching
-up a missed elapse at boot; and `restic` and `sqlite3` as recommended
-packages (`apt install ./hotserve_….deb` brings them; with
-`--no-install-recommends` it does not, and setup and every run then say
-which to install). Nothing runs until `setup` has written the credential
+up a missed elapse at boot; and `restic`, `sqlite3` and
+`ca-certificates` as packages it depends on (`apt install
+./hotserve_….deb` brings them, with or without recommended packages —
+Hetzner's Debian 13 image installs none; and should one be removed
+after, setup and every run say which to install). Nothing runs until `setup` has written the credential
 file: each service is conditioned on `/etc/hotserve-backup/repository.env`,
 and a start before that is skipped, not failed. The lines that set it
 up — the declaration, `validate`, `setup`, a first run, `status`, a
