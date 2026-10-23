@@ -22,23 +22,24 @@ FROM rclone/rclone:1.71@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d
 
 FROM ${BASE_IMAGE}
 
+# No recommended package, ever, as a provider's image may have it:
+# Hetzner's Debian 13 sets this. Every install made here — the image's
+# own below, the smoke's first, each reinstall after a remove or a
+# purge — then gets only what is depended on, and a Recommends entry
+# the package came to lean on would fail there rather than pass by
+# apt's default.
+RUN printf 'APT::Install-Recommends "false";\n' > /etc/apt/apt.conf.d/99no-recommends
 # sudo: the backups README's lines are run as an administrator, under
-# sudo, the way they are written. restic and sqlite3 are NOT here: the
-# package depends on them, and the smoke test proves apt brings them
-# to an image that installs no recommended package. ca-certificates is
-# here for curl, so its arrival by Depends is proved by the package's
-# declaration alone (smoke.sh, stage 1).
+# sudo, the way they are written. restic, sqlite3 and ca-certificates
+# are NOT here: the package depends on them, and the smoke test proves
+# apt brings all three to an image that installs no recommended
+# package (nothing here speaks TLS; the smoke's servers are loopback
+# http).
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends \
-		systemd systemd-sysv dbus ca-certificates curl sudo \
+	&& apt-get install -y \
+		systemd systemd-sysv dbus curl sudo \
 	&& rm -rf /var/lib/apt/lists/*
-# No recommended package, ever, as a provider's image may have it:
-# Hetzner's Debian 13 sets this. Every install the smoke makes — the
-# first, each reinstall after a remove or a purge — then gets only what
-# the package depends on, and a Recommends entry the package came to
-# lean on would fail here rather than pass by apt's default.
-RUN printf 'APT::Install-Recommends "false";\n' > /etc/apt/apt.conf.d/99no-recommends
 COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 # The Debian image forbids maintainer scripts to start services
 # (/usr/sbin/policy-rc.d exits 101, which deb-systemd-invoke obeys). A

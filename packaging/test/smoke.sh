@@ -213,21 +213,21 @@ systemctl is-active --quiet hotserve-box-apply.path \
 [ "$(systemctl is-enabled hotserve-box-apply.service)" = static ] \
 	|| die "hotserve-box-apply.service is '$(systemctl is-enabled hotserve-box-apply.service)', want static: the path unit is its only start"
 [ "$(command -v ssh-keygen)" = /usr/bin/ssh-keygen ] || die "ssh-keygen is not installed: the openssh-client Depends did not resolve"
-# The floor that makes apt refuse an older release at install, as
-# docs/first-deploy.md step 2 quotes it. Debian 13 meets it, so this
-# image cannot show the refusal; this is what keeps the quote true.
-# One entry per line, matched whole: a substring match would also
-# accept `libpam-systemd (>= 257)`.
-dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxF 'systemd (>= 257)' \
-	|| die "the package does not depend on systemd (>= 257): apt would install it where no app can run"
-# The backups' programs and the CA store, the same way: a provider's
-# image that installs no recommended package gets them by Depends alone
-# (stage 2c runs them). ca-certificates is in this image already, for
-# curl, so only the declaration can show it would come to a box without.
-for p in restic sqlite3 ca-certificates; do
-	dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxF "$p" \
-		|| die "the package does not depend on $p: $(dpkg-deb -f "$deb" Depends)"
+# The declaration, one entry per line, matched whole: a substring
+# match would also accept `libpam-systemd (>= 257)`. The floor is what
+# makes apt refuse an older release at install, as docs/first-deploy.md
+# step 2 quotes it; Debian 13 meets it, so this image cannot show the
+# refusal, and this is what keeps the quote true. The backups' programs
+# and the CA store are Depends so that a provider's image that installs
+# no recommended package gets them (this image is one; stage 2c runs
+# the programs, and the store is read back below).
+deps=$(dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//')
+for p in 'systemd (>= 257)' restic sqlite3 ca-certificates; do
+	printf '%s\n' "$deps" | grep -qxF "$p" \
+		|| die "the package does not depend on $p: $(printf '%s' "$deps" | tr '\n' ',')"
 done
+[ -s /etc/ssl/certs/ca-certificates.crt ] \
+	|| die "ca-certificates did not come with the package, installed without recommended packages: restic and hotserve would verify no certificate"
 # The tree as the shipped tmpfiles.d file says, read back off the disk
 # (the file itself is held to the Paths table by box/units_test.go).
 conf=/usr/lib/tmpfiles.d/hotserve-box.conf

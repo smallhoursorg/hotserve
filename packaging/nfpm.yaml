@@ -51,7 +51,9 @@ depends:
   # `x509: certificate signed by unknown authority`. hotserve itself
   # reads the same store — ACME to Let's Encrypt, deploy_trust's OIDC
   # discovery and JWKS fetches, a pull over https — and never declared
-  # it either; it is the binary's as much as the backups'.
+  # it either; it is the binary's as much as the backups'. The cost: a
+  # box that uses no backups carries restic (23 MB) and sqlite3 too;
+  # taken over a box that does and cannot, found at setup.
   - restic
   - sqlite3
   - ca-certificates
