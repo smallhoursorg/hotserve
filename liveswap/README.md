@@ -322,7 +322,7 @@ you set it. What each one does when it is hit:
 
 | Cap hit | What happens | What you see |
 |---|---|---|
-| `memory_max` | The kernel kills the process that asked for the memory — under a `sh -c` or `npm start` command that is a child — and the manager then stops the unit (`Result=oom-kill`); the watchdog restarts the app, on its budget. A `pre_start` that hits it fails the deploy | `journalctl -t hotserve-<app>` shows the kill; the deploy's response or `watchdog.last_restart_cause` says `crash`, and the exit the runner records ends `; the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it` |
+| `memory_max` | The kernel kills the process that asked for the memory — under a `sh -c` or `npm start` command that is a child — and the manager then stops the unit (`Result=oom-kill`); the watchdog restarts the app, on its budget. A `pre_start` that hits it fails the deploy | `journalctl -k` shows the kill — the kernel's line names the unit's cgroup and the process; the app's own journal (`journalctl -t hotserve-<app>`) shows nothing, a killed process prints no last line; the deploy's response or `watchdog.last_restart_cause` says `crash`, and the exit the runner records ends `; the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it` |
 | `tasks_max` | A `fork` or thread creation fails with `EAGAIN`. A runtime limps on; a `sh -c` wrapped `command` dies on the first refused fork (dash exits 2), which the watchdog reads as a crash | the app's own error, in its journal |
 | `cpu_quota` | The unit waits for the next 100 ms period. Nothing is killed | latency; `cpu.stat`'s `nr_throttled` in the unit's cgroup |
 
@@ -347,9 +347,13 @@ it.
 A reload that changes a cap sets it on the running instance at once,
 through the manager — no restart; `GET /<app>` shows the values in
 effect as `caps` (`memory_max` in bytes, `tasks_max`, `cpu_quota` in
-percent). A reload that removes one lifts it the same way. Should the
-manager refuse the change, the journal says so and the caps apply at
-the app's next launch.
+percent). A reload that removes one lifts it the same way. A
+`memory_max` set below what the instance already holds is enforced
+the same way too: the kernel reclaims what it can and kills the rest
+(the row above), and the watchdog relaunches the app under the new
+cap, so lower it to what the app is using, not to what it should be
+using. Should the manager refuse the change, the journal says so and
+the caps apply at the app's next launch.
 
 A cap is only as real as the controller behind it: on a host whose
 user manager does not delegate the memory, pids or cpu controller to

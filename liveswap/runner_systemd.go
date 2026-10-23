@@ -102,8 +102,9 @@ type systemdConn interface {
 	// cgroup caps, which the manager applies to a running unit at once.
 	SetUnitProperties(ctx context.Context, name string, props []sddbus.Property) error
 	// DefaultTasksMax is the manager's own DefaultTasksMax=, resolved to
-	// a number: what a unit with no TasksMax= of its own is bounded to,
-	// and what the manager reports as such a unit's TasksMax.
+	// a number (or infinity, where the manager was configured so):
+	// what a unit with no TasksMax= of its own is bounded to, and what
+	// the manager reports as such a unit's TasksMax. 0 = unreadable.
 	DefaultTasksMax(ctx context.Context) (uint64, error)
 }
 
@@ -295,11 +296,12 @@ type systemdHandle struct {
 }
 
 func (h *systemdHandle) state() handleState {
-	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit, CapsUnknown: h.capsUnknown.Load()}
+	st := handleState{PID: int(h.pid.Load()), StartedAt: h.startedAt, Unit: h.unit}
 	if argv := h.argv.Load(); argv != nil {
 		st.Command = *argv
 	}
 	h.capsLock.Lock()
+	st.CapsUnknown = h.capsUnknown.Load()
 	if caps := h.caps.Load(); caps != nil {
 		st.Caps = *caps
 	}
@@ -349,20 +351,24 @@ func unenforcedCaps(root, cg string, caps resourceCaps) []string {
 	return missing
 }
 
-// setCapsState is the one writer of a handle's caps, cgroup path and
-// unenforced list. Under the handle's lock, so the watcher's backfill
-// of the cgroup path and a reload's SetCaps cannot leave the list
-// computed from the other's caps: whichever writes last recomputes
-// from both as they then are. A nil caps or cgroup leaves that field
-// as it is. A cap that reads as set and bounds nothing is the "looks
-// configured, quietly weaker" shape this code refuses to present as
-// effective: it is said once in the journal per change of the list,
-// and status lists such caps apart.
-func (r *systemdRunner) setCapsState(h *systemdHandle, caps *resourceCaps, cgroup *string) {
+// setCapsState is the one writer of a handle's caps, cgroup path,
+// unenforced list and unknown flag. Under the handle's lock, so the
+// watcher's backfill of the cgroup path and a reload's SetCaps cannot
+// leave the list computed from the other's caps (whichever writes last
+// recomputes from both as they then are), and a status read (state)
+// sees the caps and the flag that settles them together, never new
+// caps under a stale "unknown". A nil caps, cgroup or unknown leaves
+// that field as it is. A cap that reads as set and bounds nothing is
+// the "looks configured, quietly weaker" shape this code refuses to
+// present as effective: it is said once in the journal per change of
+// the list, and status lists such caps apart.
+func (r *systemdRunner) setCapsState(h *systemdHandle, caps *resourceCaps, cgroup *string, unknown *bool) {
 	h.capsLock.Lock()
-	defer h.capsLock.Unlock()
 	if caps != nil {
 		h.caps.Store(caps)
+	}
+	if unknown != nil {
+		h.capsUnknown.Store(*unknown)
 	}
 	if cgroup != nil && *cgroup != "" {
 		h.cgroup.Store(cgroup)
@@ -377,6 +383,9 @@ func (r *systemdRunner) setCapsState(h *systemdHandle, caps *resourceCaps, cgrou
 	}
 	missing := unenforcedCaps(cgroupRoot, cg, cur)
 	prev := h.unenforced.Swap(&missing)
+	h.capsLock.Unlock()
+	// Said after the unlock: a status read waits on the lock, and a
+	// journal that stalls this write must not stall status with it.
 	if len(missing) > 0 && (prev == nil || strings.Join(*prev, ",") != strings.Join(missing, ",")) {
 		r.log().Warn("resource caps the host does not enforce: the user manager does not delegate their controller to the unit's cgroup, so the kernel bounds nothing; status lists them as caps_unenforced",
 			zap.String("unit", h.unit), zap.Strings("caps", missing), zap.String("cgroup", cg))
@@ -647,9 +656,17 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 // cpu.max change with the process untouched). Every cap is sent, so a
 // cap a reload removed is lifted: memory and CPU to infinity, which is
 // their default, and tasks to the manager's DefaultTasksMax, which is
-// what an unset TasksMax= means (infinity would lift the manager's own
-// bound, 15% of threads-max, from the unit). With that default
-// unreadable the unit keeps its tasks cap, and the handle says so.
+// what an unset TasksMax= means (infinity only where that is the
+// manager's default: otherwise it would lift the manager's own bound,
+// 15% of threads-max, from the unit). A unit the handle knows carries
+// no tasks cap gets no TasksMax= written: one would pin the manager's
+// default into the unit, past a later change of it. A lift does pin
+// it — the manager has no "back to the default" write, infinity being
+// the unset above — so a unit whose tasks_max was removed holds the
+// default as of the lift until its next launch (DESIGN-liveswap.md,
+// "Accepted residuals"); and with the handle's caps unknown the lift
+// is written whatever the unit may carry. With the default unreadable
+// the unit keeps its tasks cap, and the handle says so.
 func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 	sh, ok := h.(*systemdHandle)
 	if !ok {
@@ -659,11 +676,12 @@ func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 	defer cancel()
 	lift := uint64(0)
 	applied := caps
-	if caps.tasksMax == 0 {
+	have := sh.caps.Load()
+	if caps.tasksMax == 0 && (sh.capsUnknown.Load() || have == nil || have.tasksMax > 0) {
 		def, err := r.conn.DefaultTasksMax(ctx)
 		if err != nil || def == 0 {
 			r.log().Warn("the manager's DefaultTasksMax could not be read; the unit keeps its tasks cap until its next launch", zap.String("unit", sh.unit), zap.Error(err))
-			if have := sh.caps.Load(); have != nil {
+			if have != nil {
 				applied.tasksMax = have.tasksMax
 			}
 		} else {
@@ -680,12 +698,13 @@ func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 		r.readBackCaps(sh)
 		return fmt.Errorf("setting the caps of unit %s: %w", sh.unit, err)
 	}
-	r.setCapsState(sh, &applied, nil)
 	// Settled only for what was written: a tasks cap left as it was
 	// (no default to lift to) stays as uncertain as it was.
+	var settled *bool
 	if caps.tasksMax > 0 || lift > 0 {
-		sh.capsUnknown.Store(false)
+		settled = new(bool)
 	}
+	r.setCapsState(sh, &applied, nil, settled)
 	return nil
 }
 
@@ -698,15 +717,15 @@ func (r *systemdRunner) readBackCaps(sh *systemdHandle) {
 	defer cancel()
 	us, err := r.conn.UnitStatus(ctx, sh.unit)
 	if err != nil || !us.loaded() {
-		sh.capsUnknown.Store(true)
+		unknown := true
+		r.setCapsState(sh, nil, nil, &unknown)
 		return
 	}
 	caps := r.unitCaps(ctx, us)
 	// The cgroup path with it, and the enforcement recomputed from
 	// what the manager says the unit now carries: a cap the failed
 	// write did apply is listed as the host enforces it, or not.
-	r.setCapsState(sh, &caps, &us.ControlGroup)
-	sh.capsUnknown.Store(false)
+	r.setCapsState(sh, &caps, &us.ControlGroup, new(bool))
 }
 
 // unitCaps is what the manager's report of a unit means as caps: a
@@ -731,7 +750,7 @@ func (r *systemdRunner) adopt(ctx context.Context, unit string, startedAt time.T
 	if st, err := r.conn.UnitStatus(ctx, unit); err == nil {
 		h.pid.Store(int64(st.MainPID))
 		h.setArgv(st.ExecStart)
-		r.setCapsState(h, nil, &st.ControlGroup)
+		r.setCapsState(h, nil, &st.ControlGroup, nil)
 		// Spelled as sandboxProperties spells it (systemd_dbus.go):
 		// every unit gets PrivatePIDs=, so every unit has the
 		// intermediate PID to settle past.
@@ -1050,7 +1069,7 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 		// while hotserve was down may no longer be: syncCaps (app.go)
 		// compares them with the spec's once the instance is current.
 		caps := r.unitCaps(ctx, us)
-		r.setCapsState(h, &caps, &us.ControlGroup)
+		r.setCapsState(h, &caps, &us.ControlGroup, nil)
 		go r.watch(h)
 		return h, true, nil
 	}
@@ -1206,7 +1225,7 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 		// read failed has none, and without it no later SetCaps can tell
 		// which of its caps the host enforces.
 		if h.cgroup.Load() == nil && st.ControlGroup != "" {
-			r.setCapsState(h, nil, &st.ControlGroup)
+			r.setCapsState(h, nil, &st.ControlGroup, nil)
 		}
 		if st.running() {
 			// The handle follows the unit's MainPID: a read that failed

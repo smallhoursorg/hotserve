@@ -122,6 +122,50 @@ func TestSetCapsLiftsTasksToTheManagersDefault(t *testing.T) {
 	if got := h.state().Caps; got != (resourceCaps{tasksMax: 40, cpuQuota: 50}) {
 		t.Fatalf("handle reports %+v, want the kept tasks cap beside the new quota", got)
 	}
+	// A manager whose default is infinity: that is its default, and
+	// the lift goes there (the only case TasksMax=infinity is written).
+	f.defaultTasksMax = infinityUSec
+	must(t, r.SetCaps(h, resourceCaps{cpuQuota: 50}))
+	sent = map[string]any{}
+	for _, p := range f.setProps[h.unit][2] {
+		sent[p.Name] = p.Value.Value()
+	}
+	if sent["TasksMax"] != infinityUSec {
+		t.Fatalf("sent %v, want TasksMax lifted to the manager's own infinity", sent)
+	}
+	if got := h.state().Caps; got != (resourceCaps{cpuQuota: 50}) {
+		t.Fatalf("handle reports %+v after the lift to infinity, want the quota alone", got)
+	}
+	// A unit with no tasks cap the handle knows of: nothing to lift, so
+	// no TasksMax= is written (one would pin the manager's default into
+	// the unit, past a later change of it) though a default is there.
+	f.defaultTasksMax = 2273
+	must(t, r.SetCaps(h, resourceCaps{cpuQuota: 100}))
+	sent = map[string]any{}
+	for _, p := range f.setProps[h.unit][3] {
+		sent[p.Name] = p.Value.Value()
+	}
+	if _, has := sent["TasksMax"]; has {
+		t.Fatalf("TasksMax written for a unit that carries none: %v", sent)
+	}
+	if st := h.state(); st.CapsUnknown || st.Caps != (resourceCaps{cpuQuota: 100}) {
+		t.Fatalf("handle reports %+v (unknown=%v), want the new quota, known", st.Caps, st.CapsUnknown)
+	}
+}
+
+// The manager's DefaultTasksMax= is read as the manager renders it:
+// a number, or infinity (kept: it is a default like any other), with
+// anything else unreadable. DefaultLimitNOFILE keeps reading infinity
+// as unknown, since a unit's LimitNOFILE= is never lifted to it.
+func TestParseManagerLimitKeepsInfinity(t *testing.T) {
+	for in, want := range map[string]uint64{"2273": 2273, "@t 2273": 2273, "18446744073709551615": infinityUSec, "infinity": 0, "": 0} {
+		if got := parseManagerLimit(in); got != want {
+			t.Errorf("parseManagerLimit(%q) = %d, want %d", in, got, want)
+		}
+	}
+	if got := parseManagerUint("18446744073709551615"); got != 0 {
+		t.Errorf("parseManagerUint(infinity) = %d, want 0 (unknown)", got)
+	}
 }
 
 // A unit with no TasksMax= of its own reports the manager's resolved
@@ -370,7 +414,7 @@ func TestStateReadsCapsAndEnforcementTogether(t *testing.T) {
 	r := newSystemdRunner(newFakeSystemdConn(), zap.NewNop())
 	t.Cleanup(r.close)
 	h := &systemdHandle{unit: "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service", done: make(chan struct{})}
-	r.setCapsState(h, &resourceCaps{cpuQuota: 50}, &cg)
+	r.setCapsState(h, &resourceCaps{cpuQuota: 50}, &cg, nil)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -383,9 +427,9 @@ func TestStateReadsCapsAndEnforcementTogether(t *testing.T) {
 			default:
 			}
 			if i%2 == 0 {
-				r.setCapsState(h, &resourceCaps{cpuQuota: 50, memoryMax: 1 << 20}, nil)
+				r.setCapsState(h, &resourceCaps{cpuQuota: 50, memoryMax: 1 << 20}, nil, nil)
 			} else {
-				r.setCapsState(h, &resourceCaps{cpuQuota: 50}, nil)
+				r.setCapsState(h, &resourceCaps{cpuQuota: 50}, nil, nil)
 			}
 		}
 	}()
@@ -436,11 +480,11 @@ func TestUnenforcedCapsNamesTheMissingControllers(t *testing.T) {
 		t.Fatalf("every controller delegated, yet %v", got)
 	}
 	// Status: the unenforced ones are named, not valued.
-	caps, off := capsForStatus(all, []string{"memory_max", "cpu_quota"})
-	if caps == nil || caps.MemoryMax != 0 || caps.CPUQuota != 0 || caps.TasksMax != 40 || strings.Join(off, ",") != "memory_max,cpu_quota" {
-		t.Fatalf("status split = %+v / %v, want tasks_max alone in effect", caps, off)
+	caps := capsForStatus(all, []string{"memory_max", "cpu_quota"})
+	if caps == nil || caps.MemoryMax != 0 || caps.CPUQuota != 0 || caps.TasksMax != 40 {
+		t.Fatalf("status caps = %+v, want tasks_max alone in effect", caps)
 	}
-	if caps, _ := capsForStatus(resourceCaps{memoryMax: 1 << 20}, []string{"memory_max"}); caps != nil {
+	if caps := capsForStatus(resourceCaps{memoryMax: 1 << 20}, []string{"memory_max"}); caps != nil {
 		t.Fatalf("nothing in effect must read as no caps, got %+v", caps)
 	}
 }

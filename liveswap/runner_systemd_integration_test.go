@@ -1242,7 +1242,7 @@ func TestIntegrationSystemdCapsHoldAndChangeLive(t *testing.T) {
 		// What the handle must say about it: the manager holds the
 		// caps, the kernel enforces none of them.
 		if got := h.state().CapsUnenforced; !slices.Contains(got, "memory_max") {
-			t.Errorf("the memory controller is absent, yet the handle names %v as unenforced", got)
+			t.Errorf("the memory controller is absent, yet the handle does not name memory_max as unenforced: %v", got)
 		}
 	}
 

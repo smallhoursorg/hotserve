@@ -1690,7 +1690,7 @@ type capsSnapshot struct {
 // capsForStatus splits the unit's caps into the ones in effect and the
 // ones the host does not enforce (named, not valued: a value the
 // kernel ignores is not a cap). nil caps when nothing is in effect.
-func capsForStatus(caps resourceCaps, unenforced []string) (*capsSnapshot, []string) {
+func capsForStatus(caps resourceCaps, unenforced []string) *capsSnapshot {
 	off := map[string]bool{}
 	for _, name := range unenforced {
 		off[name] = true
@@ -1708,7 +1708,7 @@ func capsForStatus(caps resourceCaps, unenforced []string) (*capsSnapshot, []str
 	if *s == (capsSnapshot{}) {
 		s = nil
 	}
-	return s, unenforced
+	return s
 }
 
 func (ma *managedApp) status() statusSnapshot {
@@ -1739,7 +1739,7 @@ func (ma *managedApp) status() statusSnapshot {
 		s.Unit = hs.Unit
 		s.Running = c.runner.Alive(ma.current.handle)
 		if hs.Caps.any() && !hs.CapsUnknown {
-			s.Caps, s.CapsUnenforced = capsForStatus(hs.Caps, hs.CapsUnenforced)
+			s.Caps, s.CapsUnenforced = capsForStatus(hs.Caps, hs.CapsUnenforced), hs.CapsUnenforced
 		}
 	}
 	// After current: the watchdog records a restart before it installs

@@ -64,7 +64,7 @@ type userManagerClient struct {
 	sandboxMu  sync.Mutex
 	sandboxGen uint64 // generation the host was measured capable for; 0 = never
 	// defaultTasksMax is the manager's DefaultTasksMax= as read with the
-	// connection (get), like nofile; 0 = unreadable or infinity.
+	// connection (get), like nofile; infinity kept, 0 = unreadable.
 	defaultTasksMax atomic.Uint64
 }
 
@@ -191,11 +191,12 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 	// reason: it is what an unset tasks_max is lifted to, and what a
 	// unit with none reports (SetCaps, unitCaps). Published with the
 	// connection, so a manager restarted with another value is read
-	// again on the redial. 0 = unreadable or infinity: nothing to lift
-	// to, and no number a unit's TasksMax reads back as.
+	// again on the redial. Infinity is kept: a manager configured so
+	// has that as its default, and a lift goes there. 0 = unreadable:
+	// nothing to lift to.
 	var tasksMax uint64
 	if v, err := conn.GetManagerProperty("DefaultTasksMax"); err == nil {
-		tasksMax = parseManagerUint(v)
+		tasksMax = parseManagerLimit(v)
 	} else if !conn.Connected() {
 		conn.Close()
 		return nil, err
@@ -224,9 +225,19 @@ func (c *userManagerClient) get() (*sddbus.Conn, error) {
 // manager property ("@t 524288"); 0 for anything unparseable or
 // unlimited, which callers treat as "don't set".
 func parseManagerUint(s string) uint64 {
+	if n := parseManagerLimit(s); n != infinityUSec {
+		return n
+	}
+	return 0
+}
+
+// parseManagerLimit reads the same rendering and keeps infinity: a
+// DefaultTasksMax= of infinity is a default of the manager's like any
+// number, the one a lifted tasks cap then goes to. 0 = unparsable.
+func parseManagerLimit(s string) uint64 {
 	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "@t"))
 	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil || n == ^uint64(0) {
+	if err != nil {
 		return 0
 	}
 	return n
@@ -372,9 +383,8 @@ const infinityUSec = ^uint64(0)
 // MemorySwapMax=0: a cap an app can spill past into swap bounds
 // nothing, and lifting the cap lifts that too.
 func capProperties(c resourceCaps, live bool, liftTasksTo uint64) []sddbus.Property {
-	every := live
 	var props []sddbus.Property
-	if c.memoryMax > 0 || every {
+	if c.memoryMax > 0 || live {
 		mem, swap := infinityUSec, infinityUSec
 		if c.memoryMax > 0 {
 			mem, swap = c.memoryMax, 0
@@ -384,14 +394,14 @@ func capProperties(c resourceCaps, live bool, liftTasksTo uint64) []sddbus.Prope
 			sddbus.Property{Name: "MemorySwapMax", Value: godbus.MakeVariant(swap)},
 		)
 	}
-	if c.tasksMax > 0 || (every && liftTasksTo > 0) {
+	if c.tasksMax > 0 || (live && liftTasksTo > 0) {
 		tasks := liftTasksTo
 		if c.tasksMax > 0 {
 			tasks = uint64(c.tasksMax)
 		}
 		props = append(props, sddbus.Property{Name: "TasksMax", Value: godbus.MakeVariant(tasks)})
 	}
-	if c.cpuQuota > 0 || every {
+	if c.cpuQuota > 0 || live {
 		quota := infinityUSec
 		if c.cpuQuota > 0 {
 			quota = uint64(c.cpuQuota) * usecPerPercent
@@ -619,8 +629,10 @@ func (c *userManagerClient) SetUnitProperties(ctx context.Context, name string, 
 }
 
 // DefaultTasksMax is the manager's DefaultTasksMax= as read with the
-// connection (get), resolved to a number: the manager resolves its own
-// percentage, and a unit with no TasksMax= reports exactly this. The
+// connection (get), resolved: the manager resolves its own percentage
+// to a number, and a unit with no TasksMax= reports exactly this; a
+// manager configured with DefaultTasksMax=infinity reports infinity,
+// which is kept (it is that manager's default, where a lift goes). The
 // read happened under the dial's deadlines, so nothing here can wait
 // on a manager that has stopped answering; a dropped connection reads
 // it again on the redial, which is also when a manager restarted with
@@ -631,10 +643,8 @@ func (c *userManagerClient) DefaultTasksMax(_ context.Context) (uint64, error) {
 	}
 	v := c.defaultTasksMax.Load()
 	if v == 0 {
-		// Unreadable, or infinity (a manager configured with
-		// DefaultTasksMax=infinity): no number to lift a tasks cap to,
-		// and none a unit's TasksMax ever reads back as.
-		return 0, errors.New("the manager's DefaultTasksMax is unreadable or infinity")
+		// Unreadable at the dial: no number to lift a tasks cap to.
+		return 0, errors.New("the manager's DefaultTasksMax is unreadable")
 	}
 	return v, nil
 }

@@ -341,9 +341,9 @@ func parseCountArg(d *caddyfile.Dispenser, out *int, least int) error {
 // A memory_max under a megabyte is a unit nothing can exec in (the
 // kernel rounds memory.max to pages, and 1 byte is 0 of them), which
 // would be OOM-killed at every launch with nothing naming the cause; a
-// cpu_quota over a thousand CPUs' worth is more than any box, and past
-// it the quota's microseconds (percent × usecPerPercent) would
-// overflow into a small, silently wrong cap.
+// cpu_quota over a thousand CPUs' worth is more than any box, so it is
+// a mistyped line, refused by name rather than accepted as no cap at
+// all (the arithmetic is nowhere near overflow: 100000% is 1e9 µs).
 const (
 	minMemoryMax = 1_000_000 // 1MB, in the SI units humanize parses
 	maxCPUQuota  = 100_000   // percent: 1000 CPUs' worth
