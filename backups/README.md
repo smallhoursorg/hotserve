@@ -42,11 +42,11 @@ up to ten minutes that is this box's own and stays the same — and
 offset of the same kind — both enabled, both catching
 up a missed elapse at boot; and `restic`, `sqlite3` and
 `ca-certificates` as packages it depends on (`apt install
-./hotserve_….deb` brings them, with or without recommended packages —
-Hetzner's Debian 13 image installs none; and should one be removed
-after, setup and every run say which to install). Nothing runs until `setup` has written the credential
-file: each service is conditioned on `/etc/hotserve-backup/repository.env`,
-and a start before that is skipped, not failed. The lines that set it
+./hotserve_….deb` brings them, with or without recommended packages:
+Hetzner's Debian 13 image installs none). Nothing runs until `setup`
+has written the credential file: each service is conditioned on
+`/etc/hotserve-backup/repository.env`, and a start before that is
+skipped, not failed. The lines that set it
 up — the declaration, `validate`, `setup`, a first run, `status`, a
 restore — are under "Set it up" in
 [docs/backups.md](../docs/backups.md#set-it-up). Those under `sudo` are

@@ -993,7 +993,7 @@ Settled (owner, 2026-09-19):
 - **D3** The restore drill runs weekly, with the check.
 - **D5** No provider account during development; the owner tests a release candidate against a real bucket (§7).
 - **D6** `apt purge` keeps `/etc/hotserve-backup/repository.env` (the path since 4b) and says where it is and why.
-- **D8** `restic` and `sqlite3` are `Recommends:`; preflight names the missing package before any prompt.
+- **D8** `restic` and `sqlite3` are `Recommends:`; preflight names the missing package before any prompt. **Revised 2026-10-05 (the owner, RC results): `Depends:`, with `ca-certificates` — Hetzner's Debian 13 image installs no recommended package; pr-plans/backups-rc-results.md §4.**
 - **D9** An undeclared SQLite file inside a `files` path is backed up, with a loud warning in the run's log **and** in `status` until it is declared or gone — the copy may not be restorable.
 
 - **D7** Whitespace, `:`, `%` and `$` in `root` need no limit [M9]. One limit stands: an app that declares a `backup` while `root` or a backup item is written with a placeholder (`{env.X}`) is rejected by `hotserve validate`, naming the fix. Only the serving process's environment could resolve it; root neither asks that process (rule 4) nor holds its environment.

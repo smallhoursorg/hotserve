@@ -27,12 +27,18 @@ FROM ${BASE_IMAGE}
 # package depends on them, and the smoke test proves apt brings them
 # to an image that installs no recommended package. ca-certificates is
 # here for curl, so its arrival by Depends is proved by the package's
-# declaration alone (smoke.sh, stage 2c).
+# declaration alone (smoke.sh, stage 1).
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		systemd systemd-sysv dbus ca-certificates curl sudo \
 	&& rm -rf /var/lib/apt/lists/*
+# No recommended package, ever, as a provider's image may have it:
+# Hetzner's Debian 13 sets this. Every install the smoke makes — the
+# first, each reinstall after a remove or a purge — then gets only what
+# the package depends on, and a Recommends entry the package came to
+# lean on would fail here rather than pass by apt's default.
+RUN printf 'APT::Install-Recommends "false";\n' > /etc/apt/apt.conf.d/99no-recommends
 COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 # The Debian image forbids maintainer scripts to start services
 # (/usr/sbin/policy-rc.d exits 101, which deb-systemd-invoke obeys). A

@@ -77,14 +77,16 @@ mount --make-rshared /
 
 stage "stage 1: install, service basics, reload"
 # The image ships without apt lists; refresh them so the package's
-# Depends (libpam-systemd, dbus, openssh-client, restic, sqlite3,
-# ca-certificates) resolve the way they would on a real box — that
-# resolution is part of what this stage proves. Installed without
-# recommended packages, as a provider's image may have it (Hetzner's
-# Debian 13 sets APT::Install-Recommends "false"): what the package
-# needs has to arrive there too, so it is all Depends.
+# Depends (systemd's floor, libpam-systemd, dbus, openssh-client,
+# restic, sqlite3, ca-certificates) resolve the way they would on a
+# real box — that resolution is part of what this stage proves. The
+# image installs no recommended package (packaging/test/Dockerfile), as
+# Hetzner's Debian 13 has it: what the package needs has to arrive
+# there too, so it is all Depends, and the premise is checked first.
+[ "$(apt-config dump APT::Install-Recommends)" = 'APT::Install-Recommends "false";' ] \
+	|| die "the image installs recommended packages ($(apt-config dump APT::Install-Recommends)): the install below would prove nothing of a box that does not"
 apt-get update -qq
-apt-get install -y --no-install-recommends "$deb" >/tmp/install.out 2>&1 \
+apt-get install -y "$deb" >/tmp/install.out 2>&1 \
 	|| { cat /tmp/install.out; die "apt-get install of the package failed"; }
 cat /tmp/install.out
 # Not enabled yet, so postinstall owes the operator the start command.
@@ -218,6 +220,14 @@ systemctl is-active --quiet hotserve-box-apply.path \
 # accept `libpam-systemd (>= 257)`.
 dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxF 'systemd (>= 257)' \
 	|| die "the package does not depend on systemd (>= 257): apt would install it where no app can run"
+# The backups' programs and the CA store, the same way: a provider's
+# image that installs no recommended package gets them by Depends alone
+# (stage 2c runs them). ca-certificates is in this image already, for
+# curl, so only the declaration can show it would come to a box without.
+for p in restic sqlite3 ca-certificates; do
+	dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxF "$p" \
+		|| die "the package does not depend on $p: $(dpkg-deb -f "$deb" Depends)"
+done
 # The tree as the shipped tmpfiles.d file says, read back off the disk
 # (the file itself is held to the Paths table by box/units_test.go).
 conf=/usr/lib/tmpfiles.d/hotserve-box.conf
@@ -900,13 +910,6 @@ expect_backup_state() {
 }
 [ "$(command -v restic)" = /usr/bin/restic ] && [ "$(command -v sqlite3)" = /usr/bin/sqlite3 ] \
 	|| die "restic and sqlite3 did not come with the package, installed without recommended packages: they have to be Depends (restic '$(command -v restic)', sqlite3 '$(command -v sqlite3)')"
-# The declaration itself, one entry per line, matched whole, for the
-# three: ca-certificates is in the image already (curl's), so only the
-# declaration can prove it would come to a box without it.
-for p in restic sqlite3 ca-certificates; do
-	dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -qxF "$p" \
-		|| die "the package does not depend on $p: $(dpkg-deb -f "$deb" Depends)"
-done
 getent passwd hotserve-backup | grep -q ':/nonexistent:/usr/sbin/nologin$' \
 	|| die "postinstall did not make the hotserve-backup account as setup does: $(getent passwd hotserve-backup || echo none)"
 for u in hotserve-backup.service hotserve-backup-drill.service $TIMERS; do

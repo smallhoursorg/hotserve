@@ -48,7 +48,10 @@ depends:
   # 2026-10-05). ca-certificates: restic verifies the storage's
   # certificate against /etc/ssl/certs, and Debian's restic does not
   # depend on it; in a bare debian:13 container every request ended
-  # `x509: certificate signed by unknown authority`.
+  # `x509: certificate signed by unknown authority`. hotserve itself
+  # reads the same store — ACME to Let's Encrypt, deploy_trust's OIDC
+  # discovery and JWKS fetches, a pull over https — and never declared
+  # it either; it is the binary's as much as the backups'.
   - restic
   - sqlite3
   - ca-certificates
