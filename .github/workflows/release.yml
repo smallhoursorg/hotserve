@@ -91,7 +91,9 @@ jobs:
             - hotserve-backup at /usr/bin/hotserve-backup, beside
               /usr/bin/hotserve, /usr/bin/restic (0.18) and
               /usr/bin/sqlite3: the units it starts run each by that
-              path, and it refuses a box where one is missing
+              path, and it refuses a box where one is missing; and the
+              CA store (ca-certificates), which restic and hotserve
+              verify every certificate against
             - the four unit files in /etc/systemd/system, then:
                 systemctl daemon-reload
                 systemctl enable --now hotserve-backup.timer \

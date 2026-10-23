@@ -50,7 +50,11 @@ The package also depends on `libpam-systemd`, `dbus` and
 your apps as systemd units under the `hotserve` user's own service
 manager, which needs `pam_systemd` to start and `loginctl` to stay
 alive without a login, and the box checks each config commit's SSH
-signature with `ssh-keygen`.
+signature with `ssh-keygen`. And on `restic` (23 MB), `sqlite3` and
+`ca-certificates`, for [backups](backups/README.md): a box that uses
+none carries the two programs too, so that one whose image installs no
+recommended package (Hetzner's Debian 13) gets them; the CA store is
+what hotserve and restic verify every certificate against.
 
 <details>
 <summary><b>Without the package</b> — the raw binary, for other systemd hosts</summary>
