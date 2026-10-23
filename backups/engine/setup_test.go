@@ -1218,6 +1218,65 @@ func TestOnlyResticsOwnWordsSayTheRepositoryExists(t *testing.T) {
 	}
 }
 
+// What init says is read where restic puts it — the head of the
+// message for a failure before any write, its tail for files found and
+// nothing written — never anywhere in it: the message echoes the
+// repository URL, which is the operator's to write, restic's own words
+// included.
+func TestResticsWordsInsideTheURLAreNotReadAsItsAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		message            string
+		refused, halfThere bool
+	}{
+		{"Fatal: create repository at s3:x failed: Fatal: unable to open repository at s3:x: client.BucketExists: The request signature we calculated does not match the signature you provided.", true, false},
+		{"Fatal: create repository at b2:x:y failed: Fatal: unable to open repository at b2:x:y: b2.NewClient: b2_authorize_account: 401:", true, false},
+		{"Fatal: create repository at s3:x failed: parsing repository location failed: invalid backend", true, false},
+		{"Fatal: create repository at s3:x failed: Fatal: unable to open repository at s3:x: config file already exists", false, false},
+		{"Fatal: create key in repository at s3:x failed: repository already contains keys", false, true},
+		{"Fatal: create key in repository at s3:x failed: repository already contains snapshots", false, true},
+		{"Fatal: create key in repository at s3:x failed: Save(<key/8f2a1c>) returned error, retrying after 15m0s: 503 Service Unavailable", false, false},
+		// restic's words inside the URL, echoed by the message.
+		{"Fatal: create key in repository at s3:http://h/unable to open repository at x failed: Save(<key/8f2a1c>) returned error: 503 Service Unavailable", false, false},
+		{"Fatal: create key in repository at s3:http://h/create repository at x failed: Save(<key/8f2a1c>) returned error: 503 Service Unavailable", false, false},
+		{"Fatal: create repository at s3:http://h/repository already contains keys failed: Fatal: unable to open repository at s3:http://h/repository already contains keys: client.BucketExists: signature", true, false},
+		{"Fatal: create key in repository at s3:http://h/failed: repository already contains keys failed: Save(<key/8f2a1c>) returned error: 503 Service Unavailable", false, false},
+	} {
+		if got := backendRefused(tc.message); got != tc.refused {
+			t.Errorf("%q: refused at the opening %v, want %v", tc.message, got, tc.refused)
+		}
+		if got := repositoryHalfThere(tc.message); got != tc.halfThere {
+			t.Errorf("%q: files and no config %v, want %v", tc.message, got, tc.halfThere)
+		}
+	}
+	// And through setup: a failure past the opening keeps the password
+	// though the URL says "unable to open repository at"; a refusal at
+	// the opening asks for the key again, and ends "never used", though
+	// the URL says "repository already contains keys".
+	url := "s3:http://e2e-s3:9000/unable to open repository at x"
+	b, m := setupBox(t)
+	b.hang = "probe"
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", strings.ReplaceAll(keyWriteFailed, "s3:http://e2e-s3:9000/box", url)
+	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "wrong", "AKIDX", "wrong"}
+	_, err := b.setup(t, m, url)
+	if err == nil || !strings.HasSuffix(err.Error(), "keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there") {
+		t.Fatalf("err = %v", err)
+	}
+	url = "s3:http://e2e-s3:9000/repository already contains keys"
+	b, m = setupBox(t)
+	b.hang = "probe"
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", strings.ReplaceAll(wrongKey, "s3:http://e2e-s3:9000/box", url)
+	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "wrong", "AKIDX", "wrong"}
+	_, err = b.setup(t, m, url)
+	if err == nil || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") || strings.Contains(err.Error(), "holds files") {
+		t.Fatalf("err = %v", err)
+	}
+	if got, want := b.roles(), "plan probe init probe init probe init"; got != want {
+		t.Fatalf("units: %s, want %s", got, want)
+	}
+}
+
 // A password shown on a first attempt and not used — the second
 // attempt's look found the repository — is said not to be the one, and
 // dead, on the way out.

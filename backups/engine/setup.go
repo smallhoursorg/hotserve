@@ -1141,19 +1141,21 @@ func repositoryExists(message string) bool {
 	return strings.Contains(message, "config file already exists") || strings.Contains(message, "repository master key and config already initialized")
 }
 
-// backendRefused reads restic's word for a storage it could not open at
-// all, out of an init that exited 1: "unable to open repository at",
-// which init says of its first step alone — the backend's Create,
-// before anything of a repository is written [restic 0.18.0,
-// cmd/restic/global.go innerOpen; cmd_init.go wraps it as "create
-// repository at … failed"] — with the storage's own reason after the
-// URL: a key refused (B2's `b2_authorize_account: 401`, S3's signature
-// mismatch), a bucket out of reach, a host that does not resolve. An
-// init that got past the opening says "create key in repository at …
-// failed" instead, and may have written. The wording that says a
-// repository exists shares the prefix, and is read first.
+// backendRefused reads restic's word for an init that failed before
+// anything of a repository was written: its message opens with "create
+// repository at <url> failed:", the wrapper init puts on its first step
+// alone — the backend's Create, and what comes before it: the URL that
+// does not parse, the host that does not resolve, the key refused
+// (B2's `b2_authorize_account: 401`, S3's signature mismatch), the
+// bucket out of reach [restic 0.18.0, cmd/restic/cmd_init.go:96, with
+// "unable to open repository at" nested for the backend's own failure].
+// An init that got past the opening opens with "create key in
+// repository at" instead, and may have written. Read at the message's
+// head, so that restic's words inside the URL, which the message
+// echoes, are not taken for its answer; and the wording that says a
+// repository exists shares the head, and is read first.
 func backendRefused(message string) bool {
-	return strings.Contains(message, "unable to open repository at ") && !repositoryExists(message)
+	return strings.HasPrefix(strings.TrimPrefix(message, "Fatal: "), "create repository at ") && !repositoryExists(message)
 }
 
 // repositoryHalfThere reads restic's word for files of a repository
@@ -1162,9 +1164,10 @@ func backendRefused(message string) bool {
 // internal/repository/repository.go Init] — a key file, left by an init
 // that ended between its two writes (the key first, then the config),
 // or snapshots, left where a lifecycle rule removed the config before
-// the data. Nothing opens them, and init will not write over them.
+// the data. Nothing opens them, and init will not write over them. The
+// reason ends the message, after the echoed URL, and is read there.
 func repositoryHalfThere(message string) bool {
-	return strings.Contains(message, "repository already contains keys") || strings.Contains(message, "repository already contains snapshots")
+	return strings.HasSuffix(message, "failed: repository already contains keys") || strings.HasSuffix(message, "failed: repository already contains snapshots")
 }
 
 // resticMessage is what restic said on stderr: the message of its
