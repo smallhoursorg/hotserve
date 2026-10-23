@@ -1086,13 +1086,18 @@ What can be known to fail is refused before anything is asked for
    exists, it made nothing with the password, and "discard it" is said
    again. Where init answers that the storage holds **key files or
    snapshots and no config** ("repository already contains keys", or
-   "… snapshots": an init that ended between its two writes, a
-   lifecycle rule that removed the config before the data), nothing
-   opens them and init will not write over them, so setup ends at once
-   — no asking for the key again — says what is there and the way out
-   (remove them at the storage, or use another path, then run setup
-   again), and "discard it": whatever an earlier init of this setup may
-   have written there, nothing opens it. The clock is
+   "… snapshots": a repository whose config was removed — a lifecycle
+   rule, a deletion — or an init that ended between its two writes),
+   nothing opens them as they stand and init will not write over them,
+   so setup ends at once — no asking for the key again — says what is
+   there and the way out, recovery before removal: if a backup was ever
+   made there, its earlier state is recovered from the storage's kept
+   versions first ([After an attack](../docs/backups.md#after-an-attack))
+   and nothing removed; only an unfinished repository that never held
+   one is removed at the storage; or setup is given another path. Setup
+   cannot tell the two apart, so it never removes anything. And
+   "discard it": whatever an earlier init of this setup may have
+   written there, nothing opens it. The clock is
    for a storage that takes the connection and never answers: the
    waiting ends, and the unit runs on, recorded as above, with the
    staged file it reads and the run directory it writes to left in

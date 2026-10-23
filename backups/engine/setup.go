@@ -661,7 +661,11 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 				// says so, and the password is dead whatever was written
 				// with it.
 				s.initRan = false
-				return nil, s.err(fmt.Errorf("%w; the storage holds files of a restic repository and no config — an init that did not finish, or a rule that removed the config — which nothing opens and init will not write over: remove them at the storage, or use another path, then run setup again", failure))
+				// Recovery comes before removal: a repository that lost its
+				// config may be whole in the storage's kept versions (the
+				// guide, "After an attack"), and nothing here can tell
+				// one from an init's leftovers.
+				return nil, s.err(fmt.Errorf("%w; the storage holds files of a restic repository and no config — a repository whose config was removed, or an init that did not finish — which nothing opens and init will not write over. If a backup was ever made there, recover its earlier state from the storage's kept versions first (the guide, \"After an attack\") and remove nothing; only an unfinished repository that never held one is removed at the storage. Or give setup another path; then run setup again", failure))
 			}
 			if backendRefused(message) {
 				// Refused at the door: init never opened the storage, so

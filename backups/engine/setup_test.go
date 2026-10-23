@@ -1066,7 +1066,7 @@ func TestFilesOfARepositoryWithNoConfigEndSetupAtOnce(t *testing.T) {
 		b.initOut, b.initErr = "", strings.ReplaceAll(halfThere, "repository already contains keys", phrase)
 		m.answers = []string{"AKIDX", "the-secret", "stored"}
 		_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
-		if err == nil || !strings.Contains(err.Error(), phrase) || !strings.Contains(err.Error(), "the storage holds files of a restic repository and no config") || !strings.Contains(err.Error(), "remove them at the storage, or use another path, then run setup again") || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") {
+		if err == nil || !strings.Contains(err.Error(), phrase) || !strings.Contains(err.Error(), "the storage holds files of a restic repository and no config") || !strings.Contains(err.Error(), "recover its earlier state from the storage's kept versions first") || !strings.Contains(err.Error(), "only an unfinished repository that never held one is removed at the storage") || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") {
 			t.Fatalf("err = %v", err)
 		}
 		if got, want := b.roles(), "plan probe init"; got != want || strings.Contains(m.saidAll(), "the key id and secret again") {
