@@ -6,8 +6,8 @@ body:
         [SECURITY.md](https://github.com/smallhoursorg/hotserve/blob/main/SECURITY.md).
   - type: textarea
     attributes:
-      label: What happened
-      description: What you did, what you expected, and what you saw instead.
+      label: Your question, problem or report
+      description: For a problem, what you did, what you expected, and what you saw instead.
     validations:
       required: true
   - type: input
@@ -17,11 +17,9 @@ body:
   - type: input
     attributes:
       label: Host
-      description: Distribution and architecture, e.g. Debian 13, arm64.
-    validations:
-      required: true
+      description: Distribution and architecture, e.g. Debian 13, arm64. Skip it if you have not installed hotserve yet.
   - type: textarea
     attributes:
       label: Journal
-      description: The relevant lines from `journalctl -u hotserve -n 50 --no-pager`, and for an app's own output `journalctl -t hotserve-<app> -n 50 --no-pager`. Redact secrets.
+      description: Run as root, or as the [administrator](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md#3-an-administrator-if-you-want-one). The relevant lines from `journalctl -u hotserve -n 50 --no-pager`, for an app's own output `journalctl -t hotserve-<app> -n 50 --no-pager`, and for a box push `journalctl -u hotserve-box-apply -n 50 --no-pager`. Redact secrets.
       render: text

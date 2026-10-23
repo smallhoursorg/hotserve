@@ -222,7 +222,8 @@ deploy_trust gitlab {
 
 That shape is written from GitLab's documentation of its ID tokens,
 its claims and its runners, and from the box's code. It has not been
-run against a real GitLab project; if you do, say so in an issue. The
+run against a real GitLab project; if you do, say so in
+[Q&A](https://github.com/smallhoursorg/hotserve/discussions/new?category=q-a). The
 same job publishing the tarball to GitLab's package registry for the
 box to fetch, with `curl` in place of the script, is in
 [liveswap/README.md](../liveswap/README.md#gitlab-ci).
