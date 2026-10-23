@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -282,17 +283,19 @@ type systemdHandle struct {
 	// last known, not the applied, and no sync may take it as such.
 	capsUnknown atomic.Bool
 	// cgroup is the unit's cgroup path as read at adopt, at reattach or
-	// by the watcher's backfill, and unenforced the directives whose
-	// controller does not reach it (unenforcedCaps). Written only by
-	// setCapsState, under capsLock, so the list is always the one
-	// computed from the caps beside it; state takes the same lock to
-	// read the two together, so a status never pairs new caps with the
-	// list computed for the old ones.
-	cgroup     atomic.Pointer[string]
-	unenforced atomic.Pointer[[]string]
-	capsLock   sync.Mutex
-	done       chan struct{}
-	exit       atomic.Pointer[unitStatus] // final status, set before done closes
+	// by the watcher's backfill; controllers the set that reached it at
+	// the last reading of its cgroup.controllers (nil = never read); and
+	// unenforced the directives whose controller is not in that set
+	// (missingCaps). Written only by setCapsState, under capsLock, so
+	// the list is always the one computed from the caps beside it;
+	// state takes the same lock to read them together, so a status
+	// never pairs new caps with the list computed for the old ones.
+	cgroup      atomic.Pointer[string]
+	controllers atomic.Pointer[[]string]
+	unenforced  atomic.Pointer[[]string]
+	capsLock    sync.Mutex
+	done        chan struct{}
+	exit        atomic.Pointer[unitStatus] // final status, set before done closes
 }
 
 func (h *systemdHandle) state() handleState {
@@ -316,52 +319,61 @@ func (h *systemdHandle) state() handleState {
 // for the unit tests, which point it at a directory of their own.
 var cgroupRoot = "/sys/fs/cgroup"
 
-// unenforcedCaps names the caps among caps whose controller does not
-// reach the unit's cgroup: the manager accepts and reports MemoryMax=
-// on a host whose user@.service does not delegate the memory
-// controller (a container, say), and the kernel then bounds nothing.
-// Debian 13, Ubuntu 24.04 and 26.04 and Fedora 43 delegate cpu,
-// memory and pids (measured), so on a supported host this is empty.
-// An unreadable cgroup.controllers is no information: nothing is
-// claimed either way.
-func unenforcedCaps(root, cg string, caps resourceCaps) []string {
-	if cg == "" || !caps.any() {
-		return nil
+// readControllers reads the controllers that reach the unit's cgroup
+// (its cgroup.controllers). No cgroup path, or an unreadable file, is
+// no reading (ok false), never an empty set: "unreadable" must not be
+// taken for "no controller present", nor for "every controller
+// present".
+func readControllers(root, cg string) (have []string, ok bool) {
+	if cg == "" {
+		return nil, false
 	}
 	// cg is the manager's own report of the unit's cgroup path, under
 	// the cgroup root; nothing of an app's or a request's reaches it.
 	b, err := os.ReadFile(filepath.Join(root, cg, "cgroup.controllers")) //nolint:gosec // path from the manager, under the cgroup root
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	have := map[string]bool{}
-	for _, c := range strings.Fields(string(b)) {
-		have[c] = true
-	}
+	return strings.Fields(string(b)), true
+}
+
+// missingCaps names the caps among caps whose controller is not in
+// have: the manager accepts and reports MemoryMax= on a host whose
+// user@.service does not delegate the memory controller (a container,
+// say), and the kernel then bounds nothing. Debian 13, Ubuntu 24.04
+// and 26.04 and Fedora 43 delegate cpu, memory and pids (measured), so
+// on a supported host this is empty.
+func missingCaps(have []string, caps resourceCaps) []string {
 	var missing []string
-	if caps.memoryMax > 0 && !have["memory"] {
+	if caps.memoryMax > 0 && !slices.Contains(have, "memory") {
 		missing = append(missing, "memory_max")
 	}
-	if caps.tasksMax > 0 && !have["pids"] {
+	if caps.tasksMax > 0 && !slices.Contains(have, "pids") {
 		missing = append(missing, "tasks_max")
 	}
-	if caps.cpuQuota > 0 && !have["cpu"] {
+	if caps.cpuQuota > 0 && !slices.Contains(have, "cpu") {
 		missing = append(missing, "cpu_quota")
 	}
 	return missing
 }
 
 // setCapsState is the one writer of a handle's caps, cgroup path,
-// unenforced list and unknown flag. Under the handle's lock, so the
-// watcher's backfill of the cgroup path and a reload's SetCaps cannot
-// leave the list computed from the other's caps (whichever writes last
-// recomputes from both as they then are), and a status read (state)
-// sees the caps and the flag that settles them together, never new
-// caps under a stale "unknown". A nil caps, cgroup or unknown leaves
-// that field as it is. A cap that reads as set and bounds nothing is
-// the "looks configured, quietly weaker" shape this code refuses to
-// present as effective: it is said once in the journal per change of
-// the list, and status lists such caps apart.
+// controllers, unenforced list and unknown flag. Under the handle's
+// lock, so the watcher's backfill of the cgroup path and a reload's
+// SetCaps cannot leave the list computed from the other's caps
+// (whichever writes last recomputes from both as they then are), and
+// a status read (state) sees the caps and the flag that settles them
+// together, never new caps under a stale "unknown". A nil caps, cgroup
+// or unknown leaves that field as it is. The controllers are read
+// afresh each time; a reading that fails leaves the last one standing,
+// and the list is computed from that one for the caps as they now are
+// (a cap added or removed meanwhile is classified either way), and
+// with no reading ever made nothing is claimed either way (the
+// watcher keeps trying, DESIGN-liveswap.md "Resource caps"). A cap
+// that reads as set and bounds nothing is the "looks configured,
+// quietly weaker" shape this code refuses to present as effective: it
+// is said in the journal when it first appears in the list, and status
+// lists such caps apart.
 func (r *systemdRunner) setCapsState(h *systemdHandle, caps *resourceCaps, cgroup *string, unknown *bool) {
 	h.capsLock.Lock()
 	if caps != nil {
@@ -381,12 +393,26 @@ func (r *systemdRunner) setCapsState(h *systemdHandle, caps *resourceCaps, cgrou
 	if p := h.cgroup.Load(); p != nil {
 		cg = *p
 	}
-	missing := unenforcedCaps(cgroupRoot, cg, cur)
+	if have, ok := readControllers(cgroupRoot, cg); ok {
+		h.controllers.Store(&have)
+	}
+	var missing []string
+	if have := h.controllers.Load(); have != nil {
+		missing = missingCaps(*have, cur)
+	}
 	prev := h.unenforced.Swap(&missing)
 	h.capsLock.Unlock()
 	// Said after the unlock: a status read waits on the lock, and a
 	// journal that stalls this write must not stall status with it.
-	if len(missing) > 0 && (prev == nil || strings.Join(*prev, ",") != strings.Join(missing, ",")) {
+	// Said for a cap new to the list: a list that only shrank is not
+	// news, and may rest on a reading that was not made this time.
+	var fresh []string
+	for _, name := range missing {
+		if prev == nil || !slices.Contains(*prev, name) {
+			fresh = append(fresh, name)
+		}
+	}
+	if len(fresh) > 0 {
 		r.log().Warn("resource caps the host does not enforce: the user manager does not delegate their controller to the unit's cgroup, so the kernel bounds nothing; status lists them as caps_unenforced",
 			zap.String("unit", h.unit), zap.Strings("caps", missing), zap.String("cgroup", cg))
 	}
@@ -659,14 +685,14 @@ func (r *systemdRunner) Start(spec startSpec) (handle, error) {
 // what an unset TasksMax= means (infinity only where that is the
 // manager's default: otherwise it would lift the manager's own bound,
 // 15% of threads-max, from the unit). A unit the handle knows carries
-// no tasks cap gets no TasksMax= written: one would pin the manager's
-// default into the unit, past a later change of it. A lift does pin
-// it — the manager has no "back to the default" write, infinity being
-// the unset above — so a unit whose tasks_max was removed holds the
-// default as of the lift until its next launch (DESIGN-liveswap.md,
-// "Accepted residuals"); and with the handle's caps unknown the lift
-// is written whatever the unit may carry. With the default unreadable
-// the unit keeps its tasks cap, and the handle says so.
+// no tasks cap gets no TasksMax= written: there is nothing to lift.
+// A lift writes the default's number into the unit, which is also
+// what the kernel holds for an untouched unit until its next launch:
+// a later change of DefaultTasksMax= reaches neither running unit
+// (measured, DESIGN-liveswap.md "Resource caps"). With the handle's
+// caps unknown the lift is written whatever the unit may carry. With
+// the default unreadable the unit keeps its tasks cap, and the handle
+// says so.
 func (r *systemdRunner) SetCaps(h handle, caps resourceCaps) error {
 	sh, ok := h.(*systemdHandle)
 	if !ok {
@@ -1223,8 +1249,14 @@ func (r *systemdRunner) watch(h *systemdHandle) {
 		h.setArgv(st.ExecStart)
 		// The cgroup path too, for the same reason: a start whose status
 		// read failed has none, and without it no later SetCaps can tell
-		// which of its caps the host enforces.
-		if h.cgroup.Load() == nil && st.ControlGroup != "" {
+		// which of its caps the host enforces. And the controllers, until
+		// one reading of them has succeeded (a path whose file could not
+		// be read leaves the handle claiming nothing) and while any cap
+		// is listed as unenforced (a reading that failed right after the
+		// write that enabled a controller would otherwise stand until
+		// the next write): tried again each poll, a file read.
+		listed := h.unenforced.Load()
+		if (h.cgroup.Load() == nil || h.controllers.Load() == nil || listed != nil && len(*listed) > 0) && st.ControlGroup != "" {
 			r.setCapsState(h, nil, &st.ControlGroup, nil)
 		}
 		if st.running() {

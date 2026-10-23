@@ -393,6 +393,27 @@ func TestWatcherAndReadBackRefreshEnforcement(t *testing.T) {
 	if st := h.state(); len(st.CapsUnenforced) != 0 {
 		t.Fatalf("no memory cap left, yet %v is unenforced", st.CapsUnenforced)
 	}
+	// A list computed from a reading the host has since outgrown (the
+	// cpu controller arriving after a write whose own reading failed)
+	// is read again by the watcher while anything is listed, and
+	// clears once the reading shows the controller.
+	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("pids\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.setCapsState(h, &resourceCaps{cpuQuota: 50}, nil, nil)
+	if got := h.state().CapsUnenforced; strings.Join(got, ",") != "cpu_quota" {
+		t.Fatalf("with the cpu controller absent the list must name cpu_quota, got %v", got)
+	}
+	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("pids cpu\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for len(h.state().CapsUnenforced) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the watcher did not re-read the controllers while cpu_quota was listed; state %+v", h.state())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // A status read takes the caps and the enforcement list together: a
@@ -460,24 +481,71 @@ func TestUnenforcedCapsNamesTheMissingControllers(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := resourceCaps{memoryMax: 1 << 20, tasksMax: 40, cpuQuota: 50}
-	// No controllers file: no information, nothing claimed.
-	if got := unenforcedCaps(root, cg, all); got != nil {
-		t.Fatalf("unreadable controllers claimed %v", got)
+	// No controllers file, or no cgroup path: no reading, never an
+	// empty set.
+	if have, ok := readControllers(root, cg); ok || have != nil {
+		t.Fatalf("an unreadable controllers file read as %v (ok=%v)", have, ok)
+	}
+	if have, ok := readControllers(root, ""); ok || have != nil {
+		t.Fatalf("no cgroup path read as %v (ok=%v)", have, ok)
 	}
 	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("pids\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := unenforcedCaps(root, cg, all); strings.Join(got, ",") != "memory_max,cpu_quota" {
+	have, ok := readControllers(root, cg)
+	if !ok || strings.Join(have, ",") != "pids" {
+		t.Fatalf("controllers = %v (ok=%v), want pids", have, ok)
+	}
+	if got := missingCaps(have, all); strings.Join(got, ",") != "memory_max,cpu_quota" {
 		t.Fatalf("unenforced = %v, want memory_max and cpu_quota (only pids is delegated)", got)
 	}
-	if got := unenforcedCaps(root, cg, resourceCaps{tasksMax: 40}); got != nil {
+	if got := missingCaps(have, resourceCaps{tasksMax: 40}); got != nil {
 		t.Fatalf("a cap whose controller is there read as unenforced: %v", got)
+	}
+	if got := missingCaps([]string{"cpu", "memory", "pids"}, all); got != nil {
+		t.Fatalf("every controller delegated, yet %v", got)
+	}
+	// A reading that fails leaves the last one standing, and the list
+	// follows the caps as they now are — a cap removed leaves it, a cap
+	// added joins it — until a reading succeeds again.
+	old := cgroupRoot
+	cgroupRoot = root
+	t.Cleanup(func() { cgroupRoot = old })
+	r := newSystemdRunner(newFakeSystemdConn(), zap.NewNop())
+	t.Cleanup(r.close)
+	h := &systemdHandle{unit: "hotserve-demo.v1.0a1b2c3d0a1b2c3d.service", done: make(chan struct{})}
+	r.setCapsState(h, &all, &cg, nil)
+	if got := h.state().CapsUnenforced; strings.Join(got, ",") != "memory_max,cpu_quota" {
+		t.Fatalf("handle lists %v, want memory_max and cpu_quota", got)
+	}
+	if err := os.Remove(root + cg + "/cgroup.controllers"); err != nil {
+		t.Fatal(err)
+	}
+	r.setCapsState(h, &all, nil, nil)
+	if got := h.state().CapsUnenforced; strings.Join(got, ",") != "memory_max,cpu_quota" {
+		t.Fatalf("an unreadable controllers file dropped the known list: %v", got)
+	}
+	r.setCapsState(h, &resourceCaps{cpuQuota: 50}, nil, nil)
+	if got := h.state().CapsUnenforced; strings.Join(got, ",") != "cpu_quota" {
+		t.Fatalf("a removed cap must leave the kept list: %v", got)
+	}
+	r.setCapsState(h, &resourceCaps{cpuQuota: 50, memoryMax: 1 << 20}, nil, nil)
+	if got := h.state().CapsUnenforced; strings.Join(got, ",") != "memory_max,cpu_quota" {
+		t.Fatalf("a cap added under no reading must be classified by the last one: %v", got)
 	}
 	if err := os.WriteFile(root+cg+"/cgroup.controllers", []byte("cpu memory pids\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := unenforcedCaps(root, cg, all); got != nil {
-		t.Fatalf("every controller delegated, yet %v", got)
+	r.setCapsState(h, &all, nil, nil)
+	if got := h.state().CapsUnenforced; len(got) != 0 {
+		t.Fatalf("a good reading must replace the kept one: %v", got)
+	}
+	// A handle that never had a reading claims nothing either way.
+	bare := &systemdHandle{unit: "hotserve-demo.v2.0a1b2c3d0a1b2c3d.service", done: make(chan struct{})}
+	none := "/user.slice/user-1000.slice/user@1000.service/app.slice/nowhere.service"
+	r.setCapsState(bare, &all, &none, nil)
+	if got := bare.state().CapsUnenforced; got != nil || bare.controllers.Load() != nil {
+		t.Fatalf("with no reading ever made the handle claimed %v", got)
 	}
 	// Status: the unenforced ones are named, not valued.
 	caps := capsForStatus(all, []string{"memory_max", "cpu_quota"})

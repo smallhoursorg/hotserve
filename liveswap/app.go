@@ -1556,6 +1556,10 @@ func (ma *managedApp) publishInstance(c collaborators, inst *instance) error {
 	ma.current = inst
 	ma.mu.Unlock()
 	ma.activeSocket.Store(inst.sock)
+	// Persisted before the caps are reconciled: the record is what a
+	// restart recovers, and a sync that waits on the manager must not
+	// hold it back from naming the instance that is already serving.
+	err := ma.persistState(c, inst)
 	// The instance was started from the spec its launch snapshotted;
 	// a reload in between (a deploy's fetch and soak are long) changed
 	// the caps on the instance it was replacing, not on this one.
@@ -1563,7 +1567,7 @@ func (ma *managedApp) publishInstance(c collaborators, inst *instance) error {
 	// instance carries the accepted configuration's caps whichever
 	// path published it.
 	ma.syncCaps()
-	return ma.persistState(c, inst)
+	return err
 }
 
 // unrouteIf clears activeSocket only while inst is still current, under
