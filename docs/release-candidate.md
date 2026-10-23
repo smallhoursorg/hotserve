@@ -52,8 +52,14 @@ and the second ended after 31 s, nothing written:
 restic could not make or open the repository (exit 1): Fatal: create repository at s3:https://…/box2 failed: Fatal: unable to open repository at s3:https://…/box2: client.BucketExists: The request signature we calculated does not match the signature you provided. Check your key and signing method.
 the storage refused the key, or could not be reached: the key id and secret again (the password shown above still applies)
 …
-hotserve-backup: restic could not make or open the repository (exit 1): …; keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there
+hotserve-backup: restic could not make or open the repository (exit 1): …; the password shown above was never used: discard it
 ```
+
+On B2 the look itself is refused at once (`b2_authorize_account: 401`
+for a wrong secret, `b2_list_buckets: 401` for a bucket the key may not
+reach; measured, check 1 of `v0.3.0-rc1`): no password is shown until
+the storage takes a key, and three refusals end in restic's words with
+nothing said of a password.
 
 ## 2. Set up, a first backup, status and the drill, over real TLS
 

@@ -30,6 +30,18 @@ const (
 	alreadyThere = `{"message_type":"exit_error","code":1,"message":"Fatal: create repository at s3:http://e2e-s3:9000/box failed: Fatal: unable to open repository at s3:http://e2e-s3:9000/box: config file already exists\n"}` + "\n"
 	wrongKey     = `{"message_type":"exit_error","code":1,"message":"Fatal: create repository at s3:http://e2e-s3:9000/box failed: Fatal: unable to open repository at s3:http://e2e-s3:9000/box: client.BucketExists: The request signature we calculated does not match the signature you provided. Check your key and signing method.\n"}` + "\n"
 	configJSON   = `{"version": 2, "id": "` + repoID + `", "chunker_polynomial": "27ec33083365e9"}` + "\n"
+	// What the look's `cat config` (no --json) says on stderr where B2
+	// refuses the key at once [measured, RC check 1 on real B2]: the
+	// same opening init's first step makes.
+	refusedB2 = "Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:\n"
+	// An init that got past the opening and failed writing: restic's
+	// shape for it (cmd/restic/cmd_init.go, "create key in repository
+	// at … failed"), with a reason of the storage's [not measured].
+	keyWriteFailed = `{"message_type":"exit_error","code":1,"message":"Fatal: create key in repository at s3:http://e2e-s3:9000/box failed: Save(<key/8f2a1c>) returned error, retrying after 15m0s: 503 Service Unavailable\n"}` + "\n"
+	// An init that found a key file and no config: restic's own check
+	// before it writes (internal/repository/repository.go Init), as
+	// --json puts it [the phrase from the source; not measured].
+	halfThere = `{"message_type":"exit_error","code":1,"message":"Fatal: create key in repository at s3:http://e2e-s3:9000/box failed: repository already contains keys\n"}` + "\n"
 )
 
 // term is the operator: it answers in order, and remembers what it was
@@ -705,20 +717,23 @@ func TestAnInterruptDuringTheWaitForAnEarlierInitIsHonoured(t *testing.T) {
 	}
 }
 
-// After an init attempt that failed, the next attempt's look saying
-// "exists" does not prove the shown password is not that repository's:
-// the failed init may have made it. The shown password is tried first,
-// and a repository it opens is one this setup made.
+// After an init attempt that failed past the opening, the next
+// attempt's look saying "exists" does not prove the shown password is
+// not that repository's: the failed init may have made it. The shown
+// password is tried first, and a repository it opens is one this setup
+// made. (An init refused at the opening wrote nothing, and is not
+// tried: TestAnInitRefusedAtTheOpeningIsNotTriedAsTheMaker.)
 func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testing.T) {
 	b, m := setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.initOut, b.initErr = "", wrongKey
+	b.initOut, b.initErr = "", keyWriteFailed
 	inits := 0
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_init_") {
 			if inits++; inits == 1 {
 				// The second attempt's look finds a repository.
+				b.hang = ""
 				b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
 			}
 		}
@@ -744,12 +759,13 @@ func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testin
 	// The shown password does not open it: it is not ours, and the
 	// operator is asked, as before.
 	b, m = setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.initOut, b.initErr = "", wrongKey
+	b.initOut, b.initErr = "", keyWriteFailed
 	opens := 0
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_init_") {
+			b.hang = ""
 			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
 			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
 		}
@@ -771,9 +787,9 @@ func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testin
 	// says the repository exists: an earlier init ran with the shown
 	// password, so it is tried before it is called unused, the same.
 	b, m = setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.initOut, b.initErr = "", wrongKey
+	b.initOut, b.initErr = "", keyWriteFailed
 	inits = 0
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_init_") {
@@ -793,7 +809,7 @@ func TestAfterAFailedInitTheShownPasswordIsTriedBeforeItIsCalledUnused(t *testin
 	// A first init that says the repository exists ran with no earlier
 	// one: nothing to try, the operator is asked, as before.
 	b, m = setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.initOut, b.initErr = "", alreadyInit
 	m.answers = []string{"AKIDX", "the-secret", "stored", "its-own-password"}
@@ -852,16 +868,17 @@ func TestTheOldFileStillThereIsSaid(t *testing.T) {
 // a password has been made and shown: it is said not to be the one.
 func TestWhereTheProbeCannotTellInitAnswers(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		probe unit.Outcome
+		name string
+		set  func(b *box)
 	}{
-		{"the probe exits 1", unit.Outcome{Result: "exit-code", ExitStatus: 1}},
-		{"the probe exits 0 with nothing", unit.Outcome{Result: "success"}},
+		{"the probe is given up on at its clock", func(b *box) { b.hang = "probe" }},
+		{"the probe exits 0 with nothing", func(b *box) { b.outcome["probe"] = unit.Outcome{Result: "success"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, wording := range []string{alreadyInit, alreadyThere} {
 				b, m := setupBox(t)
-				b.outcome["probe"], b.probeOut = tc.probe, ""
+				tc.set(b)
+				b.probeOut = ""
 				b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 				// The phrase comes after the URL, which may be long: a message
 				// cut for showing must not be the one matched.
@@ -895,7 +912,7 @@ func TestWhereTheProbeCannotTellInitAnswers(t *testing.T) {
 	// And a failure after init has said the repository exists is not
 	// told to keep that password: init did not make anything with it.
 	b, m := setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.initOut, b.initErr = "", alreadyInit
 	b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
@@ -916,13 +933,158 @@ func TestWhereTheProbeCannotTellInitAnswers(t *testing.T) {
 	}
 }
 
+// A storage that refuses the look at once — B2 a wrong key, or a bucket
+// the key may not reach [measured, RC check 1] — is said in restic's
+// words, and the key is asked for again before any password is made:
+// init's first step is the same opening, and would be refused the same.
+func TestAKeyTheStorageRefusesAtTheLookIsAskedForAgainBeforeAnyPassword(t *testing.T) {
+	b, m := setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.probeErr = refusedB2
+	looks := 0
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_probe_") {
+			if looks++; looks == 2 {
+				// The right key this time: no repository there yet.
+				b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
+				b.probeErr = ""
+			}
+		}
+	}
+	m.answers = []string{"K001", "wrong", "K001", "the-secret", "stored"}
+	rep, err := b.setup(t, m, "b2:hs-lifecycle-test:rc-check1")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan probe probe init"; got != want {
+		t.Fatalf("units: %s, want %s", got, want)
+	}
+	if got, want := m.askedAll(), "Storage key id (B2_ACCOUNT_ID): \nsecret:Storage secret key (B2_ACCOUNT_KEY): \nStorage key id (B2_ACCOUNT_ID): \nsecret:Storage secret key (B2_ACCOUNT_KEY): \nType stored to go on: "; got != want {
+		t.Fatalf("asked:\n%s", got)
+	}
+	said := m.saidAll()
+	for _, want := range []string{
+		"restic could not open the repository (exit 1): Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:",
+		"the storage refused the key, or could not be reached: the key id and secret again",
+	} {
+		if !strings.Contains(said, want) {
+			t.Fatalf("said lacks %q:\n%s", want, said)
+		}
+	}
+	for _, wrong := range []string{"answered within", "still applies", "a new repository will be made"} {
+		if strings.Contains(said, wrong) {
+			t.Fatalf("said %q of a look restic refused at once:\n%s", wrong, said)
+		}
+	}
+	// The password came after the refusal, once.
+	if i, j := strings.Index(said, "b2_authorize_account"), strings.Index(said, "Repository password (new)"); i < 0 || j < i || len(passwordRe.FindAllString(said, -1)) != 1 {
+		t.Fatalf("the password's place:\n%s", said)
+	}
+	pw := shownPassword(t, m)
+	if v := envOf(t, b.cfg.EnvFile); v["RESTIC_PASSWORD"] != pw || v["B2_ACCOUNT_KEY"] != "the-secret" || !rep.New {
+		t.Fatalf("the file holds %v; report %+v", v, rep)
+	}
+	// Three refusals at the look: the end, in restic's words, with no
+	// password ever shown and so nothing said of one.
+	b, m = setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.probeErr = refusedB2
+	m.answers = []string{"K001", "wrong", "K001", "wrong", "K001", "wrong"}
+	_, err = b.setup(t, m, "b2:hs-lifecycle-test:rc-check1")
+	if err == nil || err.Error() != "restic could not open the repository (exit 1): Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:" {
+		t.Fatalf("err = %v", err)
+	}
+	if got, want := b.roles(), "plan probe probe probe"; got != want || len(passwordRe.FindAllString(m.saidAll(), -1)) != 0 || strings.Count(m.saidAll(), "the key id and secret again") != 2 {
+		t.Fatalf("units %s; said:\n%s", got, m.saidAll())
+	}
+	m.asked = nil
+	nothingWritten(t, b, m)
+	// A look refused after a password was shown — the first attempt's
+	// look ran to its clock, and init was refused — says the password
+	// still applies, and the end says it was never used.
+	b, m = setupBox(t)
+	b.hang = "probe"
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", wrongKey
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			b.hang = ""
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.probeErr = refusedB2
+		}
+	}
+	m.answers = []string{"K001", "wrong", "stored", "K001", "wrong", "K001", "wrong"}
+	_, err = b.setup(t, m, "b2:hs-lifecycle-test:rc-check1")
+	if err == nil || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") || !strings.HasPrefix(err.Error(), "restic could not open the repository (exit 1): Fatal: unable to open repository at b2:") {
+		t.Fatalf("err = %v", err)
+	}
+	if got, want := b.roles(), "plan probe init probe probe"; got != want || !strings.Contains(m.saidAll(), "the key id and secret again (the password shown above still applies)") {
+		t.Fatalf("units %s; said:\n%s", got, m.saidAll())
+	}
+	m.asked = nil
+	nothingWritten(t, b, m)
+}
+
+// An init refused at the opening wrote nothing: a repository the next
+// attempt's look finds is not tried with the password shown, which is
+// said not to be it, and dead on the way out.
+func TestAnInitRefusedAtTheOpeningIsNotTriedAsTheMaker(t *testing.T) {
+	b, m := setupBox(t)
+	b.hang = "probe"
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", wrongKey
+	b.before = func(s unit.Spec) {
+		if strings.Contains(s.Name, "_init_") {
+			b.hang = ""
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+		}
+	}
+	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "the-secret", "its-own-password"}
+	rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err != nil {
+		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
+	}
+	if got, want := b.roles(), "plan probe init probe open"; got != want || rep.New || rep.RepositoryID != repoID {
+		t.Fatalf("units %s, report %+v\nsaid:\n%s", got, rep, m.saidAll())
+	}
+	for _, want := range []string{"the repository exists; its password is needed (the one shown above is not it)", "the password shown above was never used: discard it"} {
+		if !strings.Contains(m.saidAll(), want) {
+			t.Fatalf("said lacks %q:\n%s", want, m.saidAll())
+		}
+	}
+}
+
+// Files of a repository and no config — an init that ended between its
+// two writes, a rule that removed the config — are what init refuses to
+// write over: setup ends at once, says what is there and the way out,
+// and the password shown was never used.
+func TestFilesOfARepositoryWithNoConfigEndSetupAtOnce(t *testing.T) {
+	for _, phrase := range []string{"repository already contains keys", "repository already contains snapshots"} {
+		b, m := setupBox(t)
+		b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
+		b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+		b.initOut, b.initErr = "", strings.ReplaceAll(halfThere, "repository already contains keys", phrase)
+		m.answers = []string{"AKIDX", "the-secret", "stored"}
+		_, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+		if err == nil || !strings.Contains(err.Error(), phrase) || !strings.Contains(err.Error(), "the storage holds files of a restic repository and no config") || !strings.Contains(err.Error(), "remove them at the storage, or use another path, then run setup again") || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") {
+			t.Fatalf("err = %v", err)
+		}
+		if got, want := b.roles(), "plan probe init"; got != want || strings.Contains(m.saidAll(), "the key id and secret again") {
+			t.Fatalf("units %s; said:\n%s", got, m.saidAll())
+		}
+		m.asked = nil
+		nothingWritten(t, b, m)
+	}
+}
+
 // A storage that refuses the key, or cannot be reached, is a mistake
 // in what was typed: the key is asked for again, up to three times,
 // and the one password shown stands — shown once, stored once, and
-// the password of the repository that is made in the end.
+// the password of the repository that is made in the end. Here the
+// look runs to its clock, as S3 has it retry, and init is what refuses.
 func TestAKeyTheStorageRefusesIsAskedForAgain(t *testing.T) {
 	b, m := setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.initOut, b.initErr = "", wrongKey
 	tries := 0
@@ -930,6 +1092,7 @@ func TestAKeyTheStorageRefusesIsAskedForAgain(t *testing.T) {
 		if strings.Contains(s.Name, "_init_") {
 			if tries++; tries == 2 {
 				// The right key this time.
+				b.hang = ""
 				b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
 				delete(b.outcome, "init")
 				b.initOut = initialized
@@ -960,28 +1123,42 @@ func TestAKeyTheStorageRefusesIsAskedForAgain(t *testing.T) {
 			t.Fatalf("said lacks %q:\n%s", want, m.saidAll())
 		}
 	}
-	// And promises nothing of the password's fate: three refusals end
-	// with "keep it", since init ran with it, and the look's message
-	// must not have said the opposite.
+	// And promises nothing of the password's fate on the way: that is
+	// said once, at the end, from what setup knows by then.
 	if strings.Contains(m.saidAll(), "was never used") {
 		t.Fatalf("the look promised a fate the ending contradicts:\n%s", m.saidAll())
 	}
 	if v := envOf(t, b.cfg.EnvFile); v["RESTIC_PASSWORD"] != pw || v["AWS_SECRET_ACCESS_KEY"] != "the-secret" || !rep.New {
 		t.Fatalf("the file holds %v; report %+v", v, rep)
 	}
-	// Three refusals: the end, and the password shown is said to be
-	// dead.
+	// Three refusals at the opening: the end, and the password shown is
+	// said to be dead — init never opened the storage, so it wrote
+	// nothing with it (restic's "unable to open repository at").
 	b, m = setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 	b.initOut, b.initErr = "", wrongKey
 	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "wrong", "AKIDX", "wrong"}
 	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
-	if err == nil || !strings.HasSuffix(err.Error(), "keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there") || !strings.Contains(err.Error(), "signature") {
+	if err == nil || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") || !strings.Contains(err.Error(), "signature") || strings.Contains(err.Error(), "keep the password") {
 		t.Fatalf("err = %v", err)
 	}
 	if got, want := b.roles(), "plan probe init probe init probe init"; got != want {
 		t.Fatalf("units: %s, want %s", got, want)
+	}
+	m.asked = nil
+	nothingWritten(t, b, m)
+	// Three failures past the opening — restic's "create key in
+	// repository at … failed" — may each have written: the password is
+	// kept.
+	b, m = setupBox(t)
+	b.hang = "probe"
+	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.initOut, b.initErr = "", keyWriteFailed
+	m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "wrong", "AKIDX", "wrong"}
+	_, err = b.setup(t, m, "s3:http://e2e-s3:9000/box")
+	if err == nil || !strings.HasSuffix(err.Error(), "keep the password shown above: restic init ran with it, and may have made the repository; run setup again, which looks first and asks for it if the repository is there") {
+		t.Fatalf("err = %v", err)
 	}
 	m.asked = nil
 	nothingWritten(t, b, m)
@@ -1046,14 +1223,15 @@ func TestOnlyResticsOwnWordsSayTheRepositoryExists(t *testing.T) {
 // dead, on the way out.
 func TestAPasswordShownAndNotUsedIsSaidDeadOnSuccessToo(t *testing.T) {
 	b, m := setupBox(t)
-	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+	b.hang = "probe"
 	b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.initOut, b.initErr = "", wrongKey
+	b.initOut, b.initErr = "", keyWriteFailed
 	opens := 0
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_init_") {
 			// The second attempt's look finds a repository the shown
 			// password does not open: not ours.
+			b.hang = ""
 			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
 			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
 		}
@@ -1118,11 +1296,21 @@ func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
 		want   string
 	}{
 		{"wrong key", func(b *box, m *term) {
-			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.hang = "probe"
 			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 			b.initOut, b.initErr = "", wrongKey
 			m.answers = []string{"AKIDX", "wrong", "stored", "AKIDX", "wrong", "AKIDX", "wrong"}
 		}, "restic could not make or open the repository (exit 1): Fatal: create repository at"},
+		{"wrong key, refused at the look", func(b *box, m *term) {
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.probeErr = refusedB2
+			m.answers = []string{"AKIDX", "wrong", "AKIDX", "wrong", "AKIDX", "wrong"}
+		}, "restic could not open the repository (exit 1): Fatal: unable to open repository at b2:"},
+		{"files of a repository and no config", func(b *box, m *term) {
+			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
+			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
+			b.initOut, b.initErr = "", halfThere
+		}, "the storage holds files of a restic repository and no config"},
 		{"wrong password for an existing repository", func(b *box, m *term) {
 			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
 			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
@@ -1176,8 +1364,8 @@ func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
 }
 
 // A repository that does not answer init is given up on — the waiting,
-// not the unit: init is never stopped half way (a config and no key is
-// a repository no password opens), so it is left running, recorded for
+// not the unit: init is never stopped half way (a key and no config is
+// a repository nothing opens), so it is left running, recorded for
 // the next lock holder to wait for, and the operator is told how to end
 // it if it must be.
 func TestARepositoryThatDoesNotAnswerIsGivenUpOnAndInitLeftRunning(t *testing.T) {
