@@ -251,8 +251,9 @@ an app that unlinks and re-binds its path is, as far as hotserve is
 concerned, gone: its health probes fail and the watchdog restarts it.
 (With `health_path off` the watchdog only watches the process, so a
 re-bound app stays up and unroutable — another reason not to
-re-bind.) A stale socket file is never your problem either: the unit
-removes its socket when it stops, and every launch gets a fresh path.
+re-bind.) A stale socket file is never your problem either: hotserve removes
+it with the instance's run dir once the instance is retired, and
+every launch gets a fresh path.
 
 ### Placeholders
 

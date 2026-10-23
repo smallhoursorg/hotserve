@@ -14,9 +14,10 @@ import (
 )
 
 // Per-app sandboxing (issue #35) is systemd's own per-unit sandboxing
-// on the user-manager runner: a user namespace (PrivateUsers=) plus a
-// PID namespace (PrivatePIDs=, systemd 257+) on top of the mount,
-// device, cgroup, seccomp and capability set.
+// on the user-manager runner: a user namespace (PrivateUsers=), a
+// PID namespace (PrivatePIDs=, systemd 257+) and an IPC namespace
+// (PrivateIPC=, with a /dev/shm of the unit's own; #311) on top of the
+// mount, device, cgroup, seccomp and capability set.
 //
 // The user namespace is what closes /proc/<pid>/{root,environ,cwd} of
 // every process outside it — commoncap refuses cross-user-namespace
@@ -417,7 +418,27 @@ func probeSandboxSpec() *sandboxSpec {
 // PrivateUsers=, so such a filter fails the unit first. What neither
 // check can see is SystemCallFilter= alone not loading while the rest
 // do (DESIGN-sandbox.md, "What this does NOT stop").
-func sandboxProbeCommand() []string {
+//
+// Two more cover sibling IPC (#311). The IPC namespace must be the
+// unit's own: where the kernel refuses one the manager logs
+// "PrivateIPC=yes is configured, but IPC namespace setup failed,
+// ignoring" and goes on in its own, and PrivateIPC= then mounts a
+// fresh mqueuefs on /dev/mqueue, which the kernel allows only to a
+// process whose user namespace owns its IPC namespace — so the mount
+// fails the unit (226/NAMESPACE, measured) rather than letting it run
+// shared, and when it succeeds its root inode belongs to the mounter.
+// The probe checks both: /dev/mqueue is owned by its own uid (the
+// host's, bound in, reads as root or nobody), and its
+// /proc/self/ns/ipc is not the one hotserve passes in
+// (HOTSERVE_IPC_NS: hotserve's own, which is the manager's while
+// neither hotserve.service nor the user manager sets PrivateIPC=).
+// Two signals, since each alone can be made vacuous — the first by a
+// hotserve running as uid 0, the second by a drop-in on
+// hotserve.service. And /dev/shm must be the unit's own tmpfs: the
+// probe writes probeShmCanary there, which must then not be in
+// hotserve's /dev/shm, the host's (checkShmCanary) — a write that
+// fails is a failure of its own, named on the line.
+func sandboxProbeCommand(nonce string) []string {
 	// The echo lands in the journal under the probe unit's identifier
 	// (hotserve-sandbox-probe), so a refused host can be diagnosed
 	// from `journalctl -t hotserve-sandbox-probe`. The argv reaches the
@@ -430,22 +451,63 @@ func sandboxProbeCommand() []string {
 	// (probeStartSpec) keeps in English: a missing binary or a namespace
 	// limit (ENOSPC) is a failure of its own, named on the journal line,
 	// not a pass.
-	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; s=absent; while read -r k v; do [ "$k" = Seccomp: ] && s=$v; done < /proc/self/status; e=$(unshare -U true 2>&1); case $?:$e in 0:*) u=allowed ;; *"Operation not permitted"*) u=refused ;; *) u="failed: $e" ;; esac; echo "sandbox probe: uid_map range $n, pid $$, seccomp $s, unshare $u"; [ "$n" != 4294967295 ] && [ "$$" = 1 ] && [ "$s" = 2 ] && [ "$u" = refused ]`}
+	return []string{"/bin/sh", "-c", `read _ _ n < /proc/self/uid_map; s=absent; while read -r k v; do [ "$k" = Seccomp: ] && s=$v; done < /proc/self/status; e=$(unshare -U true 2>&1); case $?:$e in 0:*) u=allowed ;; *"Operation not permitted"*) u=refused ;; *) u="failed: $e" ;; esac; i=$(readlink /proc/self/ns/ipc); m=$(stat -c %u /dev/mqueue 2>&1); if echo probe > ` + probeShmCanary(nonce) + `; then w=ok; else w=failed; fi; echo "sandbox probe: uid_map range $n, pid $$, seccomp $s, unshare $u, ipc $i (manager $HOTSERVE_IPC_NS), mqueue owner $m (self $(id -u)), shm write $w"; [ "$n" != 4294967295 ] && [ "$$" = 1 ] && [ "$s" = 2 ] && [ "$u" = refused ] && [ -n "$i" ] && [ "$i" != "$HOTSERVE_IPC_NS" ] && [ "$m" = "$(id -u)" ] && [ "$w" = ok ]`}
+}
+
+// probeShmCanary is the file the probe unit writes into its /dev/shm:
+// unique per probe, so a leftover of one run cannot answer for the
+// next.
+func probeShmCanary(nonce string) string { return "/dev/shm/hotserve-sandbox-probe-" + nonce }
+
+// ownIPCNamespace is the IPC namespace hotserve runs in, as the probe
+// compares it: the manager's, since hotserve.service and the hotserve
+// user's manager both sit in the initial one.
+func ownIPCNamespace() (string, error) {
+	ns, err := os.Readlink("/proc/self/ns/ipc")
+	if err != nil {
+		return "", fmt.Errorf("reading hotserve's own IPC namespace: %w", err)
+	}
+	return ns, nil
+}
+
+// checkShmCanary is the half of the /dev/shm check the probe cannot
+// make from inside its unit: the canary it wrote must not be in
+// hotserve's /dev/shm, which is the host's (hotserve.service sets no
+// PrivateDevices=, and PrivateDevices= binds the host's anyway).
+// Found, every app's /dev/shm is one directory. Removed either way.
+// A hotserve that cannot see /dev/shm at all (a drop-in hiding it)
+// cannot make the check, and says so rather than passing it.
+func checkShmCanary(nonce string) error {
+	if st, err := os.Stat("/dev/shm"); err != nil || !st.IsDir() {
+		return fmt.Errorf("hotserve cannot see /dev/shm, so it cannot check that the probe unit's is its own: %w", err)
+	}
+	p := probeShmCanary(nonce)
+	_, err := os.Lstat(p)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	_ = os.Remove(p)
+	if err != nil {
+		return fmt.Errorf("checking %s after the probe: %w", p, err)
+	}
+	return fmt.Errorf("the probe unit's /dev/shm is the host's: %s, written inside the unit, was visible outside it", p)
 }
 
 // probeStartSpec is one probe unit's spec. LC_ALL=C because the
 // script reads unshare's error text, and a unit's environment is the
 // manager's defaults under the one given here (runner_systemd.go,
 // invariant 8): a host whose locale translates strerror would
-// otherwise turn a refusal into a failure, on a capable box.
-func probeStartSpec(nonce string) startSpec {
+// otherwise turn a refusal into a failure, on a capable box. ipcNS is
+// hotserve's own IPC namespace (ownIPCNamespace), which the probe's
+// must differ from.
+func probeStartSpec(nonce, ipcNS string) startSpec {
 	return startSpec{
 		app:     "sandbox-probe",
 		version: "probe",
 		nonce:   nonce,
-		command: sandboxProbeCommand(),
+		command: sandboxProbeCommand(nonce),
 		dir:     "/",
-		env:     []string{"PATH=/usr/bin:/bin", "LC_ALL=C"},
+		env:     []string{"PATH=/usr/bin:/bin", "LC_ALL=C", "HOTSERVE_IPC_NS=" + ipcNS},
 		grace:   5 * time.Second,
 		sandbox: probeSandboxSpec(),
 		probe:   true,
@@ -490,9 +552,16 @@ func probeSandboxCapability(r runner) error {
 		if err != nil {
 			return err
 		}
+		ipcNS, err := ownIPCNamespace()
+		if err != nil {
+			return err
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout)
 		defer cancel()
-		return r.RunOnce(ctx, probeStartSpec(nonce))
+		if err := r.RunOnce(ctx, probeStartSpec(nonce, ipcNS)); err != nil {
+			return err
+		}
+		return checkShmCanary(nonce)
 	}
 	err := attempt()
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -514,7 +583,7 @@ func probeSandboxCapability(r runner) error {
 		err = attempt()
 	}
 	if err != nil {
-		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13: PrivatePIDs= needs systemd 257, both namespaces need a kernel that permits them, and the syscall filter needs seccomp the user manager can apply to the unit (the probe's line says which check failed: \"seccomp 0\" or \"unshare allowed\" means the manager skipped the unit's seccomp settings)", err)
+		return fmt.Errorf("sandbox probe unit: %w — check `journalctl -t hotserve-sandbox-probe` for the probe's own output, if it got as far as running; the supported host is Debian 13: PrivatePIDs= needs systemd 257, both namespaces need a kernel that permits them, and the syscall filter needs seccomp the user manager can apply to the unit (the probe's line says which check failed: \"seccomp 0\" or \"unshare allowed\" means the manager skipped the unit's seccomp settings; an ipc equal to the manager's, or a mqueue owner other than self, means the unit has no IPC namespace of its own, and \"shm write failed\" that its /dev/shm is not writable)", err)
 	}
 	return nil
 }

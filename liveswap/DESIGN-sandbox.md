@@ -34,7 +34,8 @@ each app's filesystem view contains only its own world, and siblings
 are not merely unreadable, they do not exist.
 
 What this stops: lateral movement from one compromised app (sibling
-files/env/releases, TLS keys, admin socket, sibling `/proc`, signals).
+files/env/releases, TLS keys, admin socket, sibling `/proc`, signals,
+sibling SysV IPC, message queues and `/dev/shm`).
 What this does NOT stop, stated honestly: theft of the compromised
 app's own secrets (its env is its env), network exfiltration (netns is
 shared by design), resource exhaustion (the per-app caps are the
@@ -42,14 +43,7 @@ operator's to set, none by default — DESIGN-liveswap.md "Resource
 caps"; the sandbox only keeps a set cap from being rewritten),
 install-time supply-chain attacks (those run in
 CI, not on the box), a syscall filter the kernel refused on a host
-that already filters the user manager, and IPC between siblings:
-every app shares the user manager's SysV IPC and POSIX message
-queues, and the host's
-`/dev/shm`, where POSIX shared memory and named semaphores live, which
-`PrivateDevices=` binds into every unit. `PrivateIPC=` would cover the
-first two, but on systemd 257's user manager it fails every unit's
-`ExecStopPost=` with 226/NAMESPACE, and it does not cover `/dev/shm`
-(#311, owed: S3 × O3 × D5 = 45). Nor, on a box without
+that already filters the user manager. Nor, on a box without
 docs/hardening.md step 5, the module-backed protocols under the
 admitted families (`sctp`, `l2tp_ip`, `l2tp_ip6`, `smc`), which an app
 opens and the kernel loads for it; nor, on any box, the kernel
@@ -96,8 +90,9 @@ below as a contract the sandbox path must keep.
   crash relaunch, boot recovery, reattach — gets the one sandbox, and
   there is no configuration surface that turns it off or widens it.
   The host MUST be probed by running a throwaway unit and checking the
-  namespaces and seccomp from inside (the manager silently ignores
-  `PrivatePIDs=` on a kernel without PID namespaces, and skips
+  namespaces, seccomp and `/dev/shm` from inside (the manager silently
+  ignores `PrivatePIDs=` on a kernel without PID namespaces, runs the
+  unit in its own IPC namespace where it cannot make one, and skips
   `SystemCallFilter=` where seccomp is unavailable, so accepting a
   property proves nothing), and a host that cannot deliver the sandbox
   MUST fail the start with the probe's reason — a weaker sandbox
@@ -128,9 +123,14 @@ below as a contract the sandbox path must keep.
     and its other releases are simply never named, so they do not
     exist inside the unit;
   - a private `/tmp` and `/var/tmp` (`PrivateTmp=`), a minimal `/dev`
-    (`PrivateDevices=`) and the API VFS. `MountAPIVFS=` is NOT set:
-    `/proc`, `/sys` and `/dev` are mounted inside the tmpfs by
-    `PrivateDevices=` and `PrivatePIDs=`;
+    (`PrivateDevices=`) with a `/dev/shm` of the unit's own
+    (`TemporaryFileSystem=/dev/shm:mode=1777,size=50%` — the kernel's
+    default for the host's `/dev/shm`, where systemd's own for a
+    `TemporaryFileSystem=` is 10% of RAM; `memory_max` is the
+    practical cap — over the host's, which `PrivateDevices=` binds in;
+    #311) and the API VFS. `MountAPIVFS=` is NOT set: `/proc`, `/sys`
+    and `/dev` are mounted inside the tmpfs by `PrivateDevices=` and
+    `PrivatePIDs=`;
   - a **base view** of the OS, bound read-only, named entry by entry
     in `sandboxBaseView` (liveswap/sandbox.go): `/usr` and the usrmerge
     aliases (`/bin`, `/sbin`, `/lib*`), the TLS trust store
@@ -259,8 +259,15 @@ below as a contract the sandbox path must keep.
   does. The app MUST additionally run inside a new PID namespace
   (`PrivatePIDs=yes`): the supervisor, the user manager and every
   sibling become invisible and unsignalable, and systemd's
-  in-namespace stub init reaps orphaned grandchildren. A manager that
-  cannot deliver it is refused at start.
+  in-namespace stub init reaps orphaned grandchildren. And inside a
+  new IPC namespace (`PrivateIPC=yes`): SysV objects, POSIX message
+  queues and `/dev/mqueue` are the unit's alone (#311). A unit
+  therefore has one `Exec*=` — no `ExecStopPost=` or other — so the
+  manager spawns one process per unit (the app's own children join its
+  namespaces as ever): on a user manager every process the manager
+  spawns gets a user namespace of its own, and a second one cannot
+  join the IPC namespace the first made. A manager that cannot deliver
+  any of the three is refused at start.
 - The unit's cgroup is the lifetime boundary (`KillMode=control-group`):
   nothing outlives the unit. A unit has no controlling terminal.
 - Privilege and system-call surface, every unit: `NoNewPrivileges=`,
@@ -743,3 +750,35 @@ Dated one-liners; the full text of each is in git.
   step 5, the seven CIS modules; a file shipped by the `.deb` was
   built and declined): open by default, accepted by decision with the
   modules a netlink socket or a `socketpair()` loads.
+- 2026-10-23 (#311) — Sibling IPC closed. `PrivateIPC=yes` gives each
+  unit its own SysV objects, POSIX message queues and `/dev/mqueue`;
+  `TemporaryFileSystem=/dev/shm:mode=1777` gives it its own POSIX
+  shared memory and named semaphores, over the host's `/dev/shm` that
+  `PrivateDevices=` binds in (systemd's `mount_private_dev`, measured:
+  a file written inside a unit was on the host and in the next unit).
+  `size=50%` because systemd gives every `TemporaryFileSystem=`
+  mount `size=10%,nr_inodes=400k` unless the unit's options say
+  otherwise (`NESTED_TMPFS_LIMITS`, namespace.c; measured: 1.2 GiB on
+  a 12 GiB host), and 50% is the kernel's own default for the host's
+  `/dev/shm`, so each app keeps the room the shared one gave it
+  (headless Chromium's known trap is Docker's 64 MiB; 10% of a 2 GiB
+  box is 204 MiB). cgroup v2 charges tmpfs pages to the cgroup that
+  wrote them (`memory.stat`'s `shmem`, Documentation/admin-guide/
+  cgroup-v2.rst), so `memory_max` (#345) is the practical cap; not
+  measured here, since the integration container delegates no memory
+  controller to its units. The price is one `Exec*=` per unit: on a
+  user manager every process the manager spawns gets a user namespace
+  of its own, so a second one cannot join the IPC namespace the first
+  made (`setns` needs CAP_SYS_ADMIN in its owning user namespace) and
+  fails 226/NAMESPACE on its `/dev/mqueue` mount. So the `ExecStopPost=` that
+  removed the instance's socket is gone (retiring the instance removes
+  the run dir; a confirmed sweep prunes leftovers; nothing routes to
+  one). Measured on systemd 257 under root's and an unprivileged user
+  manager: the `+` prefix fails the same way (no user namespace, so no
+  mount namespace, and `TemporaryFileSystem=` makes that fatal), and
+  no systemd through main (~v263) shares a unit's user namespace on an
+  unprivileged manager (`UserNamespacePath=`, v259, is refused there).
+  The probe now checks that `/dev/mqueue` is owned by its own uid (a
+  mqueuefs it mounted itself, in an IPC namespace its user namespace
+  owns) and that its IPC namespace is not hotserve's own, and that a
+  file written in its `/dev/shm` is not on the host.

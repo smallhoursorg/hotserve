@@ -348,17 +348,16 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		startUSec := max(uint64(u.StartTimeout/time.Microsecond), 1)
 		props = append(props, sddbus.Property{Name: "TimeoutStartUSec", Value: godbus.MakeVariant(startUSec)})
 	}
-	if u.Socket != "" {
-		// The unit owns its socket file for exactly as long as it runs:
-		// the manager removes it after the service stops, however it
-		// stopped — under the unit's own sandbox, where run/ is bound
-		// writable and /usr/bin/rm is in the base view. Failure is
-		// ignored (the "-" prefix): a socket the app never bound, or
-		// already unlinked, must not mark the unit failed.
-		props = append(props, sddbus.Property{Name: "ExecStopPost", Value: godbus.MakeVariant([]execCommand{
-			{Path: "/usr/bin/rm", Args: []string{"rm", "-f", u.Socket}, IgnoreFailure: true},
-		})})
-	}
+	// No ExecStopPost=, nor any Exec*= beside ExecStartEx: the manager
+	// spawns one process per unit (the app's own children join its
+	// namespaces as ever). On a user manager every process the manager
+	// spawns gets a user namespace of its own, so a second one cannot
+	// join the IPC namespace the first made (PrivateIPC=,
+	// sandboxProperties) and fails 226/NAMESPACE on its /dev/mqueue
+	// mount (measured, #311). The instance's socket goes with its run
+	// dir when hotserve retires the instance (socketRef.retire), or in
+	// a confirmed sweep's prune; nothing routes to a leftover
+	// (socket.go).
 	props = append(props, capProperties(u.Caps, false, 0)...)
 	return append(props, sandboxProperties(u.Sandbox)...)
 }
@@ -409,14 +408,6 @@ func capProperties(c resourceCaps, live bool, liftTasksTo uint64) []sddbus.Prope
 		props = append(props, sddbus.Property{Name: "CPUQuotaPerSecUSec", Value: godbus.MakeVariant(quota)})
 	}
 	return props
-}
-
-// execCommand is the D-Bus shape of one Exec*= entry, "(sasb)": the
-// binary, its argv, and whether a non-zero exit is ignored.
-type execCommand struct {
-	Path          string
-	Args          []string
-	IgnoreFailure bool
 }
 
 // execCommandEx is the D-Bus shape of one Exec*Ex= entry, "(sasas)":
@@ -490,11 +481,15 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		{Name: "PrivateUsers", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateTmp", Value: godbus.MakeVariant(true)},
 		{Name: "PrivateDevices", Value: godbus.MakeVariant(true)},
-		// No PrivateIPC=: on systemd 257's user manager each process of
-		// a unit gets a user namespace of its own, so only the first can
-		// make the IPC namespace, and the unit's ExecStopPost
-		// (unitProperties) then fails 226/NAMESPACE on its /dev/mqueue
-		// mount (measured; #311).
+		// Its own IPC namespace: SysV objects and POSIX message queues
+		// are the unit's alone, and /dev/mqueue is a fresh mqueuefs of
+		// that namespace. On a user manager only the first process the
+		// manager spawns can set it up (unitProperties), which is why a
+		// unit has one Exec*=. POSIX shared memory is not covered by
+		// it: that lives in /dev/shm, which PrivateDevices= binds from
+		// the host, and the TemporaryFileSystem= entry below replaces
+		// (#311).
+		{Name: "PrivateIPC", Value: godbus.MakeVariant(true)},
 		// Read-only cgroupfs: the delegated subtree is owned by the
 		// app's own uid, so resource caps are otherwise rewritable.
 		{Name: "ProtectControlGroups", Value: godbus.MakeVariant(true)},
@@ -532,7 +527,19 @@ func sandboxProperties(s *sandboxSpec) []sddbus.Property {
 		// Start from nothing. The two bind properties appended below
 		// put back the OS the app needs to run and the app's own
 		// directories, and between them they are the whole view.
-		{Name: "TemporaryFileSystem", Value: godbus.MakeVariant([]tmpfsMount{{"/", "ro"}})},
+		// Then a /dev/shm of the unit's own over the host's, which
+		// PrivateDevices= binds into its private /dev: POSIX shared
+		// memory and named semaphores live there, every app has the
+		// one uid, and the IPC namespace does not reach it. size=50%
+		// is the kernel's own default for the host's /dev/shm, so each
+		// app keeps the room the shared one gave it; left unsaid,
+		// systemd makes every TemporaryFileSystem= 10% of RAM
+		// (NESTED_TMPFS_LIMITS, namespace.c), which on a 2 GiB box is
+		// 204 MiB — headless Chromium's known trap at Docker's 64 MiB,
+		// a size nearer. Its pages are charged to the unit's memory
+		// cgroup like any other, so memory_max (#345) is the practical
+		// cap. mode=1777 as the host's. Owner's call (#311).
+		{Name: "TemporaryFileSystem", Value: godbus.MakeVariant([]tmpfsMount{{"/", "ro"}, {"/dev/shm", "mode=1777,size=50%"}})},
 		// The manager hands every unit its own XDG_RUNTIME_DIR and bus
 		// address; both point into a /run/user that is not in the view.
 		{Name: "UnsetEnvironment", Value: godbus.MakeVariant([]string{"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"})},

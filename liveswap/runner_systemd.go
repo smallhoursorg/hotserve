@@ -126,7 +126,6 @@ type unitSpec struct {
 	StopTimeout      time.Duration
 	StartTimeout     time.Duration // TimeoutStartSec=; 0 sets none
 	Sandbox          *sandboxSpec
-	Socket           string // the app's socket, removed by the unit when it stops
 	Caps             resourceCaps
 }
 
@@ -637,7 +636,6 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 		StopTimeout:      grace,
 		StartTimeout:     spec.startTimeout,
 		Sandbox:          spec.sandbox,
-		Socket:           spec.socket,
 		Caps:             spec.caps,
 	}, nil
 }

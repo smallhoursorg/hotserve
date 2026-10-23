@@ -961,13 +961,19 @@ grant.
 lifecycle properties and appends `sandboxProperties` for the rest, and
 `userManagerClient.StartTransientUnit` adds `LimitNOFILE=`
 (liveswap/systemd_dbus.go). The capability probe's unit (below) is a
-`oneshot` run from `/`, with no `BindPaths=` and no `ExecStopPost=`:
-it binds nothing of an app's and has no socket.
+`oneshot` run from `/`, with no `BindPaths=`: it binds nothing of an
+app's. No unit carries an `ExecStopPost=` or any other `Exec*=`
+beside its `ExecStartEx`: the manager spawns one process per unit
+(#311; "Lifecycle" below).
 
 - Namespaces: `PrivateUsers=yes`, `PrivatePIDs=yes`, `PrivateTmp=yes`,
-  `PrivateDevices=yes`; `RestrictNamespaces=` (empty set — an app
-  cannot create further namespaces). No `PrivateIPC=`: see "Sibling
-  IPC" under "Residual risks".
+  `PrivateDevices=yes`, `PrivateIPC=yes` (its own SysV IPC, POSIX
+  message queues and `/dev/mqueue`); `RestrictNamespaces=` (empty set
+  — an app cannot create further namespaces). `/dev/shm`, which
+  `PrivateDevices=` binds from the host and no IPC namespace covers,
+  is a tmpfs of the unit's own (`TemporaryFileSystem=`, `size=50%` as
+  the kernel gives the host's; `memory_max` is the practical cap;
+  #311).
 - View: `TemporaryFileSystem=/:ro` replaces the whole filesystem with
   an empty read-only tmpfs; `BindReadOnlyPaths=` puts back a named OS
   base view and `BindPaths=` the release being started, the app's
@@ -1008,8 +1014,10 @@ it binds nothing of an app's and has no socket.
 - Lifecycle: `Restart=no` (the liveswap watchdog is the sole
   restarter of apps; hotserve.service itself is restarted by systemd
   after a crash, never after a refused start), `KillMode=control-group`,
-  `TimeoutStopSec=` (the app's `grace`), `ExecStopPost=` (removes the
-  instance's socket once the unit stops, however it stopped),
+  `TimeoutStopSec=` (the app's `grace`), no `ExecStopPost=` (the
+  instance's socket goes with its run dir when hotserve retires it,
+  `socketRef.retire`; on a user manager a second process of a unit
+  cannot join its IPC namespace, #311),
   `LimitCORE=0` on both limits (no core dump of an app; "Where
   `env_file` values sit", above), `LimitNOFILE=` on both limits at the
   user manager's `DefaultLimitNOFILE` when the manager reports one (the
@@ -1164,15 +1172,6 @@ does not isolate the runtime.
   outside the view like the rest of the sibling.
   What remains is an app that opens a loopback listener of its own
   accord: that port is reachable by siblings, by the app's own choice.
-- **Sibling IPC** — open, owed (#311; S3 × O3 × D5 = 45). Every app
-  shares the user manager's SysV IPC objects and POSIX message queues,
-  and the host's `/dev/shm`, which `PrivateDevices=` binds into every
-  unit and where POSIX shared memory and named semaphores live; one
-  uid means their permission bits stop no sibling. `PrivateIPC=` would
-  close the first two, but on systemd 257's user manager each process
-  of a unit gets its own user namespace, so the unit's `ExecStopPost=`
-  cannot join the IPC namespace its main process made and fails
-  226/NAMESPACE (measured), and it would leave `/dev/shm` shared.
 - **Kernel modules an app can load** — open, accepted by decision
   (owner, 2026-10-22; S3 × O3 × D5 = 45; liveswap/DESIGN-sandbox.md,
   "Module-backed protocols"). Two halves. On a box without
@@ -1410,3 +1409,11 @@ Dated one-liners; the full text of each is in git.
   shipped by the `.deb` was built and declined), open by default; they
   and the modules a netlink socket or a `socketpair()` loads joined the
   residual risks, accepted by decision.
+- 2026-10-23 (#311) — Sibling IPC closed: `PrivateIPC=yes` and a
+  `/dev/shm` tmpfs of each unit's own, at the host's 50%
+  (liveswap/DESIGN-sandbox.md, 2026-10-23). The Sibling IPC residual
+  row is gone. Every unit now has one `Exec*=`: the `ExecStopPost=`
+  that removed the instance's socket is gone, since on a user manager
+  a second process the manager spawns cannot join the unit's IPC
+  namespace; the probe checks the IPC namespace and `/dev/shm` from
+  inside the unit, as it does the other namespaces.

@@ -219,6 +219,21 @@ emit nofile_hard "$(ulimit -Hn)"
 # LimitCORE=0 (liveswap/systemd_dbus.go).
 emit core_soft "$(ulimit -Sc)"
 emit core_hard "$(ulimit -Hc)"
+# ── Sibling IPC (#311) ────────────────────────────────────────────
+# /dev/mqueue is a mqueuefs the unit mounted itself, in an IPC
+# namespace its own user namespace owns, when its root is owned by this
+# uid (`self`); the host's, bound in, reads as root or nobody. /dev/shm
+# is a tmpfs of the unit's own at the kernel's half of RAM
+# (TemporaryFileSystem=/dev/shm:size=50%, liveswap/systemd_dbus.go) —
+# shm_size_kb against memtotal_kb says so from inside — and a file
+# written there is not on the host: each lane checks for
+# /dev/shm/sandbox-view-canary from outside after the unit ran, so the
+# file is left for the unit's end to take with its mount.
+mq_owner=$(stat -c %u /dev/mqueue 2>&1)
+[ "$mq_owner" = "$(id -u)" ] && emit mqueue_owner self || emit mqueue_owner "other:$mq_owner"
+emit shm_size_kb "$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2{print $2}')"
+emit memtotal_kb "$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)"
+if echo x >/dev/shm/sandbox-view-canary 2>/dev/null; then emit shm_write ok; else emit shm_write failed; fi
 # The syscall filter, in force rather than only set: on a kernel
 # without seccomp the manager skips SystemCallFilter= and every
 # property the lanes read back with `systemctl show` still says it is

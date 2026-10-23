@@ -53,6 +53,7 @@ var sandboxViewKeys = []string{
 	"cgroup", "cgroup_memory_max", "cgroup_memory_max_value", "cgroup_pids_max", "cgroup_cpu_max",
 	"tmp", "home", "xdg_runtime", "nofile_soft", "nofile_hard",
 	"core_soft", "core_hard", "seccomp", "io_uring_setup", "acme_token",
+	"mqueue_owner", "shm_size_kb", "memtotal_kb", "shm_write", // sibling IPC (#311)
 	// Vacuity guards, and the sentinel.
 	"saw_mgr_pid", "saw_uid", "done",
 }

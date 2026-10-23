@@ -145,22 +145,45 @@ func TestNetworkNamespaceIsShared(t *testing.T) {
 	}
 }
 
-// Not a promise but a measured limit, pinned so that adding the
-// property does not look free: PrivateIPC= (or a named
-// IPCNamespacePath=) is not set. On systemd 257's user manager each
-// process of a unit gets a user namespace of its own, so only the
-// first one can make the unit's IPC namespace; every later one, such
-// as the ExecStopPost that removes the instance's socket, fails
-// 226/NAMESPACE on its /dev/mqueue mount, and
-// TestIntegrationSystemdUnitRemovesItsSocketWhenItStops fails with it
-// (measured 2026-10-18, #311). Siblings share SysV IPC and POSIX
-// message queues until that changes (DESIGN-sandbox.md).
-func TestNoIPCNamespaceWhileControlProcessesCannotJoinIt(t *testing.T) {
-	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: probeSandboxSpec(), Socket: "/var/lib/liveswap/blog/run/0a1b2c3d0a1b2c3d/app.sock"})
-	for _, name := range []string{"PrivateIPC", "IPCNamespacePath"} {
-		if v, present := got[name]; present {
-			t.Errorf("%s=%v is set: the unit's ExecStopPost cannot join the IPC namespace its main process made, and fails 226/NAMESPACE", name, v)
+// Promise: "IPC between siblings is closed: a unit's SysV objects and
+// POSIX message queues are in an IPC namespace of its own, and its
+// /dev/shm is a tmpfs of its own" (#311).
+//
+// Both halves are needed. PrivateIPC= covers SysV IPC and message
+// queues and nothing else; POSIX shared memory and named semaphores
+// are files in /dev/shm, which PrivateDevices= binds from the host
+// (measured 2026-10-23). The namespace holds only while the manager
+// spawns one process per unit (TestUnitHasOneExecCommand): on systemd
+// 257's user manager every process it spawns gets a user namespace of
+// its own, so a second one cannot join the IPC namespace the first
+// made and fails 226/NAMESPACE on its /dev/mqueue mount. And the
+// tmpfs says its size: systemd's own default for a TemporaryFileSystem=
+// is 10% of RAM (NESTED_TMPFS_LIMITS), where the host's /dev/shm,
+// which every app had until now, is the kernel's 50%; the unit keeps
+// that, memory_max being the practical cap (DESIGN-sandbox.md).
+func TestIPCAndSharedMemoryArePrivate(t *testing.T) {
+	got := propMap(unitSpec{ExecStart: []string{"/bin/true"}, Sandbox: probeSandboxSpec()})
+	if v, _ := got["PrivateIPC"].(bool); !v {
+		t.Errorf("PrivateIPC=%v: siblings would share SysV IPC and POSIX message queues", got["PrivateIPC"])
+	}
+	if v, present := got["IPCNamespacePath"]; present {
+		t.Errorf("IPCNamespacePath=%v: the namespace must be the unit's own, not a named one shared with others", v)
+	}
+	tmp, ok := got["TemporaryFileSystem"].([]tmpfsMount)
+	if !ok {
+		t.Fatalf("TemporaryFileSystem = %#v: the view's tmpfs list is missing, /dev/shm with it", got["TemporaryFileSystem"])
+	}
+	shm := false
+	for _, m := range tmp {
+		if m.Path == "/dev/shm" {
+			shm = true
+			if !strings.Contains(m.Options, "size=50%") {
+				t.Errorf("TemporaryFileSystem=/dev/shm:%s: without size=50%% systemd caps it at 10%% of RAM, less than the host's /dev/shm gave every app", m.Options)
+			}
 		}
+	}
+	if !shm {
+		t.Errorf("no TemporaryFileSystem=/dev/shm: the host's, bound by PrivateDevices=, is shared by every app")
 	}
 }
 
@@ -308,8 +331,8 @@ func TestSocketIsInsideTheViewAndUniquePerInstance(t *testing.T) {
 		if !writable || !pathWithin(socket, own) {
 			t.Errorf("socket %s is not under the instance's own writable run dir %s", socket, own)
 		}
-		if socket != rig.spec.dirs.socket(spec.nonce) || spec.socket != socket {
-			t.Errorf("socket %s is not the spec's own (nonce %q, spec.socket %q)", socket, spec.nonce, spec.socket)
+		if socket != rig.spec.dirs.socket(spec.nonce) {
+			t.Errorf("socket %s is not the instance's own (nonce %q)", socket, spec.nonce)
 		}
 		sockets[socket] = true
 	}
@@ -321,8 +344,8 @@ func TestSocketIsInsideTheViewAndUniquePerInstance(t *testing.T) {
 	// the new socket's name before hotserve pins it.
 	for i, spec := range specs {
 		other := specs[1-i]
-		if spec.sandbox.inView(other.socket) {
-			t.Errorf("instance %s can see instance %s's socket %s", spec.nonce, other.nonce, other.socket)
+		if theirs := rig.spec.dirs.socket(other.nonce); spec.sandbox.inView(theirs) {
+			t.Errorf("instance %s can see instance %s's socket %s", spec.nonce, other.nonce, theirs)
 		}
 	}
 }

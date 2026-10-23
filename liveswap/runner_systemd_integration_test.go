@@ -233,52 +233,36 @@ exit 3
 	}
 }
 
-// The unit owns its socket file: ExecStopPost= removes it after the
-// service stops, however it stopped, with no supervisor-side cleanup
-// — which is what tidies up while hotserve is down. The socket is
-// bound from outside at the path the unit sees (its dir is a writable
-// bind at the same real path), and neither Stop nor a crash calls
-// socketRef.retire here.
-func TestIntegrationSystemdUnitRemovesItsSocketWhenItStops(t *testing.T) {
+// Promise: a unit's IPC namespace and /dev/shm are its own (#311). The
+// script reports its IPC namespace and writes a file into /dev/shm:
+// the namespace is not this process's — the manager's, which every
+// app would otherwise share — and the file is not in the host's
+// /dev/shm, which PrivateDevices= alone would bind into the unit.
+func TestIntegrationSystemdUnitIPCAndShmArePrivate(t *testing.T) {
 	r := integrationRunner(t)
-	for _, tc := range []struct {
-		name   string
-		script string
-		stop   bool
-	}{
-		{"stopped", "while :; do sleep 1; done\n", true},
-		{"crashed", "sleep 1\nexit 3\n", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			spec := scriptApp(t, tc.script)
-			spec.version = "socket-" + tc.name // scriptApp's t.Name()-derived version carries the subtest's "/"
-			spec.socket = filepath.Join(spec.dir, "app.sock")
-			ln, err := net.Listen("unix", spec.socket)
-			if err != nil {
-				t.Fatal(err)
-			}
-			ln.(*net.UnixListener).SetUnlinkOnClose(false)
-			t.Cleanup(func() { _ = ln.Close() })
-			h, err := r.Start(spec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tc.stop {
-				if err := r.Stop(h, spec.grace); err != nil {
-					t.Fatalf("Stop: %v", err)
-				}
-			} else {
-				select {
-				case <-r.Wait(h):
-				case <-time.After(10 * time.Second):
-					t.Fatal("crash never observed")
-				}
-			}
-			pollUntil(t, 3*time.Second, "the unit to remove its socket", func() bool {
-				_, err := os.Lstat(spec.socket)
-				return os.IsNotExist(err)
-			})
-		})
+	n, err := newNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canary := "/dev/shm/hotserve-itest-" + n
+	t.Cleanup(func() { _ = os.Remove(canary) })
+	spec := scriptApp(t, "readlink /proc/self/ns/ipc > ns.txt\necho x > "+canary+"\n")
+	if err := r.RunOnce(context.Background(), spec); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(spec.dir, "ns.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := os.Readlink("/proc/self/ns/ipc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ns := strings.TrimSpace(string(got)); !strings.HasPrefix(ns, "ipc:[") || ns == own {
+		t.Fatalf("unit's IPC namespace %q, this process's %q: want the unit's own", ns, own)
+	}
+	if _, err := os.Lstat(canary); !os.IsNotExist(err) {
+		t.Fatalf("%s written inside the unit is visible on the host (%v): /dev/shm is shared", canary, err)
 	}
 }
 
@@ -801,7 +785,11 @@ func TestIntegrationSandboxProbeRefusesAnUnfilteredUnit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		u, err := r.unitFor(probeStartSpec(nonce), true)
+		ipcNS, err := ownIPCNamespace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, err := r.unitFor(probeStartSpec(nonce, ipcNS), true)
 		if err != nil {
 			t.Fatal(err)
 		}

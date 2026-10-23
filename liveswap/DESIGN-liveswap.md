@@ -593,9 +593,11 @@ backwards edges reappearing *despite* this table.
   (`O_NOFOLLOW`, `S_IFSOCK` only), hard-links it to
   `<app>/proxy/<nonce>.sock` — outside every view — and proxy and
   prober dial that from then on; retiring an instance unlinks it. So
-  bind once per instance. The unit removes its own
-  socket when it stops (`ExecStopPost=`); a confirmed sweep prunes any
-  left behind, but never through a link: if the app dir, `run/` or
+  bind once per instance. Retiring an instance removes its run dir and
+  socket with the pin (the unit has one `Exec*=` and removes nothing
+  itself, #311; an instance that dies while hotserve is down keeps
+  its socket until the next recovery or confirmed sweep, and nothing
+  routes to it); a confirmed sweep prunes any left behind, but never through a link: if the app dir, `run/` or
   `proxy/` is one (`<root>/blog -> shop`), is not a directory, or
   cannot be checked for a link, the sweep logs it and prunes nothing.
   The health probe is `GET <health_path>` with `Host: localhost`.

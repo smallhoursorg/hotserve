@@ -717,6 +717,12 @@ app_nprocs=$(probe_val nprocs)
 expect_probe pid 1
 [ -n "$app_nprocs" ] && [ "$app_nprocs" -le 8 ] || die "/proc shows $app_nprocs pids inside the unit"
 [ "$app_uidmap" != "4294967295" ] && [ -n "$app_uidmap" ] || die "no user namespace inside the unit (uid_map range $app_uidmap)"
+# Sibling IPC (#311), under the real package and the hotserve user: the
+# unit mounted its own mqueuefs (its own IPC namespace), can write its
+# own /dev/shm, and nothing written there reaches the host's.
+[ "$(probe_val mqueue_owner)" = self ] || die "the unit's /dev/mqueue is not its own (owner $(probe_val mqueue_owner)): no IPC namespace of its own"
+[ "$(probe_val shm_write)" = ok ] || die "the unit cannot write its own /dev/shm"
+[ ! -e /dev/shm/sandbox-view-canary ] || die "/dev/shm/sandbox-view-canary written inside the unit is on the host: /dev/shm is shared"
 expect_probe hotserve_lib closed
 # These are the acceptance paths from DESIGN-sandbox.md. They are
 # closed by the user namespace alone — the PID namespace on top is what
@@ -818,7 +824,8 @@ expect_probe io_uring_setup refused
 outside=$(as_hotserve "perl -e 'syscall(425, 1, 0); print \$!{EPERM} ? q(refused) : q(reached)'") || outside="unmeasured (su or perl failed)"
 [ "$outside" = "reached" ] \
 	|| die "io_uring_setup outside the unit is '$outside', want reached: io_uring_setup=refused inside proves nothing (kernel.io_uring_disabled=$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo absent); anything but 0 can refuse it outside too)"
-[ "$(user_systemctl show -p TemporaryFileSystem --value "$unit")" = "/:ro" ] || die "unit lacks TemporaryFileSystem=/:ro — the view is not deny-by-default"
+tmpfs=$(user_systemctl show -p TemporaryFileSystem --value "$unit")
+[ "$tmpfs" = "/:ro /dev/shm:mode=1777,size=50%" ] || die "unit's TemporaryFileSystem= is '$tmpfs', want '/:ro /dev/shm:mode=1777,size=50%': the empty root the view starts from, and a /dev/shm of the unit's own (#311)"
 # The retired half of the old model, read back off the live unit. Both
 # properties still exist on every service, so test the value rather
 # than its presence: what must be gone is the setting, not the row.

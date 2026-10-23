@@ -328,14 +328,31 @@ esac
 [ "$(probe_val varlib_listing)" = "liveswap " ] \
 	&& pass "inside the sandbox: /var/lib shows only the liveswap root" \
 	|| fail "inside the sandbox: /var/lib listing is '$(probe_val varlib_listing)', want only 'liveswap'"
+# Sibling IPC (#311): a mqueuefs the unit mounted itself (its own IPC
+# namespace), and a /dev/shm of its own at the kernel's half of RAM —
+# systemd's own default for a TemporaryFileSystem= would be 10% — that
+# nothing written inside reaches on the host.
+expect_probe mqueue_owner self
+expect_probe shm_write ok
+shm_kb=$(probe_val shm_size_kb)
+mem_kb=$(probe_val memtotal_kb)
+if [ -n "$shm_kb" ] && [ -n "$mem_kb" ] && [ "$mem_kb" -gt 0 ] \
+	&& [ $((shm_kb * 100 / mem_kb)) -ge 49 ] && [ $((shm_kb * 100 / mem_kb)) -le 50 ]; then
+	pass "inside the sandbox: /dev/shm is ${shm_kb} KiB of ${mem_kb} KiB (the host's 50%, not systemd's 10%)"
+else
+	fail "inside the sandbox: /dev/shm is '${shm_kb}' KiB of '${mem_kb}' KiB, want 50%"
+fi
+[ ! -e /dev/shm/sandbox-view-canary ] \
+	&& pass "a file written to /dev/shm inside the unit is not on the host" \
+	|| fail "/dev/shm/sandbox-view-canary written inside the unit is on the host: /dev/shm is shared"
 # The sandboxed app still serves through hotserve like any other.
 curl -fsS --max-time 5 http://127.0.0.1:8080/ | grep -q "probe" \
 	&& pass "the sandboxed release serves through the proxy" \
 	|| fail "the sandboxed release does not serve"
 # And the unit carries the properties the runner set.
 sunit=$(json_str "$(status)" unit)
-props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,InaccessiblePaths,LimitCORE,LimitCORESoft,SystemCallArchitectures)
-for want in "PrivatePIDs=yes" "PrivateUsers=yes" "ProtectControlGroups=yes" "TemporaryFileSystem=/:ro" "LimitCORE=0" "LimitCORESoft=0" "SystemCallArchitectures=native"; do
+props=$(user_systemctl show "$sunit" -p PrivatePIDs,PrivateUsers,PrivateIPC,ProtectSystem,ProtectControlGroups,TemporaryFileSystem,InaccessiblePaths,LimitCORE,LimitCORESoft,SystemCallArchitectures)
+for want in "PrivatePIDs=yes" "PrivateUsers=yes" "PrivateIPC=yes" "ProtectControlGroups=yes" "TemporaryFileSystem=/:ro" "/dev/shm:mode=1777,size=50%" "LimitCORE=0" "LimitCORESoft=0" "SystemCallArchitectures=native"; do
 	case "$props" in
 	*"$want"*) pass "unit property $want" ;;
 	*) fail "unit lacks $want: $props" ;;

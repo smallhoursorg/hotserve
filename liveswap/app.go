@@ -1496,7 +1496,6 @@ func (l launch) startSpec(spec *appSpec, command []string) startSpec {
 		app:     spec.name,
 		version: l.version,
 		nonce:   l.nonce,
-		socket:  l.socket,
 		command: expandArgs(command, spec, l.version, l.socket, l.releaseDir),
 		dir:     l.releaseDir,
 		env:     l.env,

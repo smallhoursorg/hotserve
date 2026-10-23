@@ -90,11 +90,10 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 // Handles built as bare literals (no done channel) exercise the
 // Wait-returns-nil polling fallback.
 type fakeHandle struct {
-	id     string
-	alive  bool
-	exit   string // what Exit reports once dead
-	done   chan struct{}
-	socket string // removed when the "unit" stops, as ExecStopPost= does
+	id    string
+	alive bool
+	exit  string // what Exit reports once dead
+	done  chan struct{}
 	// argv is what this handle was started with, reported back the way
 	// the real runner reports the manager's ExecStart.
 	argv []string
@@ -134,9 +133,6 @@ func (h *fakeHandle) kill() {
 	h.alive = false
 	if h.exit == "" {
 		h.exit = "killed by signal 15 (terminated)" // what a Stop looks like from the runner
-	}
-	if h.socket != "" {
-		_ = os.Remove(h.socket)
 	}
 	if h.done != nil {
 		select {
@@ -182,7 +178,7 @@ func (r *fakeRunner) Start(spec startSpec) (handle, error) {
 	if r.startErr != nil {
 		return nil, r.startErr
 	}
-	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), socket: spec.socket, argv: spec.command, caps: spec.caps}
+	h := &fakeHandle{id: fmt.Sprintf("h%d", len(r.handles)), alive: true, done: make(chan struct{}), argv: spec.command, caps: spec.caps}
 	if r.startDies != "" {
 		h.exit = r.startDies
 		h.kill()
@@ -625,7 +621,7 @@ func socketNames(t *testing.T, dir string) []string {
 
 // listenSocket binds a real unix socket at path, as a running app
 // does; closing the listener leaves the file, as an app's exit does
-// (the unit's ExecStopPost removes it — the fake handle mimics that).
+// (hotserve removes it with the instance's run dir: socketRef.retire).
 func listenSocket(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, err
@@ -1795,9 +1791,10 @@ func TestSweepPrunesSocketsNotHeldByTheManager(t *testing.T) {
 }
 
 // Promise: an instance's socket is gone once the instance is stopped —
-// the unit removes it (ExecStopPost=, which the fake handle mimics),
-// and the deploy's sweep would prune it anyway: the old one after a
-// cutover, the new one after a failed health gate.
+// retiring the instance removes its run dir (the unit itself removes
+// nothing: it has one Exec*=, #311), and the deploy's sweep would
+// prune it anyway: the old one after a cutover, the new one after a
+// failed health gate.
 func TestStopRemovesTheInstanceSocket(t *testing.T) {
 	rig := newTestRig(t)
 	rig.prober.bind = true
