@@ -75,7 +75,7 @@ says "blog: restore last proven: .*snapshot $(echo "$blog_id" | cut -c1-8)" && p
 says "$BLOG" && pass "and where it looked for blog's data" || fail "no path in: $(grep '^blog' "$OUT")"
 says "notyet: pending" && pass "an app declared and never deployed is pending" || fail "notyet: $(grep '^notyet' "$OUT")"
 says "$blog_id" && fail "a whole snapshot id is printed" || pass "ids are short"
-says "nothing running now" && pass "and nothing is running" || fail "running: $(grep -i running "$OUT")"
+says "no backup unit running now" && pass "and no backup unit is running" || fail "running: $(grep -i running "$OUT")"
 
 echo "=== status 3: status needs no root, and no credential ==="
 cp "$OUT" /root/status.root

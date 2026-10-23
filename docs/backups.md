@@ -193,7 +193,7 @@ last run 2026-10-03 07:01 UTC
 the repository has not been checked yet: the weekly drill checks it
 demo: ok: last complete backup 2026-10-03 07:01 UTC, snapshot c4f0d7c1 (data at /var/lib/liveswap/demo/shared)
 demo: restore last proven: 2026-10-03 07:01 UTC, snapshot c4f0d7c1
-nothing running now
+no backup unit running now
 ```
 
 An app's first good backup, up to 1 GiB restored, is drilled by the

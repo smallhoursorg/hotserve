@@ -722,8 +722,10 @@ when, and then per app:
   running, starting or stopping, by what it does, to which app, since
   when. A unit whose command is still running is `activating` to
   systemd, which is not failed. The process that starts those units is
-  not one of them: between two units, `nothing running now` is what
-  is said. Where the manager cannot be asked, that is said instead.
+  not one of them: between two units, and while a restore waits for
+  its answer, `no backup unit running now` is what is said, though
+  that process holds the run lock and a second command is refused.
+  Where the manager cannot be asked, that is said instead.
 
 It exits 0 only if the last run finished within 3 hours and did not end
 early, the repository has not gone unlisted for more than 3 hours, the
