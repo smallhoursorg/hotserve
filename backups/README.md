@@ -27,10 +27,11 @@ its restore proven, and
 `hotserve-backup validate <Caddyfile>` says whether a run could plan
 from a Caddyfile before it goes live. The `hotserve` package carries
 the program, an hourly timer for the run and a Sunday one for the
-drill ("On a fresh box", below), and depends on Debian 13's `restic`
-and `sqlite3`; `setup` and every run need those, and systemd 257
-(`PrivatePIDs=`), which is Debian 13's, and say so before anything
-else.
+drill ("On a fresh box", below), and depends on Debian 13's `restic`,
+`sqlite3` and `ca-certificates` (the CA store restic verifies the
+storage's certificate against); `setup` and every run need the
+programs, and systemd 257 (`PrivatePIDs=`), which is Debian 13's, and
+say so before anything else.
 
 ## On a fresh box
 

@@ -84,7 +84,13 @@ stage "stage 1: install, service basics, reload"
 # Hetzner's Debian 13 has it: what the package needs has to arrive
 # there too, so it is all Depends, and the premise is checked first.
 [ "$(apt-config dump APT::Install-Recommends)" = 'APT::Install-Recommends "false";' ] \
-	|| die "the image installs recommended packages ($(apt-config dump APT::Install-Recommends)): the install below would prove nothing of a box that does not"
+	|| die "the image's apt setting is '$(apt-config dump APT::Install-Recommends)', want 'APT::Install-Recommends \"false\";' as packaging/test/Dockerfile writes it: the install below would prove nothing of a box that installs no recommended package"
+# And none of the three is here before the install, or their presence
+# after it would prove nothing of what the package brings.
+for p in restic sqlite3 ca-certificates; do
+	[ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" != installed ] \
+		|| die "$p is in the image already: the install below cannot show the package brings it"
+done
 apt-get update -qq
 apt-get install -y "$deb" >/tmp/install.out 2>&1 \
 	|| { cat /tmp/install.out; die "apt-get install of the package failed"; }
