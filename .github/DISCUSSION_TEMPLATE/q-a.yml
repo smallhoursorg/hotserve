@@ -1,0 +1,29 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem? Please do not post it here — follow
+        [SECURITY.md](https://github.com/smallhoursorg/hotserve/blob/main/SECURITY.md).
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Version
+      description: The release you installed, and the output of `hotserve version`.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Host
+      description: Distribution and architecture, e.g. Debian 13, arm64.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Journal
+      description: The relevant lines from `journalctl -u hotserve -n 50 --no-pager`. Redact secrets.
+      render: text

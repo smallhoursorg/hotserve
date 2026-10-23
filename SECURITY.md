@@ -13,8 +13,8 @@ Please use GitHub's private vulnerability reporting:
 **[Report a vulnerability](https://github.com/smallhoursorg/hotserve/security/advisories/new)**
 
 This opens a private draft advisory that only you and the maintainer
-can see. Please do not open a public issue for anything you believe is
-a security problem — a public report on a deploy server puts every
+can see. Please do not post anything you believe is a security
+problem in a public discussion — a public report on a deploy server puts every
 operator at risk before a fix exists.
 
 What helps: the config that reproduces it (redact your secrets), the

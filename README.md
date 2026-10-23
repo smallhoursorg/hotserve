@@ -210,6 +210,12 @@ retries a crash or a health failure forever by design (only a release
 that cannot run at all is refused once), so the loop itself is the
 signal that a release is broken.
 
+## Questions, bugs and ideas
+
+They go in [Discussions](https://github.com/smallhoursorg/hotserve/discussions);
+issues and pull requests are the maintainer's. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Development
 
 No local Go toolchain needed — everything runs in Docker:
