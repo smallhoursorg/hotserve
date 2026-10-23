@@ -210,10 +210,11 @@ func Report(in Input) (lines []string, healthy bool) {
 		}
 	}
 
-	// Only the units of a run, a restore or a drill are looked for: the
-	// process that starts them is not one, so between two of them, and
-	// while a restore waits for its answer, no unit is running — though
-	// the run lock is held, and a second command is refused.
+	// Only `hotserve_backup_*` units are looked for: a run's, a restore's,
+	// a drill's, a setup's. The command that starts them is not one, so
+	// whenever it is at work itself — between two units, for the whole of
+	// a restore's question — no unit is running, though it holds the run
+	// lock and a second run, drill or restore is refused.
 	switch {
 	case runningErr != nil:
 		say("could not ask systemd what is running: %s", record.Text(runningErr.Error()))

@@ -718,14 +718,15 @@ when, and then per app:
 - `restore not proven: <why>` when the last drill proved nothing —
   also beside an older proof: the newest snapshot is the one a restore
   reaches for — or when no drill has run;
-- and what is running: each unit of a run, a restore or a drill that is
-  running, starting or stopping, by what it does, to which app, since
-  when. A unit whose command is still running is `activating` to
-  systemd, which is not failed. The process that starts those units is
-  not one of them: between two units, and while a restore waits for
-  its answer, `no backup unit running now` is what is said, though
-  that process holds the run lock and a second command is refused.
-  Where the manager cannot be asked, that is said instead.
+- and what is running: each unit of a run, a restore, a drill or a
+  setup that is running, starting or stopping, by what it does, to
+  which app, since when. A unit whose command is still running is
+  `activating` to systemd, which is not failed. The command that
+  starts those units is not one of them: whenever it is at work itself
+  — between two units, and for the whole of a restore's question —
+  `no backup unit running now` is what is said, though it holds the
+  run lock and a second run, drill or restore is refused. Where the
+  manager cannot be asked, that is said instead.
 
 It exits 0 only if the last run finished within 3 hours and did not end
 early, the repository has not gone unlisted for more than 3 hours, the

@@ -698,8 +698,8 @@ func runDirUsable(dir string) error {
 	return nil
 }
 
-// UnitPattern matches the name of every unit a run, a restore or a
-// drill starts, and no other unit on the box.
+// UnitPattern matches the name of every unit a run, a restore, a drill
+// or a setup starts, and no other unit on the box.
 const UnitPattern = "hotserve_backup_*"
 
 var unitNameRe = regexp.MustCompile(`^hotserve_backup_([a-z]+[0-9]*)(?:_([a-z0-9-]{1,63}))?_[0-9a-f]{12}\.service$`)
