@@ -15,9 +15,13 @@ Every transcript below was observed on a fresh Debian 13 box with the
 package installed: against the e2e suites' S3 server over TLS, and,
 where a bucket's versions matter, against MinIO standing in for a
 provider. On your box the URL, the ids, the times and the password
-differ. Nothing here has been run against a real provider yet: what
-depends on one says **unverified**, and
-[the last section](#not-yet-tried-against-a-real-provider) lists it all.
+differ. On Backblaze B2 the release candidate `v0.3.0-rc1` then ran
+seven of the eight [release-candidate checks](release-candidate.md)
+(2026-10-04 to 10-06), and what B2 showed is said where it bears,
+[one hang included](#against-a-real-provider). On AWS S3 and
+Hetzner nothing has been run: what depends on them says
+**unverified**, and [the last section](#against-a-real-provider) lists
+it all.
 
 ## Who runs these
 
@@ -47,8 +51,8 @@ least once every 90 days**, which leaves another 90 to recover; whoever
 has the box can make its own `status` say anything. A stolen login to the provider account can destroy
 everything: give it a second factor, and never put its keys on the
 box. On MinIO standing in for S3, an attack made with the box's own key
-was refused every destruction and [undone](#after-an-attack); on a real
-provider it is **unverified**.
+was refused every destruction and [undone](#after-an-attack), and on B2
+the same; on AWS S3 and Hetzner it is **unverified**.
 
 - **A bucket of its own**, one per box: on Backblaze B2 or S3 (`setup`
   asks for those two; `rest:`, `gs:` and `swift:` are written
@@ -70,12 +74,32 @@ provider it is **unverified**.
 **On B2**, the easiest: every bucket keeps versions. Give each key the
 bucket alone and the capabilities `listBuckets`, `listFiles`,
 `readFiles` and `writeFiles` — **not `deleteFiles`**, with which restic
-destroys every version of what it removes. The web console offers
-presets rather than single capabilities, so make the keys with the
-`b2` command line.
-In the bucket's Lifecycle Settings, "Keep prior versions for this
-number of days": 180. B2 then removes a hide marker itself once the
-versions under it are gone (its documentation; **unverified**).
+destroys every version of what it removes. Without it B2 refuses the
+delete (`401`) and restic hides the file instead: a backup that held
+its lock for 30 minutes ended `snapshot … saved`, no lock left
+[measured]. The web console offers three presets and no single
+capabilities — Read and Write, which may delete, Read Only and Write
+Only — so make the two keys once from the command line, with Debian
+13's `backblaze-b2` (3.19; a `debian:13` container will do: apt
+brings the CA certificates with it [measured]):
+
+```sh
+apt-get update && apt-get install -y backblaze-b2
+backblaze-b2 authorize-account     # asks for the master key's id, then the key
+backblaze-b2 create-key --bucket my-backups hotserve-box listBuckets,listFiles,readFiles,writeFiles
+backblaze-b2 create-key --bucket my-backups hotserve-laptop listBuckets,listFiles,readFiles,writeFiles
+backblaze-b2 clear-account         # forgets the master key the first line stored on this machine
+```
+
+Each `create-key` prints the new key's id and the key itself, once.
+(The two keys the checks below ran with were made with `create-key`;
+these exact lines, from the tool's own usage text, are **unverified**.)
+The master key has now been typed at a terminal: generate a new one in
+the console, which ends the old. In the bucket's Lifecycle Settings,
+"Keep prior versions for this number of days": 180. B2 then removes a
+hide marker itself once the versions under it are gone: with that
+number at 1, a file hidden on 2026-10-04 and its marker were both gone
+two days on [measured].
 
 **On AWS S3**, turn Versioning on, add a lifecycle rule that
 permanently deletes noncurrent versions after 180 days and deletes
@@ -152,7 +176,10 @@ The package's smoke test (`make install-test`) runs exactly those
 lines, read out of this page, as an administrator under `sudo`, on a
 fresh Debian 13 with the `.deb` just installed. Keep the block in the
 box repo's Caddyfile: a push of a file without it stops that app's
-backups, and a run says so once.
+backups, and a run says so once. On a box without a box repo, keep a
+copy of `/etc/hotserve` off the box ([A rebuilt box](#a-rebuilt-box)).
+The other order works too: `setup` before any block says that a run
+would back nothing up.
 
 `setup`, for a bucket nobody has made yet:
 
@@ -173,8 +200,11 @@ next: the first backup runs within the hour and ten minutes (systemctl list-time
 ```
 
 A wrong key is asked for again, up to three times, the password shown
-standing; a setup that ends early says whether to keep that password or
-discard it ([backups/README.md](../backups/README.md#setup)). Then
+standing — on B2 a wrong key is refused at the look itself, at once
+(`401`, measured on `v0.3.0-rc1`), and no password is then shown
+(what `setup` says of it since #353: **unverified** on B2); a setup
+that ends early says whether to keep that password or discard it
+([backups/README.md](../backups/README.md#setup)). Then
 [look from your own machine](#look-from-your-own-machine) with the URL,
 the key and the password as you stored them: a password copied wrong is
 otherwise found only when the box is gone.
@@ -218,7 +248,10 @@ The box's `status` is only as honest as the box. Right after `setup`,
 and at least once in every 90 days — half the time old versions are
 kept, so that the other half is left to recover — look from a machine
 of your own with Debian's restic (0.18), in `bash`, with your own
-machine's key and the repository's password: `restic snapshots` for
+machine's key and the repository's password (in a `debian:13`
+container, `apt-get install -y restic ca-certificates`: restic alone
+brings no CA certificates, and fails `x509: certificate signed by
+unknown authority` [measured]): `restic snapshots` for
 whether the backups are fresh, and `restic check --read-data` for
 whether anything under them was hidden, overwritten or damaged, which a
 fresh-looking listing does not show.
@@ -305,7 +338,8 @@ another uid, which a restore does not mind:
 1. Install the package ([Your first deploy](first-deploy.md), step 2)
    and give it the box's Caddyfile with `hotserve init` from the box
    repository, as the first deploy did (step 3; with secrets,
-   [A rebuilt box](secrets.md#a-rebuilt-box)).
+   [A rebuilt box](secrets.md#a-rebuilt-box)); or, on a box without a
+   box repo, put back the copy of `/etc/hotserve` you kept (below).
 2. `sudo hotserve-backup setup <the same URL>`, with the box's key. It
    finds the repository and asks for its password instead of making
    one:
@@ -334,6 +368,43 @@ An hourly run that comes between 2 and 3 finds the data missing, and
 the old box still runs, turn its timers off first
 (`sudo systemctl disable --now hotserve-backup.timer hotserve-backup-drill.timer`).
 
+**A backup holds what the apps declare under `shared/`, and nothing of
+`/etc/hotserve`**: not the Caddyfile, whose `backup` blocks a restore
+needs before it can run, and no env file. With a box repo the
+Caddyfile and the secrets come back from it
+([A rebuilt box](secrets.md#a-rebuilt-box)). Without one, keep the
+directory off the box, beside the repository URL, the key and the
+password, again after every change — all but `age/`, the box's own
+key, which never leaves the box and which a rebuilt box makes anew.
+Written under `/root`, readable by root alone, then copied off:
+
+```sh
+sudo sh -c 'umask 077; tar --exclude=hotserve/age -czf /root/etc-hotserve.tar.gz -C /etc hotserve'
+```
+
+and on the rebuilt box, before step 2:
+
+```sh
+sudo tar -xzf etc-hotserve.tar.gz -C /etc
+hotserve validate --config /etc/hotserve/Caddyfile
+hotserve-backup validate /etc/hotserve/Caddyfile
+sudo systemctl reload hotserve
+```
+
+It holds the env files under `/etc/hotserve`, in plain text, and a
+`deploy_trust local` key kept there: store it as you store the
+password, and after an attack make a new key pair (`hotserve
+deploy-keygen`) rather than put the old one back. An `env_file` the
+Caddyfile names outside that directory is not in it — keep that file
+the same way, and put it back before step 2. A box rebuilt from a
+plain tar of the directory (a Caddyfile and a deploy key; no `age/`,
+no `secrets/`), with another uid for `hotserve`, found the repository,
+restored before the first deploy, and its next run was `ok` [measured,
+on the e2e server]; that GNU tar leaves `age/` out and, under that
+umask, writes the archive `600` was measured on Debian 13. The lines
+as printed, restoring `secrets/` over the directory the package makes,
+are **unverified**.
+
 ## The weekly drill, and what it costs
 
 Every Sunday between 03:30 and 03:40, the box's time — an offset of
@@ -350,7 +421,10 @@ repository: its structure, and data group 40/52: clean
 
 The release ships this full drill. A lighter weekly one, which would
 not fetch every app whole, is for later or never: what the full one
-costs on a real provider decides it.
+costs on a real provider decides it. On B2 (EU Central, from an arm64
+Hetzner VPS) with 500 MB of new uploads, the run that uploaded them
+took 24 s and the drill that fetched them back 14 s, its check included
+[measured].
 
 - **Egress:** each week, the apps' size, plus 1/52 of the repository.
   About 4.3 times the apps' size a month — less for data that
@@ -425,7 +499,9 @@ and the first and last backups (restic keeps the oldest too) and
 removed the two in between, the second removed those two's records,
 and `restic check` then found no errors. On MinIO, with a key that
 cannot destroy a version, the two removed what the policy said and
-destroyed nothing: every removal stayed an old version.
+destroyed nothing: every removal stayed an old version. On B2, a
+`forget` with a key without `deleteFiles` hid the snapshot's file and
+left its version [measured].
 
 Each keeps the newest of every hour, day and month on its own. Where a
 period's newest backup has no record — a run that ended `incomplete`,
@@ -457,7 +533,8 @@ from 03:30, the box's time).
 With the box's key, or your own machine's, someone can hide, overwrite
 or delete every file, and still destroy nothing for 180 days. On MinIO
 an attack that did all three, and then tried to destroy the versions
-(`Access Denied`), made the next run fail and `status` exit 1:
+(`Access Denied`; on B2 `401` for every file), made the next run fail
+and `status` exit 1:
 
 ```
 demo: failed: there is no repository at the configured location (exit 10); …
@@ -472,7 +549,8 @@ and only the next drill saying so (`restore not proven`, and its check
 Recovery is a copy of the bucket as it was before the attack, into a
 new bucket made as [above](#before-you-start-the-bucket-and-what-it-protects),
 with a key the attacker never had that may read old versions — the
-provider account's own — and Debian's rclone (1.60), in `bash`:
+provider account's own — and Debian's rclone (1.60; in a container,
+with `ca-certificates`), in `bash`:
 
 ```bash
 export RCLONE_CONFIG_STORE_TYPE=s3 RCLONE_CONFIG_STORE_PROVIDER=AWS RCLONE_CONFIG_STORE_REGION=<the bucket's region>
@@ -484,9 +562,14 @@ rclone copy "store,version_at='2026-10-03T08:49:00Z':my-backups" store:my-backup
 On another S3 provider, `RCLONE_CONFIG_STORE_PROVIDER=Other` and
 `RCLONE_CONFIG_STORE_ENDPOINT=https://<its endpoint>` in place of the
 region; on B2, `RCLONE_CONFIG_STORE_TYPE=b2` with `…_ACCOUNT` and
-`…_KEY`, and the same `store,version_at='…'` — **unverified**, as is all
-of this on a real provider. Three things the copy needs, each seen
-going wrong without it:
+`…_KEY`, and the same `store,version_at='…'` — there a copy at
+`status`'s minute and one from the bucket's history both checked
+clean, and a box set up onto the copy ran, drilled and was healthy
+[measured — with the box's own key, which on B2 reads old versions
+too (`listFiles` and `readFiles`), and into a folder of the attacked
+bucket; the account's key and a new bucket, as written, are
+**unverified**]. On AWS S3 and Hetzner all of this is **unverified**.
+Three things the copy needs, each seen going wrong without it:
 
 - the time in UTC, with its `T` and `Z`: `2026-10-03 08:49:48` is read
   in your machine's zone, and in Berlin found nothing;
@@ -539,9 +622,17 @@ start:
   every file once, `config` at `init` — or a delete of `config` or
   `keys/…`. Any moment between the two will do: `2026-10-03T08:49:45Z`
   here. A deletion of snapshots and data alone looks like a `prune`:
-  compare it with when you last pruned. On B2, Debian's `backblaze-b2
-  ls --long --versions -r b2://my-backups` lists each upload and hide
-  with its time — **unverified**.
+  compare it with when you last pruned. On B2, a run ends by hiding
+  its lock, and Debian's `backblaze-b2` lists each upload and hide with
+  its time — by name, so sort it by its date and time columns:
+
+  ```bash
+  backblaze-b2 ls --long --versions -r b2://my-backups | sort -k3,4
+  ```
+
+  Not rclone's `lsl --b2-versions`: it lists no version of a hidden
+  file, and of a bucket whose every file was hidden it listed nothing
+  [measured].
 
 Once the copy checks clean, give the new bucket new keys (the old ones
 are the attacker's) and follow [A rebuilt box](#a-rebuilt-box) with its
@@ -556,21 +647,28 @@ every backup — and restic changes a master key only by moving the data
 into a new repository (`restic copy`) or starting a new one. Anyone who
 later reads the bucket with them can read the backups.
 
-## Not yet tried against a real provider
+## Against a real provider
 
-Each is **unverified**, and a check the release candidate runs
-([release-candidate.md](release-candidate.md)):
+**On Backblaze B2**, the release candidate `v0.3.0-rc1` ran the checks
+of [release-candidate.md](release-candidate.md) from 2026-10-04 to
+10-06, from an arm64 Hetzner VPS and from fresh test boxes, all but
+retention:
 
-- **TLS** to a real provider. Over TLS to the e2e S3 server, from a
-  private CA added to the box's trust store, `setup`, runs, restores
-  and the drill all worked.
-- **The bucket above**: versioning, keys that cannot destroy a
-  version, the 180-day rule, and B2 removing its own hide markers. On
-  MinIO the whole of it worked, an attack and its recovery included; not
-  yet on AWS, B2 or Hetzner. On B2, that restic hides where its key may
-  not delete is read in restic's own code, not seen.
-- **The recovery copy** on a real provider, and whether it is copied
-  there without coming down to your machine.
+- **TLS**: `setup`, runs, restores, the drill and the look from another
+  machine, over B2's own certificate.
+- **The bucket above**: with keys without `deleteFiles`, every command
+  ran, one holding its lock for 30 minutes included, and left no lock.
+  An attack with the box's key destroyed nothing — `401` for each of 17
+  files — then overwrote and hid everything; the next run failed
+  `exit 10`, and the recovery copy, at `status`'s minute and from the
+  bucket's history, checked clean and was set up onto. B2 removed a
+  hidden file's version and its hide marker within two days of a
+  1-day rule.
+- **A bucket that does not exist**: the key could not make one, and
+  `setup` ended after three askings in 7.5 s, nothing written
+  (`NewBucket: b2_list_buckets: 401:`). **A wrong secret**: three
+  askings in 3.8 s (`b2.NewClient: b2_authorize_account: 401:`). B2
+  answers at once where the e2e server kept restic retrying.
 - **A read-only key**: `setup` opens a repository that is there
   already taking its lock, which writes a lock file and removes it, and
   refuses a key that cannot — at once where the storage says so
@@ -580,12 +678,24 @@ Each is **unverified**, and a check the release candidate runs
   ways; on B2, `v0.3.0-rc1`'s `setup`, which only read, took a console
   Read Only key, and every run then failed after 14½ minutes of retries
   (`b2_get_upload_url: 401:`), as did the drill after it, after 14
-  minutes. The refusals
-  themselves are **unverified** on B2.
-- **A bucket that does not exist** on a provider that will not make
-  one for the box's key. The e2e S3 server makes a bucket when asked,
-  so `setup` there makes it.
-- **A wrong secret's wording** on a real provider. On the e2e server
-  `setup` asked three times, in 31 seconds, and ended
-  `restic could not make or open the repository (exit 1): … The request
-  signature we calculated does not match the signature you provided.`
+  minutes. The refusals themselves are **unverified** on B2.
+- **A rebuilt box** with another uid for `hotserve`: restored before
+  the first deploy in 10 s, every file the new uid's.
+- **One drill, timed**: with 500 MB of new uploads, the run that
+  uploaded them 24 s, the drill that fetched them back 14 s, its check
+  included. Its egress on a bill: **unverified**.
+- **A run's upload hung**, on the owner's box, for 27 hours with no
+  output, and no later run was scheduled meanwhile: `status` said
+  `running: upload of dev, since …` and, after 3 hours, exited 1 with
+  the backups stale. `kill -QUIT` on the unit's restic ended it, and
+  the timer caught up at once. Open as #177: restic's B2 library
+  retries an upload B2 answers with an error without limit, below
+  restic's own retries; which answer it was is not known.
+- **Retention off the box**: **unverified**.
+
+**On AWS S3 and Hetzner** none of this has been run, and every line
+above is **unverified** there. Over TLS to the e2e S3 server, from a
+private CA added to the box's trust store, `setup`, runs, restores and
+the drill all worked; on MinIO the bucket, an attack and its recovery
+did. Not known on any provider: whether the recovery copy can be made
+there without coming down to your machine.
