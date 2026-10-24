@@ -31,6 +31,20 @@ if run; then fail "a run with an account hotserve did not make exited 0"; else g
 grep -q '"error": "the hotserve-backup account on this box was not made by hotserve' "$STATUS" && pass "and the record says so, for status" || fail "the record: $(head -c 300 "$STATUS")"
 usermod --comment made-by-hotserve hotserve-backup
 
+echo "=== backup 0c: a b2: repository stops a run, before any unit ==="
+# restic's own B2 backend retries a failed upload without end (#177):
+# what setup refuses, a file written by hand — or set up before setup
+# refused it — is refused by the run, naming the same repository at
+# B2's S3-compatible endpoint. Read as the manager reads the file: in
+# quotes, after an earlier line.
+printf 'RESTIC_REPOSITORY=%s\nRESTIC_PASSWORD=%s\nRESTIC_REPOSITORY="b2:hs-backups:dev"\nB2_ACCOUNT_ID=K001\nB2_ACCOUNT_KEY=k\n' "$REPO" "$PASSWORD" >"$ENVFILE"
+if run; then fail "a run with a b2: repository exited 0"; else grep -q "the repository is b2:, which is not supported: sudo hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3-compatible endpoint, with an application key" "$OUT" && pass "a run refuses a b2: repository, naming its S3 URL" || fail "the run's words: $(cat "$OUT")"; fi
+[ "$(units_left)" = 0 ] && pass "and started no unit" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
+grep -q '"error": "the repository is b2:, which is not supported' "$STATUS" && pass "and the record says so, for status" || fail "the record: $(head -c 400 "$STATUS")"
+hotserve-backup status >"$OUT" 2>&1
+grep -q "the repository is b2:, which is not supported" "$OUT" && grep -q "warning: $ENVFILE: RESTIC_REPOSITORY: b2: is not supported" "$OUT" && pass "status names it, and as root warns of the file" || fail "status: $(cat "$OUT")"
+write_env "$REPO" "$PASSWORD"
+
 echo "=== backup 1: a run backs up what is declared, and only that ==="
 if run; then pass "the run exits 0"; else fail "the run failed: $(cat "$OUT")"; fi
 expect_class blog ok "first run"

@@ -1,7 +1,8 @@
 // Package envfile writes and reads the credential file the way systemd's
-// EnvironmentFile= does. It has one writer, setup, and one reader,
+// EnvironmentFile= does. It has one writer, setup, and two readers:
 // status as root, to say where a hand-edited line is not read as it
-// was written.
+// was written, and a run, a restore and a drill, which read the
+// repository it names as the units will be given it.
 //
 // The manager's rules are measured, not assumed
 // (TestIntegrationSystemdReadsAnEnvFileAsParseDoes), and Parse walks
@@ -48,10 +49,14 @@ var keyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 func Parse(raw []byte) (Values, []string) {
 	v := Values{}
 	var findings []string
-	if !utf8.Valid(raw) {
-		n := 1 + bytes.Count(raw[:utf8FirstInvalid(raw)], []byte("\n"))
-		return v, []string{fmt.Sprintf("line %d holds a byte that is not UTF-8: the manager refuses the whole file, and no unit that needs it starts", n)}
+	// The manager refuses the whole file for a NUL anywhere in it, and
+	// for a byte that is not UTF-8 in a key or a value it reads — quoted
+	// or not — but not in a comment or a line with no = [M91].
+	if i := bytes.IndexByte(raw, 0); i >= 0 {
+		n := 1 + bytes.Count(raw[:i], []byte("\n"))
+		return v, []string{fmt.Sprintf("line %d holds a NUL byte: %s", n, wholeFile)}
 	}
+	notUTF8 := "" // the first key or value that is not UTF-8, as said
 	const (
 		preKey = iota
 		inKey
@@ -79,6 +84,17 @@ func Parse(raw []byte) (Values, []string) {
 		val := value.String()
 		if strip && valueWS >= 0 {
 			val = val[:valueWS]
+		}
+		// Named by its key, from the line the key is on: the byte may be
+		// lines further on, in a value that runs over several.
+		switch {
+		case notUTF8 != "":
+		case !utf8.ValidString(name):
+			notUTF8 = fmt.Sprintf("line %d: a key holds a byte that is not UTF-8", keyLine)
+		case !utf8.ValidString(val) && keyRe.MatchString(name):
+			notUTF8 = fmt.Sprintf("line %d: the value of %s holds a byte that is not UTF-8", keyLine, name)
+		case !utf8.ValidString(val):
+			notUTF8 = fmt.Sprintf("line %d: the value of %q holds a byte that is not UTF-8", keyLine, name)
 		}
 		switch {
 		case !keyRe.MatchString(name):
@@ -223,19 +239,22 @@ func Parse(raw []byte) (Values, []string) {
 	case preValue, inValue, valueEscape:
 		push(state == inValue)
 	}
+	if notUTF8 != "" {
+		return Values{}, []string{notUTF8 + ": " + wholeFile}
+	}
 	return v, findings
 }
 
-// utf8FirstInvalid is the offset of the first byte that is not UTF-8.
-func utf8FirstInvalid(raw []byte) int {
-	for i := 0; i < len(raw); {
-		r, size := utf8.DecodeRune(raw[i:])
-		if r == utf8.RuneError && size == 1 {
-			return i
-		}
-		i += size
+// wholeFile is what a finding says of a file the manager refuses whole.
+const wholeFile = "the manager refuses the whole file, and no unit that needs it starts"
+
+// RefusedWhole is the finding Parse gives of a file the manager refuses
+// whole, or "": what a run refuses the file in, before any unit.
+func RefusedWhole(findings []string) string {
+	if len(findings) == 1 && strings.HasSuffix(findings[0], wholeFile) {
+		return findings[0]
 	}
-	return len(raw)
+	return ""
 }
 
 // Refuse says why value cannot be written so that the manager reads it
@@ -358,6 +377,11 @@ func SyncDir(path string) error {
 // Lint is what status says of the file: what the manager reads other
 // than as written, and what a run needs that is not set.
 func Lint(v Values, findings []string) []string {
+	// A file the manager refuses whole is that and nothing more: Parse
+	// read no value of it, so none can be said to be missing.
+	if w := RefusedWhole(findings); w != "" {
+		return []string{w}
+	}
 	out := append([]string(nil), findings...)
 	for _, k := range []string{"RESTIC_REPOSITORY", "RESTIC_PASSWORD"} {
 		if val, ok := v[k]; !ok {

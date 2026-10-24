@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -192,6 +193,32 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		{"hotserve", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
 		{"hotserve-backup", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve-backup" } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
 		{"the account", func(b *box) { b.account = false }, "the hotserve-backup account is not there: sudo hotserve-backup setup <repository> makes it (" + useraddArgv() + ")"},
+		// A b2: repository, which setup refuses: one written by hand, or
+		// set up before setup refused it. Every unit would run restic's
+		// own B2 backend (#177).
+		{"a repository other than b2:", func(b *box) {
+			writeOrPanic(b.cfg.EnvFile, "RESTIC_REPOSITORY=b2:hs-backups:dev\nRESTIC_PASSWORD=the-secret\nB2_ACCOUNT_ID=K001\nB2_ACCOUNT_KEY=k\n")
+		}, "the repository is b2:, which is not supported: sudo hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3-compatible endpoint, with an application key; restic's own B2 backend retries a failed upload without end"},
+		// A file the manager could not read either: said, in place of
+		// every unit failing to start.
+		{"a credential file that can be read", func(b *box) {
+			if err := os.Remove(b.cfg.EnvFile); err != nil {
+				panic(err)
+			}
+			if err := os.Mkdir(b.cfg.EnvFile, 0o700); err != nil {
+				panic(err)
+			}
+		}, "the credential file " + "%ENVFILE%" + " could not be read: it is not a regular file (d---------)"},
+		// A FIFO in its place, which a read would wait on for ever,
+		// holding the run lock.
+		{"a credential file that is not a FIFO", func(b *box) {
+			if err := os.Remove(b.cfg.EnvFile); err != nil {
+				panic(err)
+			}
+			if err := syscall.Mkfifo(b.cfg.EnvFile, 0o600); err != nil {
+				panic(err)
+			}
+		}, "the credential file " + "%ENVFILE%" + " could not be read: it is not a regular file (p---------)"},
 		{"an account hotserve did not make", func(b *box) { b.comment = "" }, "the hotserve-backup account on this box was not made by hotserve"},
 		// The manager binds what it sees: where it does not see this
 		// command's mounts it would show every unit a bare mount point
@@ -216,21 +243,26 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 			t.Run(cmd.name+" without "+p.name, func(t *testing.T) {
 				b, m := cmd.box(t)
 				p.set(b)
+				want := strings.ReplaceAll(p.want, "%ENVFILE%", b.cfg.EnvFile)
 				err := cmd.do(t, b, m)
-				if err == nil || !strings.Contains(err.Error(), p.want) {
-					t.Fatalf("err = %v", err)
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %v\nwant %s", err, want)
 				}
 				if len(b.specs) != 0 {
 					t.Fatalf("units were started: %s", b.roles())
 				}
 				st, rerr := record.Read(filepath.Join(b.cfg.StateDir, "status.json"))
+				// The record holds the error as record.Text cuts it, and
+				// nothing else: exactly, so a cut that took the remedy
+				// would show.
+				recorded := record.Text(err.Error())
 				switch cmd.name {
 				case "a run":
-					if rerr != nil || !strings.Contains(st.Error, p.want) {
-						t.Fatalf("the run's record: %+v, %v", st, rerr)
+					if rerr != nil || st.Error != recorded {
+						t.Fatalf("the run's record: %+v, %v\nwant %q", st, rerr, recorded)
 					}
 				case "a drill":
-					if rerr != nil || st.LastDrill == nil || !strings.Contains(st.LastDrill.Detail, p.want) {
+					if rerr != nil || st.LastDrill == nil || st.LastDrill.Detail != recorded {
 						t.Fatalf("the drill's record: %+v, %v", st, rerr)
 					}
 				default:
@@ -544,5 +576,13 @@ func TestPostremoveStopsOnlyNamesTheEngineWrites(t *testing.T) {
 		if got := shell.MatchString(name); got != engine {
 			t.Errorf("%s: postremove says %v, the engine %v", name, got, engine)
 		}
+	}
+}
+
+// writeOrPanic writes a file a table row's setter makes, which runs in
+// a subtest with no *testing.T of its own to fail.
+func writeOrPanic(path, content string) {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		panic(err)
 	}
 }

@@ -7,10 +7,13 @@
 // The engine runs as root and is root-equivalent (it starts system
 // units and makes mounts), so it touches as little as it can: it never
 // reads or removes anything an app wrote — it opens an app's
-// directories only as O_PATH, to name them (pin.go) — never reads the
-// credential file (it passes the path to the manager), and takes
-// nothing from a unit but an exit status and a small JSON file, of
-// which it keeps only what it recognises, cleaned (record.Text).
+// directories only as O_PATH, to name them (pin.go) — parses the
+// credential file, secrets and all, to refuse before any unit one the
+// manager could not read or would refuse whole, and one that names a
+// b2: repository or names it in another file (repositoryInUse),
+// otherwise passing its path to the manager — and takes nothing from a
+// unit but an exit status and a small JSON file, of which it keeps only
+// what it recognises, cleaned (record.Text).
 package engine
 
 import (
@@ -48,7 +51,7 @@ import (
 // installation, none of it an operator's or an app's string.
 type Config struct {
 	ConfigDir string // /etc/hotserve: what the plan unit sees, for the Caddyfile's imports
-	EnvFile   string // /etc/hotserve-backup/repository.env: root-only; read by the manager, never here
+	EnvFile   string // /etc/hotserve-backup/repository.env: root-only; read by the manager, and parsed here to refuse before any unit what repositoryInUse refuses
 	// OldEnvFile is where an earlier version of this branch kept the
 	// credential file. It is never read: named, when it is there and
 	// EnvFile is not, so that a box set up by hand is told to run setup
@@ -254,6 +257,12 @@ func begin(ctx context.Context, cfg Config, r Runner) (x *run, end func(), err e
 	// status fails with the red unit rather than reporting the run
 	// before as ok for three hours.
 	if err := programsInstalled(cfg); err != nil {
+		return x, end, err
+	}
+	// The repository too, as setup refuses it: a b2: file is one written
+	// by hand, or before setup refused b2:, and every unit would run
+	// restic's own B2 backend.
+	if err := repositoryInUse(cfg.EnvFile); err != nil {
 		return x, end, err
 	}
 	// The data user's lookup, made as the command opened: a lookup that

@@ -388,6 +388,9 @@ func showStatus(ctx context.Context) error {
 				if err := engine.RepositoryUsable(repo, cfg.EnvFile); err != nil {
 					fmt.Printf("warning: %s: RESTIC_REPOSITORY: %v\n", cfg.EnvFile, err)
 				}
+				if a := engine.RegionAdvice(repo, v["AWS_DEFAULT_REGION"]); a != "" {
+					fmt.Printf("warning: %s: %s\n", cfg.EnvFile, a)
+				}
 			}
 		}
 	}

@@ -77,9 +77,14 @@ func TestWhateverLeavesInitRunningLeavesItWhatItNeeds(t *testing.T) {
 // A repository that was there already is written to before the box is
 // pointed at it: setup only read one, and a key that may read and not
 // write was taken, every run after failing a quarter of an hour in [RC
-// check 6, on B2]. However the write is refused, setup ends before
-// anything is written; and what is no refusal of the key — another
-// restic holding the repository — is said, and is none of setup's.
+// check 6, on B2's native API]. A write restic retries is the one it
+// was measured retrying over S3, the Internal Error of `rclone serve s3
+// --read-only` [measured: rc-runs/rc-results/M1-readonly-storage.out];
+// a 500 is retried the same way (the e2e's second read-only case);
+// a 403 ends it at once [rc-runs/rc-results/M3-readonly-proxy.out].
+// However the write is refused, setup ends before anything is written;
+// and what is no refusal of the key — another restic holding the
+// repository — is said, and is none of setup's.
 func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten(t *testing.T) {
 	const denied = "Save(<lock/b8e7993d85>) failed: client.PutObject: Access Denied."
 	for _, tc := range []struct {
@@ -91,14 +96,15 @@ func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten
 		{"the storage refuses the write at once (S3's 403: exit 1), restic's Fatal line last", func(b *box) {
 			b.outcome["write"], b.writeErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, denied+"\nFatal: unable to create lock in backend: client.PutObject: Access Denied.\n"
 		}, "this key read the repository, and restic exited 1 before its lock file's write completed: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Fatal: unable to create lock in backend: client.PutObject: Access Denied.)", ""},
-		{"restic retries the write to the clock (B2's 401)", func(b *box) {
-			b.hang, b.writeErr = "write", "Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401: \n"
-		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401:)", ""},
+		// The line as measured: rc-runs/rc-results/M1-readonly-storage.out.
+		{"restic retries the write to the clock (the Internal Error of rclone serve s3 --read-only)", func(b *box) {
+			b.hang, b.writeErr = "write", "Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error\n"
+		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error)", ""},
 		{"the storage took the write and never answered (nothing from restic)", func(b *box) { b.hang = "write" },
 			"this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here", ""},
 		{"a blank last line is nothing said: the line before it is appended", func(b *box) {
-			b.hang, b.writeErr = "write", "Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401: \n \n"
-		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401:)", ""},
+			b.hang, b.writeErr = "write", "Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error\n \n"
+		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error)", ""},
 		{"the storage took the write and never answered (a blank line is nothing said)", func(b *box) {
 			b.hang, b.writeErr = "write", " \n"
 		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here", ""},
@@ -106,14 +112,14 @@ func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten
 			b.hang, b.writeErr = "write", "signal terminated received, cleaning up\n"
 		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here", ""},
 		{"the stop's own lines last, the retry line before them appended (the e2e's clock case)", func(b *box) {
-			b.hang, b.writeErr = "write", "Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401: \nsignal terminated received, cleaning up\nFatal: unable to create lock in backend: context canceled\n"
-		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401:)", ""},
+			b.hang, b.writeErr = "write", "Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error\nsignal terminated received, cleaning up\nFatal: unable to create lock in backend: context canceled\n"
+		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error)", ""},
 		{"a read retried to the clock, never reaching the write: the Load line is appended, and judged by nobody here", func(b *box) {
 			b.hang, b.writeErr = "write", "Load(<config/>, 0, 0) returned error, retrying after 552.330144ms: client.GetObject: 503 Slow Down\n"
 		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Load(<config/>, 0, 0) returned error, retrying after 552.330144ms: client.GetObject: 503 Slow Down)", ""},
 		{"a read retried once, then the write retried to the clock: the last line names the key, not the read", func(b *box) {
-			b.hang, b.writeErr = "write", "Load(<config/>, 0, 0) returned error, retrying after 552.330144ms: client.GetObject: 503 Slow Down\n"+strings.Repeat("Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401: \n", 6)
-		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: b2_get_upload_url: 401:)", ""},
+			b.hang, b.writeErr = "write", "Load(<config/>, 0, 0) returned error, retrying after 552.330144ms: client.GetObject: 503 Slow Down\n"+strings.Repeat("Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error\n", 6)
+		}, "this key read the repository, and restic had not completed a lock file's write to it within 200ms: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/0a11f6bb7c>) returned error, retrying after 1.494715917s: client.PutObject: Internal Error)", ""},
 		{"restic exited 1 on a read, before any write (a storage that went away after the opening)", func(b *box) {
 			b.outcome["write"], b.writeErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, strings.Repeat("Load(<config/>, 0, 0) returned error, retrying after 552.330144ms: client.GetObject: 503 Slow Down\n", 3)+"Fatal: unable to open repository at s3:http://e2e-s3:9000/box: Load(<config/>, 0, 0) failed: client.GetObject: 503 Slow Down\n"
 		}, "this key read the repository, and restic exited 1 before its lock file's write completed: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Fatal: unable to open repository at s3:http://e2e-s3:9000/box: Load(<config/>, 0, 0) failed: client.GetObject: 503 Slow Down)", ""},

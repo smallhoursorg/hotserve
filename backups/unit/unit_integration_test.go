@@ -538,15 +538,28 @@ func TestIntegrationSystemdReadsAnEnvFileAsParseDoes(t *testing.T) {
 	if bs, _ := envfile.Parse([]byte("A=x\nB=abc \\")); unit["B"] != "abc " || bs["B"] != unit["B"] {
 		t.Errorf("a backslash at the end of the file: the manager gives %q, Parse reads %q", unit["B"], bs["B"])
 	}
-	// A byte that is not UTF-8: does the manager skip the line, or
-	// refuse the file? Measured here, and mirrored by Lint.
-	must(t, os.WriteFile(file, []byte("OK=1\nBAD=caf\xe9\nAFTER=2\n"), 0o600))
-	out, err := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/usr/bin/env", "-0"}, User: testUser, EnvironmentFile: file, StdoutFile: stdout})
-	if err != nil || out.Result != "resources" {
-		t.Fatalf("a file with a non-UTF-8 byte: outcome %+v, err %v; want the unit refused for want of its environment (result resources)", out, err)
-	}
-	if bad, findings := envfile.Parse([]byte("OK=1\nBAD=caf\xe9\nAFTER=2\n")); len(bad) != 0 || len(findings) != 1 || !strings.Contains(findings[0], "refuses the whole file") {
-		t.Fatalf("Parse of a file the manager refuses: %v %q", bad, findings)
+	// The bytes the manager refuses a whole file for, and the ones it
+	// does not [M91]: Parse says the one where the manager does the
+	// other, and a run refuses before any unit what Parse says it
+	// refuses (envfile.RefusedWhole).
+	for _, raw := range []string{
+		"OK=1\nBAD=caf\xe9\nAFTER=2\n",
+		"OK=1\nBAD=\"caf\xe9\"\nAFTER=2\n",
+		"OK=1\ncaf\xe9=1\nAFTER=2\n",
+		"OK=1\n# a\x00b\nAFTER=2\n",
+		"OK=1\nBAD=a\x00b\nAFTER=2\n",
+		"OK=1\n# caf\xe9\nAFTER=2\n",
+		"OK=1\ncaf\xe9\nAFTER=2\n",
+	} {
+		must(t, os.WriteFile(file, []byte(raw), 0o600))
+		out, err := r.Run(context.Background(), Spec{Name: name(t), Argv: []string{"/usr/bin/env", "-0"}, User: testUser, EnvironmentFile: file, StdoutFile: stdout})
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		_, findings := envfile.Parse([]byte(raw))
+		if refused, said := out.Result == "resources", envfile.RefusedWhole(findings) != ""; refused != said {
+			t.Errorf("%q: the manager's result %q; Parse says refused whole: %v (%q)", raw, out.Result, said, findings)
+		}
 	}
 	// And the other way: what the writer writes of awkward values, the
 	// manager reads back as they were.

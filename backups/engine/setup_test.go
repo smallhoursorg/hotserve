@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -30,10 +32,18 @@ const (
 	alreadyThere = `{"message_type":"exit_error","code":1,"message":"Fatal: create repository at s3:http://e2e-s3:9000/box failed: Fatal: unable to open repository at s3:http://e2e-s3:9000/box: config file already exists\n"}` + "\n"
 	wrongKey     = `{"message_type":"exit_error","code":1,"message":"Fatal: create repository at s3:http://e2e-s3:9000/box failed: Fatal: unable to open repository at s3:http://e2e-s3:9000/box: client.BucketExists: The request signature we calculated does not match the signature you provided. Check your key and signing method.\n"}` + "\n"
 	configJSON   = `{"version": 2, "id": "` + repoID + `", "chunker_polynomial": "27ec33083365e9"}` + "\n"
-	// What the look's `cat config` (no --json) says on stderr where B2
-	// refuses the key at once [measured, RC check 1 on real B2]: the
-	// same opening init's first step makes.
-	refusedB2 = "Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:\n"
+	// What the look's `cat config` (no --json) says on stderr where the
+	// storage refuses the key at once: over S3 restic gives up at once
+	// only on a 403, which a HEAD's, having no body, reaches it as
+	// "Access Denied." [restic 0.18.0's shape, from its source —
+	// cmd/restic/global.go's open, internal/backend/s3/s3.go's Stat and
+	// IsPermanentError, minio-go 7.0.89's 403 — not measured on any
+	// storage]. The same opening init's first step makes.
+	refusedAtOnce = "Fatal: unable to open config file: Stat: Access Denied.\nIs there a repository at the following location?\n" + b2Repo + "\n"
+	// A repository at B2's S3-compatible endpoint, as the guide writes one.
+	b2Repo = "s3:https://s3.eu-central-003.backblazeb2.com/hs-rc-bucket/rc-check1"
+	// What setup says of refusedAtOnce, cleaned: one line.
+	refusedSaid = "restic could not open the repository (exit 1): Fatal: unable to open config file: Stat: Access Denied. Is there a repository at the following location? " + b2Repo
 	// An init that got past the opening and failed writing: restic's
 	// shape for it (cmd/restic/cmd_init.go, "create key in repository
 	// at … failed"), with a reason of the storage's [not measured].
@@ -348,16 +358,38 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 		{"azure:container:path", "azure: is not a backend Debian's restic has"},
 		{"gs:bucket:path", "gs: and swift: are not set up by this command"},
 		{"swift:container:/path", "gs: and swift: are not set up by this command"},
-		{"s3:http://user:pass@e2e-s3:9000/box", "credentials in the repository URL"},
+		{"s3:http://user:pass@e2e-s3:9000/box", "the repository URL holds an @, which is refused"},
 		{"rest:https://user:pass@host/", "rest:, gs: and swift: are not set up by this command"},
 		{"ftp://host/x", `"ftp:" is not a repository restic knows`},
 		{"", "no repository was given"},
 		{"s3:", "s3: names no bucket"},
 		{"s3:http://e2e-s3:9000/box ", "the repository URL has whitespace at an end"},
-		{"s3:AKID:secret@s3.example.com/bucket", "credentials in the repository URL"},
-		{"s3://AKID:secret@s3.example.com/bucket", "credentials in the repository URL"},
+		{"s3:AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		{"s3://AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		// A "://" in the path is not where the authority starts.
+		{"s3:AKID:secret@s3.example.com/bucket/x://y", "the repository URL holds an @, which is refused"},
+		{"s3://AKID:secret@s3.example.com/bucket/x://y", "the repository URL holds an @, which is refused"},
+		{"s3:https://AKID:secret@s3.example.com/bucket/x://y", "the repository URL holds an @, which is refused"},
+		// restic url.Parses whatever begins s3:http, whose scheme is read
+		// in any case.
+		{"s3:httpS://AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		{"s3:hTTp://AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		{"s3:https+x://AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		// A secret with a character that ends an authority before its @.
+		{"s3:https://AKID:se#cret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		{"s3:https://AKID:se?cret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		{"s3:https://AKIAEXAMPLE:wJalrXUtn/K7MDENG@s3.amazonaws.com/bucket", "the repository URL holds an @, which is refused"},
+		{"s3:AKID:wJal/K7@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		// No bucket name holds an @; a path that does is refused with them.
+		{"s3:https://s3.example.com/bucket/a@b", "no bucket name holds an @, so a path with one is not supported"},
+		// B2's S3-compatible endpoint takes HTTPS alone.
+		{"s3:http://s3.eu-central-003.backblazeb2.com/bucket", "B2's S3-compatible endpoint takes HTTPS alone"},
+		{"s3:http://S3.EU-CENTRAL-003.BACKBLAZEB2.COM.:443/bucket", "B2's S3-compatible endpoint takes HTTPS alone"},
+		{"s3:http://s3.us-west-004.backblazeb2.com:80/bucket", "B2's S3-compatible endpoint takes HTTPS alone"},
+		{"s3:http://s3.us-west-004.backblazeb2.com:/bucket", "B2's S3-compatible endpoint takes HTTPS alone"},
 		{"rest:user:pass@host:8000/", "rest:, gs: and swift: are not set up by this command"},
 		{"s3:http://e2e-s3:9000/b\x01x", "the repository URL cannot go in the file: it holds a control character"},
+		{"ftp://host/x", "(setup asks for s3:)"},
 	} {
 		t.Run(tc.repo, func(t *testing.T) {
 			b, m := setupBox(t)
@@ -373,19 +405,277 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 	}
 }
 
+// restic's own B2 backend retries a failed upload without end (#177),
+// so b2: is refused before any prompt, in every form restic reads, and
+// the refusal names the same repository at B2's S3-compatible
+// endpoint: the bucket and path as restic's b2 backend reads them, the
+// region left for the operator. Nothing is made, the account included.
+func TestAB2RepositoryIsRefusedBeforeAnyPromptNamingItsS3URL(t *testing.T) {
+	const tail = ", with an application key, not the master key; restic's own B2 backend retries a failed upload without end"
+	for _, tc := range []struct{ repo, url string }{
+		{"b2:hs-backups:dev", "s3:https://s3.<region>.backblazeb2.com/hs-backups/dev"},
+		{"b2:hs-backups:", "s3:https://s3.<region>.backblazeb2.com/hs-backups"},
+		{"b2:hs-backups", "s3:https://s3.<region>.backblazeb2.com/hs-backups"},
+		{"b2:", "s3:https://s3.<region>.backblazeb2.com/<bucket>"},
+		{"b2::dev", "s3:https://s3.<region>.backblazeb2.com/<bucket>/dev"},
+		// The path as restic cleans it: the objects are the same.
+		{"b2:hs-backups:/srv//dev/", "s3:https://s3.<region>.backblazeb2.com/hs-backups/srv/dev"},
+		{"b2:hs-backups:/", "s3:https://s3.<region>.backblazeb2.com/hs-backups"},
+		{"b2:hs-backups:a:b", "s3:https://s3.<region>.backblazeb2.com/hs-backups/a:b"},
+		// A path that climbs is named no URL: a server on the way may
+		// resolve its dot segments.
+		{"b2:hs-backups:../x", "s3:https://s3.<region>.backblazeb2.com/hs-backups/<path>"},
+		{"b2:hs-backups:..", "s3:https://s3.<region>.backblazeb2.com/hs-backups/<path>"},
+		{"b2:hs-backups:a/../../x", "s3:https://s3.<region>.backblazeb2.com/hs-backups/<path>"},
+		{"b2:hs-backups:a/../x", "s3:https://s3.<region>.backblazeb2.com/hs-backups/x"},
+		// A bucket B2 could not name is named no URL: escaped, a / in it
+		// would be read back as the bucket's end.
+		{"b2:a/b:dev", "s3:https://s3.<region>.backblazeb2.com/<bucket>/dev"},
+		{"b2:it's:x", "s3:https://s3.<region>.backblazeb2.com/<bucket>/x"},
+		{"b2:MyBackups:dev", "s3:https://s3.<region>.backblazeb2.com/<bucket>/dev"},
+		// Escaped, so that restic's url.Parse reads back the path B2 holds;
+		// what is not printable is escaped too, so never echoed.
+		{"b2:hs-backups:dev#daily", "s3:https://s3.<region>.backblazeb2.com/hs-backups/dev%23daily"},
+		{"b2:hs-backups:dev?x/y", "s3:https://s3.<region>.backblazeb2.com/hs-backups/dev%3Fx/y"},
+		{"b2:hs-backups:dev%2Fdaily", "s3:https://s3.<region>.backblazeb2.com/hs-backups/dev%252Fdaily"},
+		{"b2:hs-backups:d\x01v", "s3:https://s3.<region>.backblazeb2.com/hs-backups/d%01v"},
+	} {
+		t.Run(tc.repo, func(t *testing.T) {
+			b, m := setupBox(t)
+			b.account, b.comment, b.localComment = false, "", ""
+			_, err := b.setup(t, m, tc.repo)
+			if want := "b2: is not supported: B2 is reached at its S3-compatible endpoint, " + tc.url + tail; err == nil || err.Error() != want {
+				t.Fatalf("err = %v\nwant  %s", err, want)
+			}
+			nothingWritten(t, b, m)
+			if b.roles() != "" || b.accountsMade != 0 {
+				t.Fatalf("units ran: %q; accounts made: %d", b.roles(), b.accountsMade)
+			}
+		})
+	}
+}
+
+// The S3 URL setup names for a b2: repository reaches the same objects:
+// read back as restic 0.18.0 reads an s3:https URL
+// (internal/backend/s3/config.go: url.Parse, the decoded path, the
+// bucket up to the first slash, the rest cleaned), it gives the bucket
+// and the path restic's b2 backend reads from the b2: URL
+// (internal/backend/b2/config.go: the bucket up to the first colon, the
+// path cleaned, its leading slash dropped).
+func TestTheS3URLNamedForAB2RepositoryIsTheSameRepository(t *testing.T) {
+	for _, repo := range []string{
+		"b2:hs-backups:dev", "b2:hs-backups:dev#daily", "b2:hs-backups:dev?x=1",
+		"b2:hs-backups:dev%2Fdaily", "b2:hs-backups:100%", "b2:hs-backups:a b/c;d,e",
+		"b2:hs-backups:/srv//dev/", "b2:hs-backups:a:b/c@d", "b2:hs-backups:a+b&c=d",
+		"b2:hs-backups:dev$DAILY", "b2:hs-backups:it's",
+	} {
+		t.Run(repo, func(t *testing.T) {
+			wantBucket, wantPath, _ := strings.Cut(strings.TrimPrefix(repo, "b2:"), ":")
+			wantPath = strings.TrimPrefix(path.Clean(wantPath), "/")
+			u, err := url.Parse(strings.TrimPrefix(b2AsS3(repo), "s3:"))
+			if err != nil {
+				t.Fatalf("%s: %v", b2AsS3(repo), err)
+			}
+			if u.RawQuery != "" || u.Fragment != "" {
+				t.Fatalf("%s: query %q, fragment %q", b2AsS3(repo), u.RawQuery, u.Fragment)
+			}
+			// setup takes it: no @, which it refuses anywhere.
+			if _, err := backendOf(b2AsS3(repo), "/env"); err != nil {
+				t.Fatalf("setup refuses %s: %v", b2AsS3(repo), err)
+			}
+			bucket, p, _ := strings.Cut(u.Path[1:], "/")
+			if p != "" {
+				p = path.Clean(p)
+			}
+			if bucket != wantBucket || p != wantPath {
+				t.Fatalf("%s reads as bucket %q path %q; b2: holds %q %q", b2AsS3(repo), bucket, p, wantBucket, wantPath)
+			}
+		})
+	}
+}
+
+// The run's remedy is a command to paste: its URL in single quotes, which
+// a POSIX shell passes on literally, so nothing in a bucket or a path —
+// a $, an &, a ;, the placeholder's < and > — is the shell's, and b2AsS3
+// leaves no ' in the URL to end the quotes.
+func TestTheRunsRemedyPastesAsOneLiteralArgument(t *testing.T) {
+	for _, repo := range []string{
+		"b2:hs-backups:dev", "b2:hs-backups:dev$DAILY", "b2:hs-backups:a&b;c", "b2:hs-backups:it's",
+		"b2:it's:x", "b2:", "b2:hs-backups:`x`|y>z", "b2:hs-backups:a\\b",
+	} {
+		t.Run(repo, func(t *testing.T) {
+			u := b2AsS3(repo)
+			if strings.Contains(u, "'") {
+				t.Fatalf("%s holds a quote", u)
+			}
+			msg := b2RunRefused(repo).Error()
+			if want := "sudo hotserve-backup setup '" + u + "' moves it"; !strings.Contains(msg, want) {
+				t.Fatalf("%s\nwant it to hold %s", msg, want)
+			}
+		})
+	}
+}
+
+// B2's region is in the name of its S3-compatible endpoint, and is read
+// from that host's name, as restic reads the host out of the URL, in
+// any ASCII case and past a port or a trailing dot (the region is the
+// name's, whatever B2 makes of the rest) — but not from a longer name
+// ending in it, a host named only in a path or behind userinfo, or one
+// whose letters are not ASCII.
+func TestB2sRegionIsReadFromItsEndpointsHostAlone(t *testing.T) {
+	longS := string(rune(0x17f))   // ſ, which (?i) would fold into s
+	kelvin := string(rune(0x212a)) // K, which strings.ToLower makes k
+	for repo, want := range map[string]string{
+		"s3:https://s3.u" + longS + "-west-004.backblazeb2.com/b":  "",
+		"s3:https://s3.us-west-004.back" + kelvin + "lazeb2.com/b": "",
+		"s3:https://s3.eu-central-003.backblazeb2.com/bucket/path": "eu-central-003",
+		"s3:https://s3.us-west-004.backblazeb2.com/bucket":         "us-west-004",
+		"s3:http://s3.us-east-005.backblazeb2.com/bucket":          "us-east-005",
+		"s3:s3.ca-east-006.backblazeb2.com/bucket/path":            "ca-east-006",
+		"s3://s3.eu-central-003.backblazeb2.com/bucket":            "eu-central-003",
+		"s3:s3.eu-central-003.backblazeb2.com":                     "eu-central-003",
+
+		"s3:https://s3.eu-central-003.backblazeb2.com:443/bucket":          "eu-central-003",
+		"s3:https://s3.eu-central-003.backblazeb2.com./bucket":             "eu-central-003",
+		"s3:s3.eu-central-003.backblazeb2.com.:443/bucket":                 "eu-central-003",
+		"s3:https://s3.eu-central-003.backblazeb2.com:/bucket":             "eu-central-003",
+		"s3:https://s3.eu-central-003.backblazeb2.com.evil.example/bucket": "",
+		"s3:https://evil.example/s3.eu-central-003.backblazeb2.com/bucket": "",
+		"s3:https://x.s3.eu-central-003.backblazeb2.com/bucket":            "",
+		"s3:https://bucket.s3.eu-central-003.backblazeb2.com/path":         "",
+		"s3:https://S3.EU-CENTRAL-003.BACKBLAZEB2.COM/bucket":              "eu-central-003",
+		"s3:https://s3.eu-central-003.backblazeb2.com:443x/bucket":         "",
+		"s3:https://s3.eu-central-003.backblazeb2.com:9000/bucket":         "eu-central-003", // the name's region, whatever the port
+		"s3:https://s3.eu-central-003.backblazeb2.com..:443/bucket":        "",
+		"s3:https://s3.eu-central-003.backblazeb2.com@evil.example/bucket": "",
+		"s3:https://u:p@s3.eu-central-003.backblazeb2.com/bucket":          "", // refused by setup before this
+		"s3:httpS://s3.eu-central-003.backblazeb2.com/bucket":              "eu-central-003",
+		"s3:HTTPS://s3.eu-central-003.backblazeb2.com/bucket":              "", // not s3:http: restic reads "HTTPS:" as the host
+		// The host as url.Parse ends it, at the ?, which restic reads too
+		// (and then refuses, the bucket being in the query).
+		"s3:https://s3.eu-central-003.backblazeb2.com?x/bucket":                          "eu-central-003",
+		"s3:s3.eu-central-003.backblazeb2.com/bucket/x://s3.us-west-004.backblazeb2.com": "eu-central-003",
+		"s3:s3.eu-central-003.backblazeb2.com@evil.example/bucket":                       "",
+		"s3:https://s3.eu-central-3.backblazeb2.com/bucket":                              "",
+		"s3:https://s3.eu-central-003.backblazeb2.com%2Fevil.example/bucket":             "",
+		"s3:https://s3.amazonaws.com/bucket":                                             "",
+		"s3:http://e2e-s3:9000/box":                                                      "",
+		"b2:bucket:path":                                                                 "",
+		"rest:https://s3.eu-central-003.backblazeb2.com/":                                "",
+		"s3:https://s3.eu-central-003.backblazeb2.com\\@evil.example/bucket":             "",
+		"s3:https://[s3.eu-central-003.backblazeb2.com]/bucket":                          "",
+		"s3:https://s3.eu-central-003.backblazeb2.com\x00.evil.example/bucket":           "",
+	} {
+		if got := b2Region(repo); got != want {
+			t.Errorf("%q: region %q, want %q", repo, got, want)
+		}
+	}
+}
+
+// status as root says what setup would have written of a file written
+// by hand for B2's S3-compatible endpoint with no region, and nothing of
+// one that has it or of another host.
+func TestStatusAdvisesB2sRegionWhereAFileHasNone(t *testing.T) {
+	for _, tc := range []struct{ repo, region, want string }{
+		{"s3:https://s3.eu-central-003.backblazeb2.com/b", "", "the repository is at B2's S3-compatible endpoint and AWS_DEFAULT_REGION is not set, or set to nothing: add AWS_DEFAULT_REGION=eu-central-003, as setup writes it"},
+		{"s3:https://s3.eu-central-003.backblazeb2.com/b", "eu-central-003", ""},
+		{"s3:https://s3.eu-central-003.backblazeb2.com/b", "us-east-1", "the repository is at B2's S3-compatible endpoint in eu-central-003, and AWS_DEFAULT_REGION is us-east-1: set AWS_DEFAULT_REGION=eu-central-003, as setup writes it"},
+		{"s3:https://s3.example.com/b", "", ""},
+		{"b2:b:p", "", ""},
+		// A URL setup refuses: status has said so, and nothing more.
+		{"s3:http://s3.eu-central-003.backblazeb2.com/b", "", ""},
+	} {
+		if got := RegionAdvice(tc.repo, tc.region); got != tc.want {
+			t.Errorf("%s, %q: %q, want %q", tc.repo, tc.region, got, tc.want)
+		}
+	}
+}
+
+// A repository at B2's S3-compatible endpoint gets its region in the
+// file, beside the key setup asks for, and so do setup's own units,
+// which read the file being written: the look, init and the write
+// check alike. Any other S3 host gets none.
+func TestSetupWritesB2sRegionForEveryUnitToRead(t *testing.T) {
+	for _, tc := range []struct{ repo, region string }{
+		{b2Repo, "eu-central-003"},
+		{"s3:http://e2e-s3:9000/box", ""},
+	} {
+		t.Run(tc.repo, func(t *testing.T) {
+			b, m := setupBox(t)
+			read := regionsRead(t, b)
+			if _, err := b.setup(t, m, tc.repo); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := strings.Join(*read, " "), "probe="+tc.region+" init="+tc.region; got != want {
+				t.Fatalf("the units read %s, want %s", got, want)
+			}
+			v := envOf(t, b.cfg.EnvFile)
+			if got, ok := v["AWS_DEFAULT_REGION"]; got != tc.region || ok != (tc.region != "") {
+				t.Fatalf("the file holds %v", v)
+			}
+			said := strings.Contains(m.saidAll(), "B2's region, eu-central-003, from the endpoint's name, goes in the file as AWS_DEFAULT_REGION")
+			if said != (tc.region != "") || m.askedAll() != "Storage key id (AWS_ACCESS_KEY_ID): \nsecret:Storage secret key (AWS_SECRET_ACCESS_KEY): \nType stored to go on: " {
+				t.Fatalf("asked:\n%s\nsaid:\n%s", m.askedAll(), m.saidAll())
+			}
+			// What to keep off the box names the region on B2, and is
+			// as it was elsewhere.
+			keep := "Store it off the box now, with the repository URL, " + tc.repo + ", and the storage key: with those three, "
+			if tc.region != "" {
+				keep = "Store it off the box now, with the repository URL, " + tc.repo + ", the storage key, and B2's region, " + tc.region + ", set as AWS_DEFAULT_REGION wherever restic runs: with those four, "
+			}
+			if !strings.Contains(m.saidAll(), keep) {
+				t.Fatalf("said:\n%s\nwant it to hold %s", m.saidAll(), keep)
+			}
+		})
+	}
+	// The write check of a repository that was there reads it too.
+	b, m := setupBox(t)
+	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 12}
+	m.answers = []string{"AKIDX", "the-secret", "its-own-password"}
+	read := regionsRead(t, b)
+	if _, err := b.setup(t, m, b2Repo); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(*read, " "), "probe=eu-central-003 open=eu-central-003 write=eu-central-003"; got != want {
+		t.Fatalf("the units read %s, want %s", got, want)
+	}
+}
+
+// regionsRead records, for every unit that reads a credential file, its
+// role and the AWS_DEFAULT_REGION the manager would give it, as the
+// unit starts.
+func regionsRead(t *testing.T, b *box) *[]string {
+	t.Helper()
+	read := &[]string{}
+	b.before = func(s unit.Spec) {
+		if s.EnvironmentFile == "" {
+			return
+		}
+		raw, err := os.ReadFile(s.EnvironmentFile)
+		must(t, err)
+		v, _ := envfile.Parse(raw)
+		*read = append(*read, roleRe.FindStringSubmatch(s.Name)[1]+"="+v["AWS_DEFAULT_REGION"])
+	}
+	return read
+}
+
 // What setup does not ask for, the run still uses: status must not
 // warn of it. What setup refuses of the value itself — whitespace at an
-// end, a control character — status warns of too.
+// end, a control character — status warns of too, and b2:, which the
+// run refuses as well.
 func TestABackendWrittenByHandIsUsable(t *testing.T) {
-	for _, repo := range []string{"gs:bucket:path", "swift:container:/path", "s3:http://h/b", "b2:b:p", "rest:https://h/"} {
+	for _, repo := range []string{"gs:bucket:path", "swift:container:/path", "s3:http://h/b", "rest:https://h/", b2Repo} {
 		if err := RepositoryUsable(repo, "/etc/x"); err != nil {
 			t.Errorf("%s: %v", repo, err)
 		}
 	}
-	for _, repo := range []string{"sftp:h:/p", "local:/x", "/x", "azure:c:p", "rclone:r:b", "s3:http://u:p@h/b", "s3:u:p@h/b", "s3:http://h/b ", " s3:http://h/b", "s3:http://h/b\x01", ""} {
+	for _, repo := range []string{"sftp:h:/p", "local:/x", "/x", "azure:c:p", "rclone:r:b", "s3:http://u:p@h/b", "s3:u:p@h/b", "s3:http://h/b ", " s3:http://h/b", "s3:http://h/b\x01", "", "b2:b:p", "b2:"} {
 		if err := RepositoryUsable(repo, "/etc/x"); err == nil {
 			t.Errorf("%q: usable", repo)
 		}
+	}
+	if err := RepositoryUsable("b2:hs-backups:dev", "/etc/x"); err == nil || err.Error() != "b2: is not supported: B2 is reached at its S3-compatible endpoint, s3:https://s3.<region>.backblazeb2.com/hs-backups/dev, with an application key, not the master key; restic's own B2 backend retries a failed upload without end" {
+		t.Errorf("status's word on b2: %v", err)
 	}
 }
 
@@ -409,7 +699,10 @@ func TestEachBackendIsAskedForItsOwnVariables(t *testing.T) {
 		prompts string
 		keys    []string
 	}{
-		{"b2:bucket:path", "Storage key id (B2_ACCOUNT_ID): \nsecret:Storage secret key (B2_ACCOUNT_KEY): \nType stored to go on: ", []string{"B2_ACCOUNT_ID", "B2_ACCOUNT_KEY"}},
+		// B2 through its S3-compatible endpoint: the S3 pair, and the
+		// region, which is not asked.
+		{b2Repo, "Storage key id (AWS_ACCESS_KEY_ID): \nsecret:Storage secret key (AWS_SECRET_ACCESS_KEY): \nType stored to go on: ", []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"}},
+		{"s3:http://e2e-s3:9000/box", "Storage key id (AWS_ACCESS_KEY_ID): \nsecret:Storage secret key (AWS_SECRET_ACCESS_KEY): \nType stored to go on: ", []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}},
 	} {
 		t.Run(tc.repo, func(t *testing.T) {
 			b, m := setupBox(t)
@@ -420,7 +713,7 @@ func TestEachBackendIsAskedForItsOwnVariables(t *testing.T) {
 				t.Fatalf("asked:\n%s", m.askedAll())
 			}
 			v := envOf(t, b.cfg.EnvFile)
-			if v[tc.keys[0]] != "AKIDX" || v[tc.keys[1]] != "the-secret" || len(v) != 4 {
+			if v[tc.keys[0]] != "AKIDX" || v[tc.keys[1]] != "the-secret" || len(v) != 2+len(tc.keys) {
 				t.Fatalf("the file holds %v", v)
 			}
 		})
@@ -945,14 +1238,14 @@ func TestWhereTheProbeCannotTellInitAnswers(t *testing.T) {
 	}
 }
 
-// A storage that refuses the look at once — B2 a wrong key, or a bucket
-// the key may not reach [measured, RC check 1] — is said in restic's
-// words, and the key is asked for again before any password is made:
-// init's first step is the same opening, and would be refused the same.
+// A storage that refuses the look at once — a 403, which restic's S3
+// backend takes as final — is said in restic's words, and the key is
+// asked for again before any password is made: init's first step is
+// the same opening, and would be refused the same.
 func TestAKeyTheStorageRefusesAtTheLookIsAskedForAgainBeforeAnyPassword(t *testing.T) {
 	b, m := setupBox(t)
 	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.probeErr = refusedB2
+	b.probeErr = refusedAtOnce
 	looks := 0
 	b.before = func(s unit.Spec) {
 		if strings.Contains(s.Name, "_probe_") {
@@ -964,19 +1257,19 @@ func TestAKeyTheStorageRefusesAtTheLookIsAskedForAgainBeforeAnyPassword(t *testi
 		}
 	}
 	m.answers = []string{"K001", "wrong", "K001", "the-secret", "stored"}
-	rep, err := b.setup(t, m, "b2:hs-lifecycle-test:rc-check1")
+	rep, err := b.setup(t, m, b2Repo)
 	if err != nil {
 		t.Fatalf("%v\nsaid:\n%s", err, m.saidAll())
 	}
 	if got, want := b.roles(), "plan probe probe init"; got != want {
 		t.Fatalf("units: %s, want %s", got, want)
 	}
-	if got, want := m.askedAll(), "Storage key id (B2_ACCOUNT_ID): \nsecret:Storage secret key (B2_ACCOUNT_KEY): \nStorage key id (B2_ACCOUNT_ID): \nsecret:Storage secret key (B2_ACCOUNT_KEY): \nType stored to go on: "; got != want {
+	if got, want := m.askedAll(), "Storage key id (AWS_ACCESS_KEY_ID): \nsecret:Storage secret key (AWS_SECRET_ACCESS_KEY): \nStorage key id (AWS_ACCESS_KEY_ID): \nsecret:Storage secret key (AWS_SECRET_ACCESS_KEY): \nType stored to go on: "; got != want {
 		t.Fatalf("asked:\n%s", got)
 	}
 	said := m.saidAll()
 	for _, want := range []string{
-		"restic could not open the repository (exit 1): Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:",
+		refusedSaid,
 		"the storage refused the key, or could not be reached: the key id and secret again",
 	} {
 		if !strings.Contains(said, want) {
@@ -989,21 +1282,21 @@ func TestAKeyTheStorageRefusesAtTheLookIsAskedForAgainBeforeAnyPassword(t *testi
 		}
 	}
 	// The password came after the refusal, once.
-	if i, j := strings.Index(said, "b2_authorize_account"), strings.Index(said, "Repository password (new)"); i < 0 || j < i || len(passwordRe.FindAllString(said, -1)) != 1 {
+	if i, j := strings.Index(said, "Access Denied"), strings.Index(said, "Repository password (new)"); i < 0 || j < i || len(passwordRe.FindAllString(said, -1)) != 1 {
 		t.Fatalf("the password's place:\n%s", said)
 	}
 	pw := shownPassword(t, m)
-	if v := envOf(t, b.cfg.EnvFile); v["RESTIC_PASSWORD"] != pw || v["B2_ACCOUNT_KEY"] != "the-secret" || !rep.New {
+	if v := envOf(t, b.cfg.EnvFile); v["RESTIC_PASSWORD"] != pw || v["AWS_SECRET_ACCESS_KEY"] != "the-secret" || !rep.New {
 		t.Fatalf("the file holds %v; report %+v", v, rep)
 	}
 	// Three refusals at the look: the end, in restic's words, with no
 	// password ever shown and so nothing said of one.
 	b, m = setupBox(t)
 	b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-	b.probeErr = refusedB2
+	b.probeErr = refusedAtOnce
 	m.answers = []string{"K001", "wrong", "K001", "wrong", "K001", "wrong"}
-	_, err = b.setup(t, m, "b2:hs-lifecycle-test:rc-check1")
-	if err == nil || err.Error() != "restic could not open the repository (exit 1): Fatal: unable to open repository at b2:hs-lifecycle-test:rc-check1: b2.NewClient: b2_authorize_account: 401:" {
+	_, err = b.setup(t, m, b2Repo)
+	if err == nil || err.Error() != refusedSaid {
 		t.Fatalf("err = %v", err)
 	}
 	if got, want := b.roles(), "plan probe probe probe"; got != want || len(passwordRe.FindAllString(m.saidAll(), -1)) != 0 || strings.Count(m.saidAll(), "the key id and secret again") != 2 {
@@ -1022,12 +1315,12 @@ func TestAKeyTheStorageRefusesAtTheLookIsAskedForAgainBeforeAnyPassword(t *testi
 		if strings.Contains(s.Name, "_init_") {
 			b.hang = ""
 			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-			b.probeErr = refusedB2
+			b.probeErr = refusedAtOnce
 		}
 	}
 	m.answers = []string{"K001", "wrong", "stored", "K001", "wrong", "K001", "wrong"}
-	_, err = b.setup(t, m, "b2:hs-lifecycle-test:rc-check1")
-	if err == nil || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") || !strings.HasPrefix(err.Error(), "restic could not open the repository (exit 1): Fatal: unable to open repository at b2:") {
+	_, err = b.setup(t, m, b2Repo)
+	if err == nil || !strings.HasSuffix(err.Error(), "the password shown above was never used: discard it") || !strings.HasPrefix(err.Error(), refusedSaid) {
 		t.Fatalf("err = %v", err)
 	}
 	if got, want := b.roles(), "plan probe init probe probe"; got != want || !strings.Contains(m.saidAll(), "the key id and secret again (the password shown above still applies)") {
@@ -1241,7 +1534,7 @@ func TestResticsWordsInsideTheURLAreNotReadAsItsAnswer(t *testing.T) {
 		refused, halfThere bool
 	}{
 		{"Fatal: create repository at s3:x failed: Fatal: unable to open repository at s3:x: client.BucketExists: The request signature we calculated does not match the signature you provided.", true, false},
-		{"Fatal: create repository at b2:x:y failed: Fatal: unable to open repository at b2:x:y: b2.NewClient: b2_authorize_account: 401:", true, false},
+		{"Fatal: create repository at s3:x failed: Fatal: unable to open repository at s3:x: client.BucketExists: Access Denied.", true, false},
 		{"Fatal: create repository at s3:x failed: parsing repository location failed: invalid backend", true, false},
 		{"Fatal: create repository at s3:x failed: Fatal: unable to open repository at s3:x: config file already exists", false, false},
 		{"Fatal: create key in repository at s3:x failed: repository already contains keys", false, true},
@@ -1374,9 +1667,9 @@ func TestAMistakeLeavesAWorkingSetupAsItWas(t *testing.T) {
 		}, "restic could not make or open the repository (exit 1): Fatal: create repository at"},
 		{"wrong key, refused at the look", func(b *box, m *term) {
 			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
-			b.probeErr = refusedB2
+			b.probeErr = refusedAtOnce
 			m.answers = []string{"AKIDX", "wrong", "AKIDX", "wrong", "AKIDX", "wrong"}
-		}, "restic could not open the repository (exit 1): Fatal: unable to open repository at b2:"},
+		}, "restic could not open the repository (exit 1): Fatal: unable to open config file: Stat: Access Denied."},
 		{"files of a repository and no config", func(b *box, m *term) {
 			b.outcome["probe"] = unit.Outcome{Result: "exit-code", ExitStatus: 10}
 			b.outcome["init"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
@@ -1514,14 +1807,20 @@ func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
 		old  string // the file before, or none
 		id   string // the repository id setup keeps beside the record, or none
 		why  string // why the record goes aside; kept when empty
+		to   string // the URL setup is given, where not the fixture's
 	}{
-		{"another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/other\nRESTIC_PASSWORD=x\n", other, "it was written against another repository (id 01234567)"},
-		{"the same URL, another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", other, "it was written against another repository (id 01234567)"},
-		{"the same repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", repoID, ""},
-		{"the same repository, by another URL", "RESTIC_REPOSITORY=s3:http://e2e-s3.internal:9000/box\nRESTIC_PASSWORD=x\n", repoID, ""},
-		{"no id recorded", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", "", "no setup recorded which repository it was written against"},
-		{"no file before", "", repoID, "no credential file was there to tie it to this repository"},
-		{"the same URL, re-made", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", repoID, "the repository was made by this setup, so it holds none of the record's snapshots"},
+		{"another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/other\nRESTIC_PASSWORD=x\n", other, "it was written against another repository (id 01234567)", ""},
+		{"the same URL, another repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", other, "it was written against another repository (id 01234567)", ""},
+		{"the same repository", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", repoID, "", ""},
+		{"the same repository, by another URL", "RESTIC_REPOSITORY=s3:http://e2e-s3.internal:9000/box\nRESTIC_PASSWORD=x\n", repoID, "", ""},
+		// A box set up on b2: before setup refused it, moved to B2's
+		// S3-compatible endpoint: the same objects, so the same id, and
+		// the record is kept; the file is written whole, B2's own key
+		// lines gone.
+		{"the same repository, from b2: to B2's S3 endpoint", "RESTIC_REPOSITORY=b2:hs-rc-bucket:rc-check1\nRESTIC_PASSWORD=x\nB2_ACCOUNT_ID=K001\nB2_ACCOUNT_KEY=k\n", repoID, "", b2Repo},
+		{"no id recorded", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", "", "no setup recorded which repository it was written against", ""},
+		{"no file before", "", repoID, "no credential file was there to tie it to this repository", ""},
+		{"the same URL, re-made", "RESTIC_REPOSITORY=s3:http://e2e-s3:9000/box\nRESTIC_PASSWORD=x\n", repoID, "the repository was made by this setup, so it holds none of the record's snapshots", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, m := setupBox(t)
@@ -1541,9 +1840,16 @@ func TestTheRecordIsPutAsideWithAChangeOfRepository(t *testing.T) {
 				must(t, os.WriteFile(idFile, []byte(tc.id+"\n"), 0o644))
 			}
 			must(t, record.Write(filepath.Join(b.cfg.StateDir, "status.json"), &record.Status{Apps: map[string]*record.App{"blog": {Class: record.OK}}}))
-			rep, err := b.setup(t, m, "s3:http://e2e-s3:9000/box")
+			to := "s3:http://e2e-s3:9000/box"
+			if tc.to != "" {
+				to = tc.to
+			}
+			rep, err := b.setup(t, m, to)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if v := envOf(t, b.cfg.EnvFile); v["RESTIC_REPOSITORY"] != to || v["B2_ACCOUNT_ID"] != "" || v["B2_ACCOUNT_KEY"] != "" || (to == b2Repo) != (v["AWS_DEFAULT_REGION"] == "eu-central-003") {
+				t.Fatalf("the file holds %v", v)
 			}
 			// The id of the repository the file now names is kept beside
 			// the record, for everyone to read, as the record is.

@@ -7,12 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/smallhoursorg/hotserve/backups/dump"
 	"github.com/smallhoursorg/hotserve/backups/envfile"
@@ -319,25 +325,285 @@ func backendOf(repo, envFile string) ([]credential, error) {
 		if rest == "" {
 			return nil, fmt.Errorf("%s: names no bucket", scheme)
 		}
-		// restic takes the host with or without a scheme (s3:host/bucket):
-		// what is looked at is the authority either way, not what
-		// url.Parse makes of "user:pass@host" with no scheme before it.
-		authority := strings.TrimPrefix(rest, "//") // s3://host/bucket: restic's other form
-		if i := strings.Index(rest, "://"); i >= 0 {
-			authority = rest[i+3:]
+		// Any @ at all, not only one in the authority: a secret may hold a
+		// /, ? or # that ends the authority before its @ (restic then fails
+		// to parse the URL, printing it whole), and no bucket name holds
+		// an @ — a path that does is refused with them, and said to be.
+		if strings.Contains(repo, "@") {
+			return nil, errors.New("the repository URL holds an @, which is refused: a key and secret in it are on the command line and in the shell's history, so give the URL without them and type them when asked; no bucket name holds an @, so a path with one is not supported")
 		}
-		authority, _, _ = strings.Cut(authority, "/")
-		if strings.Contains(authority, "@") {
-			return nil, errors.New("credentials in the repository URL are on the command line and in the shell's history; give the URL without them, and type them when asked")
+		// B2's S3-compatible endpoint takes HTTPS alone [Backblaze's
+		// documentation]: said here, before any prompt, not by the storage
+		// after the key is typed.
+		if urlScheme, authority := s3Split(repo); urlScheme == "http" && b2RegionOf(authority) != "" {
+			return nil, errors.New("B2's S3-compatible endpoint takes HTTPS alone: give the URL as s3:https://…")
 		}
 		return []credential{{"Storage key id", "AWS_ACCESS_KEY_ID", false}, {"Storage secret key", "AWS_SECRET_ACCESS_KEY", true}}, nil
 	case "b2":
-		if rest == "" {
-			return nil, errors.New("b2: names no bucket")
-		}
-		return []credential{{"Storage key id", "B2_ACCOUNT_ID", false}, {"Storage secret key", "B2_ACCOUNT_KEY", true}}, nil
+		return nil, b2Refused(repo)
 	}
-	return nil, fmt.Errorf("%q is not a repository restic knows (s3: or b2:)", scheme+":")
+	return nil, fmt.Errorf("%q is not a repository restic knows (setup asks for s3:)", scheme+":")
+}
+
+// s3Authority is an s3: repository URL's authority — the host, with
+// any userinfo and port as written — where restic finds its host
+// (internal/backend/s3/config.go): restic hands anything after "s3:"
+// that begins "http" to url.Parse, which reads a scheme in any case
+// (httpS: is https:), so there the authority follows the scheme's
+// "://", up to where url.Parse ends one (a /, ? or #); after s3:// or
+// s3: otherwise, up to the first slash. Never at a "://" further on, in
+// the path. Not url.Parse's Host, which drops a "user:pass@" that is
+// still on the command line and in the shell's history.
+func s3Authority(repo string) string {
+	_, authority := s3Split(repo)
+	return authority
+}
+
+// s3Split is s3Authority's reading, with the URL's scheme in lower case
+// as url.Parse gives it ("" for the forms with none).
+func s3Split(repo string) (scheme, authority string) {
+	rest := strings.TrimPrefix(repo, "s3:")
+	end := "/"
+	switch {
+	case strings.HasPrefix(rest, "http"):
+		if i := strings.Index(rest, ":"); i >= 0 && isScheme(rest[:i]) && strings.HasPrefix(rest[i:], "://") {
+			scheme = strings.ToLower(rest[:i])
+			rest, end = rest[i+len("://"):], "/?#"
+		}
+	case strings.HasPrefix(rest, "//"):
+		rest = rest[len("//"):]
+	}
+	if i := strings.IndexAny(rest, end); i >= 0 {
+		rest = rest[:i]
+	}
+	return scheme, rest
+}
+
+// isScheme is whether s is a URL scheme as url.Parse reads one: a
+// letter, then letters, digits, +, - or . (RFC 3986, 3.1).
+func isScheme(s string) bool {
+	for i, c := range s {
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z':
+		case i > 0 && ('0' <= c && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
+}
+
+// b2Why is why a b2: repository is refused, at setup and at every run:
+// restic's own B2 backend — the blazer library, 0.6.1 in Debian 13's
+// restic — retries an upload whose connection fails on the same upload
+// URL, without end and without a word (#177: a run's lock file, 27 h).
+// B2 is reached through its S3-compatible endpoint instead (#354),
+// where minio-go's retries of a request are counted and restic's own
+// end after a quarter of an hour (restic 0.18.0, minio-go 7.0.89).
+const b2Why = "restic's own B2 backend retries a failed upload without end"
+
+// b2Refused is setup's word on a b2: repository, which status as root
+// says of a file that names one: the URL of the same repository at B2's
+// S3-compatible endpoint, with the region left for the operator — it is
+// in the bucket's endpoint, which a b2: URL does not hold.
+func b2Refused(repo string) error {
+	return fmt.Errorf("b2: is not supported: B2 is reached at its S3-compatible endpoint, %s, with an application key, not the master key; %s", b2AsS3(repo), b2Why)
+}
+
+// b2RunRefused is a run's, a restore's and a drill's word on a file that
+// names a b2: repository: what to run, first, so that the record's cut
+// (record.Text, 300 runes) takes the reason before the remedy — short,
+// so that the cut takes neither for a bucket and path of up to 59
+// characters as escaped (b2AsS3), the slash between them counted. The URL is in single quotes, so that the command pasted as
+// it is reaches setup whole: the placeholder's < and >, and a $, & or ;
+// the path may hold, are the shell's otherwise; b2AsS3 leaves no ' in it
+// to end the quotes.
+func b2RunRefused(repo string) error {
+	return fmt.Errorf("the repository is b2:, which is not supported: sudo hotserve-backup setup '%s' moves it to B2's S3-compatible endpoint, with an application key; %s", b2AsS3(repo), b2Why)
+}
+
+// b2AsS3 is a b2: repository's URL at B2's S3-compatible endpoint: the
+// bucket and the path as restic's b2 backend reads them
+// (internal/backend/b2/config.go: the bucket up to the first colon,
+// the path cleaned and its leading slash dropped), under which both of
+// restic's backends lay the repository out alike, so the one URL is the
+// other's objects. What is not there is a placeholder; the region always
+// is. A bucket is one B2 can name or a placeholder, and each path segment
+// is escaped, a ' among what is (b2RunRefused quotes the URL in '…').
+// Cleaned, since it is said whole.
+func b2AsS3(repo string) string {
+	bucket, prefix, _ := strings.Cut(strings.TrimPrefix(repo, "b2:"), ":")
+	if !b2BucketName.MatchString(bucket) {
+		// None, or one no B2 bucket is named: escaped, a / in it would be
+		// read back as the bucket's end, so it is named no URL.
+		bucket = "<bucket>"
+	}
+	u := "s3:https://s3.<region>.backblazeb2.com/" + bucket
+	if prefix != "" {
+		prefix = strings.TrimPrefix(path.Clean(prefix), "/")
+		switch {
+		case prefix == ".." || strings.HasPrefix(prefix, "../"):
+			// A path that climbs, which path.Clean leaves: B2 takes it as
+			// written, but a server or a proxy on the way may resolve the
+			// dot segments of an S3 request's path, so no URL is named that
+			// may reach other objects.
+			u += "/<path>"
+		case prefix != "" && prefix != ".":
+			// Each segment escaped: B2 reads the path as written, and restic
+			// reads an s3:https URL's path as url.Parse decodes it
+			// (internal/backend/s3/config.go), where a # or a ? would end the
+			// path and a %2F would be a slash — another repository's objects.
+			segments := strings.Split(prefix, "/")
+			for i, s := range segments {
+				segments[i] = s3Escape(s)
+			}
+			u += "/" + strings.Join(segments, "/")
+		}
+	}
+	return record.Clean(u)
+}
+
+// b2BucketName is a B2 bucket name its S3-compatible endpoint takes:
+// letters, digits and hyphens [Backblaze's documentation,
+// b2_create_bucket], in lower case, as an S3 bucket is named — one with
+// a capital B2's native API may hold, but the S3 endpoint may not reach
+// it by that name, and whether it matches it in another case is not
+// measured, so it is named no URL.
+var b2BucketName = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+// s3Escape is one segment of an S3 URL's path, escaped so that restic's
+// url.Parse decodes it back (url.PathEscape), with its @ escaped too,
+// which setup refuses anywhere in an s3: URL.
+func s3Escape(s string) string {
+	return strings.ReplaceAll(url.PathEscape(s), "@", "%40")
+}
+
+// b2Host is the host of Backblaze B2's S3-compatible endpoint,
+// s3.<region>.backblazeb2.com, its second label the region [Backblaze's
+// documentation], matched in lower case (b2RegionOf lowers an ASCII
+// host first: DNS and SigV4's signed host read no case), after any port
+// and trailing dot are taken off.
+var b2Host = regexp.MustCompile(`^s3\.([a-z]{2}-[a-z]+-[0-9]{3})\.backblazeb2\.com$`)
+
+// b2RegionOf is the region in an authority that is B2's S3-compatible
+// endpoint, or "", read past a port (an empty one too) and a trailing
+// dot.
+func b2RegionOf(authority string) string {
+	for i := 0; i < len(authority); i++ {
+		if authority[i] >= utf8.RuneSelf {
+			return "" // no B2 host; and a fold of ſ or K into [a-z] is never read as one
+		}
+	}
+	host := strings.ToLower(authority)
+	// An empty port too, which url.Parse takes for the scheme's own.
+	if i := strings.LastIndexByte(host, ':'); i >= 0 && (i == len(host)-1 || isDigits(host[i+1:])) {
+		host = host[:i]
+	}
+	host = strings.TrimSuffix(host, ".")
+	if m := b2Host.FindStringSubmatch(host); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// RegionAdvice is what status as root says of a credential file whose
+// repository is at B2's S3-compatible endpoint and which sets no
+// AWS_DEFAULT_REGION, or another than the endpoint's name holds — one
+// written by hand — or "": what setup would have written (b2Region).
+// Nothing of a URL setup refuses, which status has said instead.
+func RegionAdvice(repo, region string) string {
+	if RepositoryUsable(repo, "") != nil {
+		return ""
+	}
+	r := b2Region(repo)
+	switch {
+	case r == "":
+		return ""
+	case region == "":
+		return "the repository is at B2's S3-compatible endpoint and AWS_DEFAULT_REGION is not set, or set to nothing: add AWS_DEFAULT_REGION=" + r + ", as setup writes it"
+	case region != r:
+		return "the repository is at B2's S3-compatible endpoint in " + r + ", and AWS_DEFAULT_REGION is " + record.Text(region) + ": set AWS_DEFAULT_REGION=" + r + ", as setup writes it"
+	}
+	return ""
+}
+
+// b2Region is the region of a repository at B2's S3-compatible
+// endpoint, read from the host as restic reads the host from the URL
+// (internal/backend/s3/config.go), or "" for any other repository.
+// Setup writes it into the file as AWS_DEFAULT_REGION. Without it,
+// minio-go first asks the storage where the bucket is, a request B2
+// grants only to a key holding readBuckets, which the guide's keys do
+// not, and on its refusal signs every request for us-east-1
+// (minio-go 7.0.89, bucket-cache.go); and that one request is not
+// retried, so a 500 on it puts restic's retry lines on stderr beside a
+// listing, which is then not believed (besides).
+func b2Region(repo string) string {
+	if !strings.HasPrefix(repo, "s3:") {
+		return ""
+	}
+	// Userinfo matches no B2 host, and setup refuses it before this. The
+	// region is the name's, read past a port or a trailing dot: whether B2
+	// takes the host so written is another question, not measured.
+	return b2RegionOf(s3Authority(repo))
+}
+
+// readRegular reads a file that is a regular one, following a link as
+// the manager does, and opened O_NONBLOCK so that a FIFO is refused, not
+// waited on.
+func readRegular(name string) ([]byte, error) {
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // root's own file, a constant of the installation
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("it is not a regular file (%s)", fi.Mode().Type())
+	}
+	return io.ReadAll(f)
+}
+
+// repositoryInUse is what a run, a restore and a drill ask of the
+// repository the credential file names, before any unit: that it is
+// not a b2: one. The value is read as the manager reads it (envfile:
+// the last assignment, quotes and whitespace as systemd takes them),
+// and as restic tells a backend by its URL: the scheme, as written. A
+// file the manager could not read either is said here, in place of
+// every unit failing to start. Opened without blocking and read only
+// if it is a regular file: a FIFO in its place would otherwise hold the
+// run, and its lock, for ever.
+func repositoryInUse(envFile string) error {
+	raw, err := readRegular(envFile)
+	if err != nil {
+		return fmt.Errorf("the credential file %s could not be read: %w", envFile, err)
+	}
+	v, findings := envfile.Parse(raw)
+	if why := envfile.RefusedWhole(findings); why != "" {
+		// The manager refuses the whole file, and every unit with it.
+		return fmt.Errorf("the credential file %s: %s", envFile, why)
+	}
+	// restic also takes the repository from a file named by
+	// RESTIC_REPOSITORY_FILE, which this does not read: a repository
+	// named there is one no refusal here could see.
+	if v["RESTIC_REPOSITORY_FILE"] != "" {
+		return fmt.Errorf("the credential file %s names the repository in RESTIC_REPOSITORY_FILE, which is not supported: name it in RESTIC_REPOSITORY", envFile)
+	}
+	if repo := v["RESTIC_REPOSITORY"]; strings.HasPrefix(repo, "b2:") {
+		return b2RunRefused(repo)
+	}
+	return nil
 }
 
 // RepositoryUsable says why the box could not use the repository the
@@ -536,12 +802,19 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		term.Say(msg)
 	}
 	pairs := []envfile.Pair{{Key: "RESTIC_REPOSITORY", Value: o.Repository}, {Key: "RESTIC_PASSWORD"}}
+	// B2's region is in its endpoint's name, and is not asked: written
+	// with the rest, so that setup's own units read it too (b2Region).
+	if region := b2Region(o.Repository); region != "" {
+		pairs = append(pairs, envfile.Pair{Key: "AWS_DEFAULT_REGION", Value: region})
+		term.Say("B2's region, " + region + ", from the endpoint's name, goes in the file as AWS_DEFAULT_REGION")
+	}
+	fixed := len(pairs)
 	for attempt := 1; ; attempt++ {
 		// Whether an earlier attempt's init ran with the shown password:
 		// a repository found there, by the look or by this attempt's
 		// init, may be one that init made.
 		ranBefore := s.initRan
-		pairs = pairs[:2]
+		pairs = pairs[:fixed]
 		for _, c := range creds {
 			v, err := s.ask(ctx, c.label+" ("+c.variable+"): ", c.secret)
 			if err != nil {
@@ -611,7 +884,13 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 				return nil, err
 			}
 			term.Say("Repository password (new): " + s.password)
-			term.Say("Store it off the box now, with the repository URL, " + o.Repository + ", and the storage key: with those three, `restic -r <url>` reads every backup from any machine; without the password nothing can.")
+			keep := "the repository URL, " + o.Repository + ", and the storage key: with those three"
+			if r := b2Region(o.Repository); r != "" {
+				// What restic needs beside them there: the guide's keys may not
+				// ask B2 where the bucket is (b2Region).
+				keep = "the repository URL, " + o.Repository + ", the storage key, and B2's region, " + r + ", set as AWS_DEFAULT_REGION wherever restic runs: with those four"
+			}
+			term.Say("Store it off the box now, with " + keep + ", `restic -r <url>` reads every backup from any machine; without the password nothing can.")
 			if err := s.confirmStored(ctx); err != nil {
 				return nil, s.err(err)
 			}
@@ -984,13 +1263,15 @@ const (
 
 // look asks whether a repository is there, with the throwaway password,
 // under its own short clock. restic's exit 1 is the storage answering
-// at once — a key refused, a bucket out of reach, a host that does not
-// resolve — in its own words on stderr, which are returned with it
-// [measured: B2 answers a wrong key or a bucket out of reach with 401
-// at once; S3 retries a wrong secret and a bucket not there, and the
-// clock ends the look]. Only the clock, and an exit 0 that says
-// nothing, leave the question to init; any other failure is the unit's
-// own, and ends setup before any password is made.
+// at once, in its own words on stderr, which are returned with it.
+// Over S3, restic gives up at once only on an answer its backend holds
+// permanent, a 403 (AccessDenied, what minio-go makes of a 403 with no
+// body, a HEAD's) [restic 0.18.0, internal/backend/s3/s3.go
+// IsPermanentError]; a wrong secret and a bucket not there are retried,
+// and the clock ends the look [measured, on rclone's S3 server]. Only
+// the clock, and an exit 0 that says nothing, leave the question to
+// init; any other failure is the unit's own, and ends setup before any
+// password is made.
 func (s *setup) look(ctx context.Context) (lookResult, string, error) {
 	o, message, err := s.repository(ctx, "probe", setupProbeClock, s.cfg.Restic, "cat", "config", "--no-lock")
 	if err != nil {
@@ -1064,16 +1345,19 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 // writable is whether this key can write to a repository that was
 // there already; one setup made was written by its init. The opening
 // only reads, and a key that may read and not write passed it: every
-// run then failed a quarter of an hour in [RC check 6, on B2]. Asked
-// with the opening's own command without --no-lock, which writes a lock
-// file and removes it — 0.7 s where the key may write [measured]. Where
-// it may not, restic exits 1 at once on a storage that says so plainly
-// (S3's 403) and retries for a quarter of an hour on one that does not
-// (B2's 401) [measured], so it has the opening's clock. A storage that
-// refuses or retries writes alone is refused the same way, named as
-// the other cause. Another restic holding the repository exclusively
-// (exit 11, at once [measured]) is no refusal of the key: said, and
-// setup goes on.
+// run then failed a quarter of an hour in [RC check 6, on B2's native
+// API]. Asked with the opening's own command without --no-lock, which
+// writes a lock file and removes it — 0.7 s where the key may write
+// [measured]. Where it may not, restic exits 1 at once on a storage
+// that says so plainly (a 403 [measured:
+// rc-runs/rc-results/M3-readonly-proxy.out]) and retries one that does
+// not (the Internal Error of `rclone serve s3 --read-only` [measured:
+// rc-runs/rc-results/M1-readonly-storage.out]; a 500, the e2e's second
+// read-only case), for a quarter of an hour by its own limit, so it has
+// the opening's clock. A storage that refuses or retries writes alone
+// is refused the same way, named as the other cause. Another restic
+// holding the repository exclusively (exit 11, at once [measured]) is
+// no refusal of the key: said, and setup goes on.
 func (s *setup) writable(ctx context.Context) error {
 	s.term.Say(fmt.Sprintf("checking that this key can write to it (up to %s)", setupClock))
 	// What is said is what happened — exit 1, or the clock — that the
@@ -1264,7 +1548,7 @@ func repositoryExists(message string) bool {
 // repository at <url> failed:", the wrapper init puts on its first step
 // alone — the backend's Create, and what comes before it: the URL that
 // does not parse, the host that does not resolve, the key refused
-// (B2's `b2_authorize_account: 401`, S3's signature mismatch), the
+// (S3's signature mismatch [measured, on rclone's S3 server]), the
 // bucket out of reach [restic 0.18.0, cmd/restic/cmd_init.go:96, with
 // "unable to open repository at" nested for the backend's own failure].
 // An init that got past the opening opens with "create key in

@@ -86,6 +86,23 @@ for r in sftp:user@host:/srv/backups /srv/backups local:/srv/backups rclone:remo
 done
 [ ! -e /srv/backups ] && pass "nothing was made at the refused path" || fail "/srv/backups exists"
 [ ! -e "$ETC" ] && pass "and nothing under /etc" || fail "$ETC exists"
+# b2: in every form restic reads, refused naming the same repository
+# at B2's S3-compatible endpoint: restic's own B2 backend retries a
+# failed upload without end (#177).
+for r in b2:hs-backups:dev b2:hs-backups b2:; do
+	if at_tty hotserve-backup setup "$r" >"$OUT" 2>&1; then
+		fail "setup $r exited 0"
+	elif says "Storage key id"; then
+		fail "setup $r asked before refusing"
+	elif ! says "b2: is not supported: B2 is reached at its S3-compatible endpoint, s3:https://s3.<region>.backblazeb2.com/"; then
+		fail "setup $r: $(cat "$OUT")"
+	else
+		pass "refused before any prompt: $r — $(grep -o 's3:https://[^,]*' "$OUT" | head -1)"
+	fi
+done
+says "s3:https://s3.<region>.backblazeb2.com/<bucket>, with an application key, not the master key" && pass "b2: with no bucket names the bucket as a placeholder" || fail "b2: with no bucket: $(cat "$OUT")"
+id hotserve-backup >/dev/null 2>&1 && fail "setup b2: made the account" || pass "and made no account"
+[ ! -e "$ETC" ] && pass "and nothing under /etc" || fail "$ETC exists"
 
 echo "=== setup 3: a fresh setup at a terminal ==="
 t0=$(date +%s)
@@ -184,7 +201,9 @@ says "Repository password (new)" && fail "a password was made for a repository t
 # A key that may read and not write. The storage through a proxy of the
 # box's own that passes every read and refuses every write: plainly
 # (403), where restic exits 1 at once, and then in a way restic retries
-# (500, as B2's 401 was retried for a quarter of an hour [RC check 6]),
+# (500; the Internal Error of `rclone serve s3 --read-only` is retried
+# alike [measured: rc-runs/rc-results/M1-readonly-storage.out], and B2's
+# native API's 401 was, for a quarter of an hour [RC check 6]),
 # which the clock ends — 30 s in this box's binary. The opening only
 # reads, so both were taken, and every run after failed.
 readonly_storage() { # <the status a write gets>
@@ -370,6 +389,15 @@ says "warning: $ENVFILE: could not be read: " && pass "status as root says when 
 rmdir "$ENVFILE" && mv /root/env.keep2 "$ENVFILE"
 as_nobody hotserve-backup status >"$OUT" 2>&1
 [ $? = "$rc_root" ] && ! says "warning: $ENVFILE" && pass "as nobody, the same verdict and no word of the file" || fail "as nobody: $(cat "$OUT")"
+# A b2: repository written by hand — or set up before setup refused
+# it — is said by status as root in setup's words; the verdict is the
+# record's, until a run refuses it in its own.
+cp /root/env.keep "$ENVFILE"
+printf 'RESTIC_REPOSITORY=b2:hs-backups:dev\n' >>"$ENVFILE"
+hotserve-backup status >"$OUT" 2>&1
+rc_b2=$?
+says "warning: $ENVFILE: RESTIC_REPOSITORY: b2: is not supported: B2 is reached at its S3-compatible endpoint, s3:https://s3.<region>.backblazeb2.com/hs-backups/dev, with an application key, not the master key" && pass "status as root says a b2: repository is not supported, naming its S3 URL" || fail "status of a b2: file: $(cat "$OUT")"
+[ "$rc_b2" = "$rc_before" ] && pass "and its verdict is unchanged by it" || fail "status exited $rc_b2, $rc_before before the edit"
 cp /root/env.keep "$ENVFILE"
 
 echo "=== setup 13: the file written by hand, and the documented init that never sources it ==="
