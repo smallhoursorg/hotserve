@@ -142,22 +142,57 @@ with the off-box machine's key; then on the box
 
 ## 6. A read-only key
 
-A key that may read and not write, on a box that is not your real one.
-`setup` only reads an existing repository, so it should take the key;
-whether it does is part of the check:
+A key that may read and not write, on a box that is not your real one,
+and a repository made beforehand with a key that may write:
 
 ```sh
-sudo hotserve-backup setup <url>
-time sudo systemctl start hotserve-backup.service
-hotserve-backup status
+time sudo hotserve-backup setup <url>
 ```
 
-What `status` says, and after how long: **unverified**, and not run on
-the e2e server, which has no read-only key. Read from the code, the
-upload fails and the app is
-`demo: failed: restic failed (exit 1): the storage could not be reached, or refused the key, or something else went wrong; …`,
-after however long restic retries. `setup` again with the box's own
-key afterwards.
+`setup` opens a repository that is there already taking its lock —
+`restic cat config`, which writes a lock file and removes it — and
+should refuse this key: at once where the storage says so plainly, at
+its two-minute clock where restic retries. **Unverified** on a
+provider; on the e2e server behind a proxy that refuses writes, both —
+the lines as the e2e asserts them, with the clock a release's binary
+has (the e2e's is 30 s); a run's lock ids and timings are its own:
+
+```
+hotserve-backup: this key opened the repository, and restic exited 1 at its lock file's write: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: … client.PutObject: Access Denied.)
+```
+
+at once, and at the clock:
+
+```
+still waiting for s3:http://…/box1 (Ctrl-C is safe: nothing of setup's has been written; a lock file restic was writing may stay, and hold off a prune, or a check from elsewhere, until restic unlock removes it)
+hotserve-backup: restic had not finished opening the repository and writing a lock file to it within 2m0s: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/…>) returned error, retrying after …: …)
+```
+
+each exit 1, with nothing of setup's written: `status` after either is
+what it was before — `backups are not set up` on a box that was not,
+the earlier setup on one that was (the credential file is left byte
+for byte as it was).
+
+**A key that may write and not delete** — narrower than the guide's
+policies — writes the lock file and cannot remove it; the opening
+finds the lock it left and refuses the key by it, naming the lock
+(on the e2e server, behind a proxy that refuses DELETE alone):
+
+```
+hotserve-backup: this box's backup account wrote a lock file to the repository during this setup, and it is still there (lock …): unless some other restic of that account was running beside setup, or on another machine with this hostname, this key wrote it and could not remove it — a key that may not delete cannot prune, and every run would leave one more lock; restic unlock with a key that may delete clears it once it is half an hour old (restic removes only the locks it takes for stale, which from another machine are those older than that), or restic unlock --remove-all sooner, when nothing else holds the repository
+```
+
+`restic unlock` from your own machine, with the key that may delete,
+then clears it ([look from your own machine](backups.md#look-from-your-own-machine)).
+
+**On B2**, `v0.3.0-rc1`, whose `setup` only read, took a console Read
+Only key (`repository ready … (existing, …)`). The run after it
+retried the lock about once a minute (`b2_get_upload_url: 401:`) and
+failed after 868 s:
+`demo: failed: restic failed (exit 1): the storage could not be reached, or refused the key, or something else went wrong; …`;
+the drill failed after 832 s in #170's words; `status` exited 1. Where
+a `setup` does take such a key, `setup` again with the box's own
+afterwards.
 
 ## 7. Restore onto a second box, with another uid for `hotserve`
 

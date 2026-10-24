@@ -571,9 +571,17 @@ Each is **unverified**, and a check the release candidate runs
   not delete is read in restic's own code, not seen.
 - **The recovery copy** on a real provider, and whether it is copied
   there without coming down to your machine.
-- **A read-only key**: what `status` says. Traced, not run: the upload
-  fails, `demo: failed: restic failed (exit 1): the storage could not
-  be reached, or refused the key, …`, after however long restic retries.
+- **A read-only key**: `setup` opens a repository that is there
+  already taking its lock, which writes a lock file and removes it, and
+  refuses a key that cannot — at once where the storage says so
+  plainly, at its two-minute clock where restic retries — and one that
+  wrote the lock file and could not remove it, by the lock it left.
+  Seen on the e2e server behind a proxy that refuses writes, all three
+  ways; on B2, `v0.3.0-rc1`'s `setup`, which only read, took a console
+  Read Only key, and every run then failed after 14½ minutes of retries
+  (`b2_get_upload_url: 401:`), as did the drill after it, after 14
+  minutes. The refusals
+  themselves are **unverified** on B2.
 - **A bucket that does not exist** on a provider that will not make
   one for the box's key. The e2e S3 server makes a bucket when asked,
   so `setup` there makes it.

@@ -69,6 +69,8 @@ type box struct {
 	initOut, initErr, probeOut string
 	probeErr                   string // what the look says on stderr
 	openErr                    string // what the open unit says on stderr
+	locksOut                   string // what `restic list locks` prints, one id a line
+	lockOut                    string // what `restic cat lock <id>` prints
 	planErr                    string // what the plan unit says on stderr
 	hang                       string
 	version                    int
@@ -305,7 +307,13 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 		// As the real runner: the unit is stopped by name once the
 		// context ends, and what could not be confirmed gone wraps the
 		// cause in ErrNotConfirmedGone. Init runs on a context nothing
-		// cancels; its hang ends with the test.
+		// cancels; its hang ends with the test. An opening that hangs is
+		// restic retrying its lock file's write, and its retry lines are
+		// on stderr before the clock ends it: written first where the
+		// test gives them.
+		if role == "open" && s.StderrFile != "" && b.openErr != "" {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.openErr), 0o600))
+		}
 		select {
 		case <-ctx.Done():
 		case <-b.release:
@@ -379,7 +387,7 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 		if s.StderrFile != "" {
 			must(b.t, os.WriteFile(s.StderrFile, []byte(b.initErr), 0o600))
 		}
-	case "probe", "open":
+	case "probe", "open", "reopen":
 		write(b.probeOut)
 		if s.StderrFile != "" {
 			stderr := b.probeErr
@@ -388,6 +396,10 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 			}
 			must(b.t, os.WriteFile(s.StderrFile, []byte(stderr), 0o600))
 		}
+	case "locks":
+		write(b.locksOut)
+	case "lock":
+		write(b.lockOut)
 	case "verify":
 		// Everything after "--" and the snapshot id is a parent to list.
 		var out []string
@@ -417,6 +429,14 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 	}
 	if o, ok := b.outcome[role]; ok {
 		return o, nil
+	}
+	// restic's `list locks` opens the repository first: where the test
+	// has the opening exit 12 (a wrong password) or 10 (no repository),
+	// a listing not given its own outcome exits the same.
+	if role == "locks" {
+		if o, ok := b.outcome["open"]; ok && o.Result == "exit-code" && (o.ExitStatus == 12 || o.ExitStatus == 10) {
+			return o, nil
+		}
 	}
 	return unit.Outcome{Result: "success"}, nil
 }
