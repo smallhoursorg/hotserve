@@ -528,8 +528,8 @@ func TestAnExistingRepositoryIsOpenedWithItsOwnPassword(t *testing.T) {
 		t.Fatalf("the file holds password %q", v["RESTIC_PASSWORD"])
 	}
 	// The opening takes the repository's lock — cat config without
-	// --no-lock — which proves the key may write to it, and that it may
-	// remove the lock file it wrote; the look alone reads without one.
+	// --no-lock — which proves the key may write a lock file to it, and
+	// remove it; the look alone reads without one.
 	s := b.spec("open")
 	if got, want := strings.Join(s.Argv, " "), "/usr/bin/restic cat config"; got != want {
 		t.Fatalf("the open unit's argv: %q", got)

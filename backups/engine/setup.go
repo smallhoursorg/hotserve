@@ -1050,8 +1050,10 @@ func (s *setup) makeRepository(ctx context.Context) (unit.Outcome, string, error
 // openRepository opens the repository with the password the file holds:
 // `restic cat config`, which takes the repository's lock — writes a lock
 // file and removes it, 0.7 s where the key may write [measured] — so
-// that one unit proves the password, the id, that the key may write and
-// that it may delete. The opening once only read, and a key that may
+// that one unit proves the password, the id, and that the key may write
+// and delete a lock file. That is locks/ alone: a policy that allows
+// locks/ and denies data/, index/ or snapshots/ passes, and the first
+// run fails on it, named (accepted, a row). The opening once only read, and a key that may
 // read and not write passed it: every run then failed a quarter of an
 // hour in [RC check 6, on B2].
 //
@@ -1064,10 +1066,11 @@ func (s *setup) makeRepository(ctx context.Context) (unit.Outcome, string, error
 //     delete would leave one more lock with every run after, which
 //     restic never passes by itself [M75].
 //   - exit 0 and no such line: opened.
-//   - exit 1, or the clock: one neutral line, with the last line restic
-//     said — the write refused, the storage gone, a read failed: no
-//     cause is named, since a key replaced for a storage that throttled
-//     reads is the wrong one.
+//   - exit 1: one neutral line with what restic said, without its retry
+//     lines, cut at 300 runes — the write refused, the storage gone, a
+//     read failed; the clock: the same, with the last line restic said
+//     and what a stop may leave. No cause is named, since a key
+//     replaced for a storage that throttled reads is the wrong one.
 //   - exit 11: another restic holds the repository. restic looks for
 //     other locks before it writes its own [M4 case G: an exclusive
 //     lock held elsewhere, the opening exited 11 and left nothing], so
@@ -1081,7 +1084,7 @@ func (s *setup) makeRepository(ctx context.Context) (unit.Outcome, string, error
 // the caller knows the password is the repository's.
 func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err error) {
 	s.writing = true
-	o, message, err := s.repository(ctx, "open", setupClock, s.cfg.Restic, "cat", "config")
+	o, _, err := s.repository(ctx, "open", setupClock, s.cfg.Restic, "cat", "config")
 	switch {
 	case errors.Is(err, errDidNotAnswer):
 		// Stopped at the clock, restic may have written its lock file
@@ -1110,7 +1113,9 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 		s.writing = false
 		return "", false, nil
 	case o.Result == "exit-code" && o.ExitStatus == 11:
-		return s.reopen(ctx, message)
+		// The holder as restic named it, without its retry lines, which
+		// could otherwise fill the cut before the holder's host.
+		return s.reopen(ctx, s.withoutRetries("open"))
 	case o.Result == "exit-code" && o.ExitStatus == 1:
 		// The whole of what restic said, cleaned, as the reopen quotes
 		// it: restic prints hint lines last [M4 case G], and the cause
@@ -1119,7 +1124,7 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 		// past it.
 		said := record.Text(s.withoutRetries("open"))
 		if said == "" {
-			said, _ = resticFailure(o)
+			return "", false, errors.New("restic could not open the repository with its lock (exit 1), and said nothing")
 		}
 		return "", false, errors.New("restic could not open the repository with its lock (exit 1): " + said)
 	}
@@ -1197,7 +1202,7 @@ func resticSaid(m string) string {
 // other on its second look and removes its own, which a key that may
 // not delete cannot do (accepted, a row).
 func (s *setup) reopen(ctx context.Context, held string) (id string, opened bool, err error) {
-	o, message, err := s.repository(ctx, "reopen", setupClock, s.cfg.Restic, "cat", "config", "--no-lock")
+	o, _, err := s.repository(ctx, "reopen", setupClock, s.cfg.Restic, "cat", "config", "--no-lock")
 	switch {
 	case err != nil:
 		return "", false, err
@@ -1223,7 +1228,13 @@ func (s *setup) reopen(ctx context.Context, held string) (id string, opened bool
 		// row).
 		return "", false, nil
 	case o.Result == "exit-code" && o.ExitStatus == 1:
-		return "", false, errors.New("restic could not open the repository (exit 1): " + record.Text(message))
+		// Without restic's retry lines, which could fill the cut before
+		// the cause, as the opening's exit 1.
+		said := record.Text(s.withoutRetries("reopen"))
+		if said == "" {
+			return "", false, errors.New("restic could not open the repository (exit 1), and said nothing")
+		}
+		return "", false, errors.New("restic could not open the repository (exit 1): " + said)
 	}
 	detail, _ := resticFailure(o)
 	return "", false, errors.New(detail)
