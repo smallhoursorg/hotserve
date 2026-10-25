@@ -399,9 +399,10 @@ type setup struct {
 	// it was. made is more: the repository has that password for
 	// certain — init made it, or it opened one an earlier init made.
 	initRan, made bool
-	// writing is the opening under way or over: it takes the
-	// repository's lock, so an interrupt from then on may leave
-	// restic's lock file, and says so.
+	// writing is set as the opening starts — it takes the repository's
+	// lock, so an interrupt from then on may leave restic's lock file,
+	// and says so — and cleared where the opening was not opened and
+	// wrote nothing (notOpened: exit 12, or 10 after init).
 	writing bool
 	// initLeft is whether init was left running — by its clock or an
 	// interrupt — and so still has the staged file and the run
@@ -845,9 +846,12 @@ func (s *setup) leaveInit() { s.initLeft, s.keepDir = true, true }
 // opens is one this setup made; else the repository's own is needed.
 // The key is not the one that made it — an attempt comes round only
 // when the key is asked for again — so the opening holds it to
-// writing as any key to a repository that was there already; a
-// refusal there, or Ctrl-C, says the password is the repository's,
-// which the opening has just proven.
+// writing as any key to a repository that was there already. A
+// refusal there, once the opening has proven the password, says the
+// password is the repository's; a Ctrl-C during the opening says what
+// initRan says of it — init ran with it, and may have made the
+// repository — since nothing yet has proven it
+// (TestAnInterruptDuringTheOpeningNamesTheLockItMayLeave pins it).
 func (s *setup) tryShown(ctx context.Context, rep *SetupReport, needsOwn func()) error {
 	id, opened, err := s.openRepository(ctx)
 	if opened {
@@ -1123,10 +1127,17 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 		// a minute of them would fill the 300 runes and leave the cause
 		// past it.
 		said := record.Text(s.withoutRetries("open"))
+		line := "restic could not open the repository with its lock (exit 1): " + said
 		if said == "" {
-			return "", false, errors.New("restic could not open the repository with its lock (exit 1), and said nothing")
+			line = "restic could not open the repository with its lock (exit 1), and said nothing"
 		}
-		return "", false, errors.New("restic could not open the repository with its lock (exit 1): " + said)
+		// restic may have written its lock, then failed, then failed to
+		// remove it [restic 0.18, lock.go: the deferred unlock runs on
+		// every exit]: its own line says so, and where the lock goes.
+		if l := s.unlockFailed(); l != "" {
+			line += "; and it could not remove the lock file it wrote" + resticSaid(l) + ": the lock stays until restic unlock removes it, with a key that may delete: " + unlockWhere
+		}
+		return "", false, errors.New(line)
 	}
 	detail, _ := resticFailure(o)
 	return "", false, errors.New(detail)
@@ -1134,27 +1145,33 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 
 // unlockFailed is restic's own word that it could not remove the lock
 // file the opening wrote — its "error while unlocking:" line, on
-// stderr, with exit 0 [M4 cases A and B] — or "" where it said none.
-// The line given back is restic's "Remove(<lock/…>) failed:" one where
-// it wrote it, which names the lock, else the "error while unlocking:"
-// one: B's retries end on that alone ("error while unlocking: context
-// canceled").
+// stderr [M4 cases A and B] — or "" where it said none. Given back with
+// what names the storage's answer: restic's "Remove(<lock/…>) failed:"
+// line where it wrote one, which also names the lock; where the DELETE
+// failed and was retried rather than refused, restic writes no failed:
+// line [M4 case B], and the last "Remove(<lock/…>) returned error,
+// retrying after …" line goes with the "error while unlocking:" one,
+// since it alone holds the storage's answer (the 500).
 func (s *setup) unlockFailed() string {
 	raw, _ := os.ReadFile(s.errFile("open"))
-	var remove, unlocking string
+	var remove, retried, unlocking string
 	for _, l := range strings.Split(string(raw), "\n") {
 		switch {
 		case strings.Contains(l, "error while unlocking:"):
 			unlocking = l
 		case strings.Contains(l, "Remove(<lock/") && strings.Contains(l, ") failed:"):
 			remove = l
+		case strings.Contains(l, "Remove(<lock/") && strings.Contains(l, "returned error, retrying after"):
+			retried = l
 		}
 	}
-	if unlocking == "" {
+	switch {
+	case unlocking == "":
 		return ""
-	}
-	if remove != "" {
+	case remove != "":
 		return remove
+	case retried != "":
+		return retried + "\n" + unlocking
 	}
 	return unlocking
 }

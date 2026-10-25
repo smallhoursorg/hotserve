@@ -120,9 +120,9 @@ func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten
 		{"M4 A: restic wrote its lock file and could not remove it (DELETE refused, exit 0): refused, the Remove line quoted", func(b *box) {
 			b.openErr = unlockRefused
 		}, "restic opened the repository and could not remove the lock file it wrote (restic said: Remove(<lock/bb19e73ef3>) failed: client.RemoveObject: Access Denied.)" + remedy, ""},
-		{"M4 B: the removal retried, then given up (DELETE failing, exit 0): refused, restic's own line quoted", func(b *box) {
+		{"M4 B: the removal retried, then given up (DELETE failing, exit 0): refused, restic's last retry line quoted with its own line, the storage's 500 kept", func(b *box) {
 			b.openErr = unlockRetried
-		}, "restic opened the repository and could not remove the lock file it wrote (restic said: error while unlocking: context canceled)" + remedy, ""},
+		}, "restic opened the repository and could not remove the lock file it wrote (restic said: Remove(<lock/9e10eeec08>) returned error, retrying after 34.639635739s: client.RemoveObject: 500 Internal Server Error error while unlocking: context canceled)" + remedy, ""},
 		{"M4 A's lines at exit 0 with no id printed: the lock left is named first", func(b *box) {
 			b.openErr, b.probeOut = unlockRefused, ""
 		}, "restic opened the repository and could not remove the lock file it wrote (restic said: Remove(<lock/bb19e73ef3>) failed: client.RemoveObject: Access Denied.)" + remedy, ""},
@@ -147,6 +147,13 @@ func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten
 		{"exit 1 where the retries are all restic said: the last of them is quoted", func(b *box) {
 			b.outcome["open"], b.openErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, strings.Repeat(load+"\n", 2)+b2+"\n"
 		}, exit1 + b2, ""},
+		{"exit 1 after restic wrote its lock and could not remove it: the neutral line, then restic's own word on the lock, and where it goes", func(b *box) {
+			// The shape restic 0.18's lock.go gives — the deferred unlock
+			// runs on every exit, so a failure after the lock's write is
+			// followed by its removal's — not a capture: no storage of the
+			// e2e's makes cat config fail after a lock it wrote.
+			b.outcome["open"], b.openErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, "Load(<config/>, 0, 0) failed: client.GetObject: 503 Slow Down\nRemove(<lock/bb19e73ef3>) failed: client.RemoveObject: Access Denied.\nerror while unlocking: client.RemoveObject: Access Denied.\nFatal: unable to open config file: client.GetObject: 503 Slow Down\n"
+		}, "; and it could not remove the lock file it wrote (restic said: Remove(<lock/bb19e73ef3>) failed: client.RemoveObject: Access Denied.): the lock stays until restic unlock removes it, with a key that may delete: " + unlockWhere, ""},
 		{"exit 1 with nothing said: the neutral line, and that restic said nothing", func(b *box) {
 			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 		}, "restic could not open the repository with its lock (exit 1), and said nothing", ""},
