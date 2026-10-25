@@ -18,10 +18,10 @@ provider. On your box the URL, the ids, the times and the password
 differ. On Backblaze B2 the release candidate `v0.3.0-rc1` then ran
 seven of the eight [release-candidate checks](release-candidate.md)
 (2026-10-04 to 10-06), and what B2 showed is said where it bears,
-[one hang included](#against-a-real-provider). On AWS S3 and
-Hetzner nothing has been run: what depends on them says
-**unverified**, and [the last section](#against-a-real-provider) lists
-it all.
+[one hang included](#against-a-real-provider). On B2 each line says
+what ran, and several still say **unverified**. On AWS S3 and Hetzner
+nothing has been run: what depends on them says **unverified**, and
+[the last section](#against-a-real-provider) lists it all.
 
 ## Who runs these
 
@@ -51,8 +51,11 @@ least once every 90 days**, which leaves another 90 to recover; whoever
 has the box can make its own `status` say anything. A stolen login to the provider account can destroy
 everything: give it a second factor, and never put its keys on the
 box. On MinIO standing in for S3, an attack made with the box's own key
-was refused every destruction and [undone](#after-an-attack), and on B2
-the same; on AWS S3 and Hetzner it is **unverified**.
+was refused every destruction and [undone](#after-an-attack). On B2
+the box's key was refused every destruction too, and a copy made with
+that key into the same bucket recovered the backups; the guide's own
+recovery, with the account's key into a new bucket, is **unverified**
+on B2. On AWS S3 and Hetzner all of it is **unverified**.
 
 - **A bucket of its own**, one per box: on Backblaze B2 or S3 (`setup`
   asks for those two; `rest:`, `gs:` and `swift:` are written
@@ -380,10 +383,13 @@ the app ([A rebuilt box](secrets.md#a-rebuilt-box)). A `deploy_trust
 local` public key is a file the Caddyfile names, not a commit, and
 `hotserve init` refuses a Caddyfile whose key file is missing: in
 step 1, after the install and before `hotserve init`, put the `.pub`
-back from where the pair is kept, or make a new
-pair there with `hotserve deploy-keygen` — on the machine that mints
-the tokens, a runner's secret or your own — and copy only the `.pub`
-to the box.
+back from where the pair is kept. Or make a new pair with `hotserve
+deploy-keygen`: its private key then replaces the old one wherever
+tokens are minted — the CI secret, or your own machine — and only the
+`.pub` goes to the box. Until the private key is replaced, a deploy
+minted with the old one is refused: a flat 401, and the journal's
+`webhook auth failed` line names the signature in its `refused` field
+([liveswap/README.md](../liveswap/README.md)).
 
 ## The weekly drill, and what it costs
 
@@ -652,14 +658,16 @@ retention:
 
 - **TLS**: `setup`, runs, restores, the drill and the look from another
   machine, over B2's own certificate.
-- **The bucket above**: with keys without `deleteFiles`, every command
-  ran, one holding its lock for 30 minutes included, and left no lock.
-  An attack with the box's key destroyed nothing — `401` for each of 17
-  files — then overwrote and hid everything; the next run failed
-  `exit 10`, and the recovery copy, at `status`'s minute and from the
-  bucket's history, checked clean and was set up onto. B2 removed a
-  hidden file's version and its hide marker within two days of a
-  1-day rule.
+- **The bucket above**: with keys without `deleteFiles`, the backups,
+  one `forget`, the checks, a restore and the drills all ran and left
+  no lock, a backup holding its lock for 30 minutes included;
+  retention (check 5) did not run. An attack with the box's key
+  destroyed nothing — `401` for each of 17 files — then overwrote
+  `config` and hid everything; the next run failed `exit 10`. Two
+  recovery copies, one at `status`'s minute and one from the bucket's
+  history, both checked clean, and `setup` was run onto the second. B2
+  removed a hidden file's version and its hide marker within two days
+  of a 1-day rule.
 - **A bucket that does not exist**: the key could not make one, and
   `setup` ended after three askings in 7.5 s, nothing written
   (`NewBucket: b2_list_buckets: 401:`). **A wrong secret**: three

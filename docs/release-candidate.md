@@ -95,13 +95,17 @@ machine, with the *box's* key, a backup that holds its lock for half an
 hour, and what it leaves:
 
 ```bash
+read -r AWS_ACCESS_KEY_ID && export AWS_ACCESS_KEY_ID          # the BOX's key, not your own machine's
+read -rs AWS_SECRET_ACCESS_KEY && export AWS_SECRET_ACCESS_KEY
 read -rs RESTIC_PASSWORD && export RESTIC_PASSWORD    # the repository's password
 (sleep 1800; echo probe) | restic backup --stdin --stdin-filename rc-lock-probe
 restic list locks --no-lock | wc -l
 ```
 
-(The password in the environment: with its data on stdin restic cannot
-ask for it, `Fatal: cannot read both password and data from stdin`.)
+(On B2 the two key lines are `B2_ACCOUNT_ID` and `B2_ACCOUNT_KEY`, as
+in the look. The password in the environment: with its data on stdin
+restic cannot ask for it, `Fatal: cannot read both password and data
+from stdin`.)
 
 Then on the box, `sudo systemctl start hotserve-backup.service` twice,
 `sudo hotserve-backup drill` and `hotserve-backup status`. That the
@@ -111,9 +115,10 @@ runs end `ok`, and the drill proves and its check is `clean`:
 nothing, on the other hand, stopped the probe at 22 minutes —
 `failed to refresh stale lock: client.RemoveObject: Access Denied.`,
 `Fatal: unable to save snapshot: context canceled`, exit 1, seven locks
-left. Remove the probe after: `restic forget <its id>`, then
-`unset RESTIC_PASSWORD`, so that restic asks again. **On B2**, with
-the box's key without `deleteFiles`: `processed 1 files, 6 B in 30:01`,
+left. Remove the probe after, still with the box's key: `restic
+forget <its id>`; then `unset RESTIC_PASSWORD`, so that restic asks
+again, and set the two key lines back to your own machine's key.
+**On B2**, from the laptop with the box's key, without `deleteFiles`: `processed 1 files, 6 B in 30:01`,
 `snapshot … saved`, no lock left; the timers started again and
 `status` said `dev: ok` (whether the two `systemctl start` runs were
 made is not recorded); the drill after it, the box's first, proved the
