@@ -204,14 +204,14 @@ the lines as the e2e asserts them, with the clock a release's binary
 has (the e2e's is 30 s); a run's lock ids and timings are its own:
 
 ```
-hotserve-backup: this key opened the repository, and restic exited 1 at its lock file's write: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: … client.PutObject: Access Denied.)
+hotserve-backup: restic could not open the repository with its lock (exit 1): unable to create lock in backend: client.PutObject: Access Denied.
 ```
 
 at once, and at the clock:
 
 ```
 still waiting for s3:http://…/box1 (Ctrl-C is safe: nothing of setup's has been written; a lock file restic was writing may stay, and hold off a prune, or a check from elsewhere, until restic unlock removes it)
-hotserve-backup: restic had not finished opening the repository and writing a lock file to it within 2m0s: whether this key can write to it is not known — a key that may only read, or a storage that refuses or does not answer writes, ends here (restic said: Save(<lock/…>) returned error, retrying after …: …)
+hotserve-backup: restic had not finished opening the repository with its lock within 2m0s (restic said: Save(<lock/…>) returned error, retrying after …: …)
 ```
 
 each exit 1, with nothing of setup's written: `status` after either is
@@ -220,18 +220,21 @@ the earlier setup on one that was (the credential file is left byte
 for byte as it was).
 
 **A key that may write and not delete** — narrower than the guide's
-policies — writes the lock file and cannot remove it; the opening
-finds the lock it left and refuses the key by it, naming the lock
-(on the e2e server, behind a proxy that refuses DELETE alone):
+policies — writes the lock file and cannot remove it; restic says so,
+`error while unlocking:`, and exits 0 ([M4](design/backups/rc-runs/rc-results/M4-unlock.out),
+case A), and setup refuses the key, quoting restic's line, which names
+the lock (on the e2e server, behind a proxy that refuses DELETE
+alone):
 
 ```
-hotserve-backup: this box's backup account wrote a lock file to the repository during this setup, and it is still there (lock …): unless some other restic of that account was running beside setup, or on another machine with this hostname, this key wrote it and could not remove it — a key that may not delete cannot prune, and every run would leave one more lock; restic unlock with a key that may delete clears it once it is half an hour old (restic removes only the locks it takes for stale, which from another machine are those older than that), or restic unlock --remove-all sooner, when nothing else holds the repository
+hotserve-backup: restic opened the repository and could not remove the lock file it wrote (restic said: Remove(<lock/…>) failed: client.RemoveObject: Access Denied.): a key that may not delete, or a storage that refuses or does not answer deletes, ends here; the lock stays until restic unlock removes it: from this box at once once setup has ended, from another machine once it is half an hour old, or restic unlock --remove-all sooner, when nothing else holds the repository
 ```
 
 `restic unlock` with the key that may delete clears it: from the box
 at once, once setup has ended (restic takes a same-host lock whose pid
-is gone for stale), from your own machine once it is half an hour old
-(from another machine restic takes only those for stale), or with
+is gone for stale: M4 cases C and D), from your own machine once it is
+half an hour old (from another machine restic takes only those for
+stale), or with
 `restic unlock --remove-all` sooner, when nothing else holds the
 repository ([look from your own machine](backups.md#look-from-your-own-machine)).
 
