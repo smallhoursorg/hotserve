@@ -388,7 +388,8 @@ deploy-keygen`: its private key then replaces the old one wherever
 tokens are minted — the CI secret, or your own machine — and only the
 `.pub` goes to the box. Until the private key is replaced, a deploy
 minted with the old one is refused: a flat 401, and the journal's
-`webhook auth failed` line names the signature in its `refused` field
+`webhook auth failed` line carries, in its `refused` field,
+`local:<path>: go-jose/go-jose: error in cryptographic primitive`
 ([liveswap/README.md](../liveswap/README.md)).
 
 ## The weekly drill, and what it costs
@@ -687,7 +688,10 @@ retention:
   retries (`b2_get_upload_url: 401:`), as did the drill after it, after
   14 minutes. The refusals themselves are **unverified** on B2.
 - **A rebuilt box** with another uid for `hotserve`: restored before
-  the first deploy in 10 s, every file the new uid's.
+  the first deploy in 10 s, every file the new uid's. The RC box had
+  no box repo, and its Caddyfile was copied over; the guide's way
+  back, the box repo and `hotserve init`, is **unverified** on any box
+  ([check 7](release-candidate.md#7-restore-onto-a-second-box-with-another-uid-for-hotserve)).
 - **One drill, timed**: with 500 MB of new uploads, the run that
   uploaded them 24 s, the drill that fetched them back 14 s, its check
   included. Its egress on a bill: **unverified**.

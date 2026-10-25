@@ -79,7 +79,7 @@ password — **unverified** on B2.
 `sudo hotserve-backup drill`, `hotserve-backup status`, and the
 [look from your own machine](backups.md#look-from-your-own-machine),
 both its lines. Each as [Backups](backups.md) shows it: **unverified**
-over a provider's TLS; the e2e server over TLS from a private CA gave
+over S3's and Hetzner's TLS; the e2e server over TLS from a private CA gave
 exactly those lines, and MinIO the look's. **On B2:** all of it, as
 written, from an arm64 Hetzner VPS; the drill 10 s, the look's check
 `no errors were found`.
@@ -136,9 +136,9 @@ two days on, to be sure — `backblaze-b2 ls --long --versions -r
 b2://<that bucket>` should list neither the file's version nor its hide
 marker: B2's documentation says it removes a hide marker itself once
 nothing is under it. **On B2** it does: a file hidden at 11:47 UTC on
-2026-10-04 was still listed, upload and hide, a day on (17:36 UTC on
-the 5th, the plan's record), and both were gone by 48 hours (11:26
-UTC on the 6th). On S3 the guide's rule asks for it (expired delete
+2026-10-04 was still listed, upload and hide, about 30 hours on
+(17:36 UTC on the 5th, the plan's record), and both were gone by 48
+hours (11:26 UTC on the 6th). On S3 the guide's rule asks for it (expired delete
 markers), and Hetzner's cannot; both **unverified**.
 
 ## 4. An attack with the box's key, and the recovery
@@ -163,7 +163,7 @@ as written, with the account's key, from `status`'s minute and from the
 bucket's history, to compare. That destroying is refused for every
 file, that the deletion only hides, that the run fails `exit 10`, and
 that the copy, checked, holds the last complete backup:
-**unverified**. On MinIO, run after the deletion, the S3 line was
+**unverified** on S3 and Hetzner. On MinIO, run after the deletion, the S3 line was
 `AccessDenied` for each of 48 versions, all of which remained, and the
 deletion emptied the bucket's listing; the run said
 `there is no repository at the configured location (exit 10)`, and
@@ -259,7 +259,7 @@ Caddyfile from the box repo with `hotserve init`, as step 1 says —
 with `id -u hotserve` there not the first box's (make a system user or
 two before installing the package). Then
 `sudo ls -ln /var/lib/liveswap/<app>/shared`: every file the second
-box's uid. **Unverified** on a provider; on the e2e server (uids 996
+box's uid. **Unverified** on S3 and Hetzner; on the e2e server (uids 996
 and 993) the restore put back the database and the files, owned by
 993, and the first run and drill there were `ok` and proven. **On B2:**
 a second box with no box repo, its Caddyfile copied over (as the e2e
