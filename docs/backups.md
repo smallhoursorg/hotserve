@@ -394,7 +394,6 @@ another uid, which a restore does not mind:
    looking for a repository at s3:https://s3.example.com/my-backups (up to 10s)
    the repository exists; its password is needed
    Repository password:
-   checking that this key can write to it (up to 2m0s)
    repository ready: s3:https://s3.example.com/my-backups (existing, id e9157010)
    ```
 
@@ -708,14 +707,21 @@ Each is **unverified**, and a check the release candidate runs
   ([RC-lifecycle-day0.out](design/backups/rc-runs/RC-lifecycle-day0.out)).
 - **The recovery copy** on a real provider, and whether it is copied
   there without coming down to your machine.
-- **A read-only key**: `setup` writes a lock file to a repository that
-  is there already before it takes the key, and refuses one that
-  cannot — at once where the storage says so plainly, at its two-minute
-  clock where restic retries. Seen on the e2e server behind a proxy
-  that refuses writes, both ways; on B2, `v0.3.0-rc1`'s `setup`, which
-  did not check yet, took a console Read Only key, and every run then
-  failed after 14½ minutes of retries (`b2_get_upload_url: 401:`, from
-  restic's own `b2:` backend), as did every drill. The check itself,
+- **A read-only key**: `setup` opens a repository that is there
+  already taking its lock, which writes a lock file and removes it. A
+  key that cannot write a lock file ends setup on one neutral line — at
+  once where the storage says so plainly, with what restic said,
+  without its retry lines, cut at 300 characters; at its two-minute
+  clock where restic retries, with the last line restic said, which is
+  then a retry line — and a key that wrote the lock
+  file and could not remove it is refused by restic's own word that it
+  could not, `error while unlocking:`
+  ([M4](design/backups/rc-runs/rc-results/M4-unlock.out), cases A and
+  B). Seen on the e2e server behind a proxy that refuses writes, all
+  three ways; on B2, `v0.3.0-rc1`'s `setup`, which only read, took a
+  console Read Only key, and every run then failed after 14½ minutes of
+  retries (`b2_get_upload_url: 401:`, from restic's own `b2:` backend),
+  as did the drill after it, after 14 minutes. The refusals themselves,
   and what B2's S3 endpoint answers such a key, are **unverified**.
 - **A bucket that does not exist** on a provider that will not make
   one for the box's key. The e2e S3 server makes a bucket when asked,

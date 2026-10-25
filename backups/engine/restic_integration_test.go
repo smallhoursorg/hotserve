@@ -399,25 +399,26 @@ func TestIntegrationALockHeldForTheWholeRetryIsExit11(t *testing.T) {
 	if detail, wide := resticFailure(unit.Outcome{Result: "exit-code", ExitStatus: 11}); !wide || !strings.Contains(detail, "locked") {
 		t.Errorf("exit 11 is said as %q, repository-wide %v", detail, wide)
 	}
-	// Setup's write check (writable) asks with no --retry-lock, and takes
-	// exit 11 for another restic's hold, not for a key that cannot write:
-	// it has to come at once, where a refused write may be retried.
+	// Setup's opening (openRepository) asks with no --retry-lock, and
+	// takes exit 11 for another restic's hold, not for a key that cannot
+	// write: it has to come at once, where a refused write may be
+	// retried; it then reads the repository again with --no-lock.
 	began = time.Now()
 	if _, said, exit := resticIn(t, base, time.Minute, restic, "cat", "config"); exit != 11 || time.Since(began) > 10*time.Second {
 		t.Fatalf("cat config meeting an exclusive lock: exit %d after %s, want 11 at once: %s", exit, time.Since(began).Round(time.Millisecond), said)
 	}
 }
 
-// Setup's write check (writable) leans on what `restic cat config` does
-// without --no-lock: it writes a lock file and removes it, so a storage
-// the key may read and not write refuses it — where --no-lock, the
-// opening's, reads on. Refused plainly, restic 0.18 exits 1 at once and
-// names the lock; a refusal it retries is the check's clock's to end
-// [measured: a quarter of an hour on B2's native API (RC check 6);
-// over S3, the Internal Error of `rclone serve s3 --read-only`, retried
-// until stopped (rc-runs/rc-results/M1-readonly-storage.out)]. As the
-// backup account's stand-in, over a repository it may read and not
-// write.
+// Setup's opening (openRepository) leans on what `restic cat config`
+// does without --no-lock: it writes a lock file and removes it, so a
+// storage the key may read and not write refuses it — where --no-lock,
+// the look's and the reopen's, reads on. Refused plainly, restic 0.18
+// exits 1 at once and names the lock; a refusal it retries is the
+// opening's clock's to end [measured: a quarter of an hour on B2's
+// native API (RC check 6); over S3, the Internal Error of `rclone serve
+// s3 --read-only`, retried until stopped
+// (rc-runs/rc-results/M1-readonly-storage.out)]. As the backup
+// account's stand-in, over a repository it may read and not write.
 func TestIntegrationResticCatConfigWritesALockFileUnlessNoLock(t *testing.T) {
 	const restic = "/usr/bin/restic"
 	base := openBase(t)
