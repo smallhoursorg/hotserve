@@ -158,14 +158,14 @@ the lines as the e2e asserts them, with the clock a release's binary
 has (the e2e's is 30 s); a run's lock ids and timings are its own:
 
 ```
-hotserve-backup: restic could not open the repository with its lock (exit 1): unable to create lock in backend: client.PutObject: Access Denied.
+hotserve-backup: restic could not open the repository with its lock (exit 1): Save(<lock/…>) failed: client.PutObject: Access Denied. unable to create lock in backend: client.PutObject: Access Denied.
 ```
 
 at once, and at the clock:
 
 ```
 still waiting for s3:http://…/box1 (Ctrl-C is safe: nothing of setup's has been written; a lock file restic was writing may stay, and hold off a prune, or a check from elsewhere, until restic unlock removes it)
-hotserve-backup: restic had not finished opening the repository with its lock within 2m0s (restic said: Save(<lock/…>) returned error, retrying after …: …)
+hotserve-backup: restic had not finished opening the repository with its lock within 2m0s (restic said: Save(<lock/…>) returned error, retrying after …: …); nothing of setup's has been written; a lock file restic was writing may stay, and hold off a prune, or a check from elsewhere, until restic unlock removes it, with a key that may delete: from this box at once once setup has ended, given that key's credentials; from another machine that holds it once the lock is half an hour old; or with restic unlock --remove-all sooner, when nothing else holds the repository
 ```
 
 each exit 1, with nothing of setup's written: `status` after either is
@@ -181,7 +181,7 @@ the lock (on the e2e server, behind a proxy that refuses DELETE
 alone):
 
 ```
-hotserve-backup: restic opened the repository and could not remove the lock file it wrote (restic said: Remove(<lock/…>) failed: client.RemoveObject: Access Denied.): a key that may not delete, or a storage that refuses or does not answer deletes, ends here; the lock stays until restic unlock removes it: from this box at once once setup has ended, from another machine once it is half an hour old, or restic unlock --remove-all sooner, when nothing else holds the repository
+hotserve-backup: restic opened the repository and could not remove the lock file it wrote (restic said: Remove(<lock/…>) failed: client.RemoveObject: Access Denied.): a key that may not delete, or a storage that refuses or does not answer deletes, ends here; the lock stays until restic unlock removes it, with a key that may delete — not this one: from this box at once once setup has ended, given that key's credentials; from another machine that holds it once the lock is half an hour old; or with restic unlock --remove-all sooner, when nothing else holds the repository
 ```
 
 `restic unlock` with the key that may delete clears it: from the box

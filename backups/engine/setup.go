@@ -1084,15 +1084,21 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 	o, message, err := s.repository(ctx, "open", setupClock, s.cfg.Restic, "cat", "config")
 	switch {
 	case errors.Is(err, errDidNotAnswer):
-		return "", false, fmt.Errorf("restic had not finished opening the repository with its lock within %s%s", setupClock, resticSaid(s.lastSaid("open", true)))
+		// Stopped at the clock, restic may have written its lock file
+		// and not yet removed it: said, with where restic unlock clears
+		// it, as the interrupt says.
+		return "", false, fmt.Errorf("restic had not finished opening the repository with its lock within %s%s; %s, with a key that may delete: %s", setupClock, resticSaid(s.lastSaid("open", true)), s.lockLeftLine(), unlockWhere)
 	case err != nil:
 		return "", false, err
 	case o.OK():
-		if id = configID(s.outFile("open")); id == "" {
-			return "", false, errors.New("restic exited 0 but said nothing of the repository's id")
-		}
+		// A lock file restic could not remove is said first, whatever
+		// else restic left out: it is in the repository either way.
+		id = configID(s.outFile("open"))
 		if l := s.unlockFailed(); l != "" {
-			return id, true, errors.New("restic opened the repository and could not remove the lock file it wrote" + resticSaid(l) + ": a key that may not delete, or a storage that refuses or does not answer deletes, ends here; the lock stays until restic unlock removes it: from this box at once once setup has ended, from another machine once it is half an hour old, or restic unlock --remove-all sooner, when nothing else holds the repository")
+			return id, true, errors.New("restic opened the repository and could not remove the lock file it wrote" + resticSaid(l) + ": a key that may not delete, or a storage that refuses or does not answer deletes, ends here; the lock stays until restic unlock removes it, with a key that may delete — not this one: " + unlockWhere)
+		}
+		if id == "" {
+			return "", false, errors.New("restic exited 0 but said nothing of the repository's id")
 		}
 		return id, true, nil
 	case o.Result == "exit-code" && s.notOpened(o.ExitStatus):
@@ -1106,11 +1112,14 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 	case o.Result == "exit-code" && o.ExitStatus == 11:
 		return s.reopen(ctx, message)
 	case o.Result == "exit-code" && o.ExitStatus == 1:
-		line := s.lastSaid("open", false)
-		if record.Text(line) == "" {
-			line, _ = resticFailure(o)
+		// The whole of what restic said, cleaned, as the reopen quotes
+		// it: restic prints hint lines last [M4 case G], and the cause
+		// is before them.
+		said := record.Text(message)
+		if said == "" {
+			said, _ = resticFailure(o)
 		}
-		return "", false, errors.New("restic could not open the repository with its lock (exit 1): " + record.Text(line))
+		return "", false, errors.New("restic could not open the repository with its lock (exit 1): " + said)
 	}
 	detail, _ := resticFailure(o)
 	return "", false, errors.New(detail)
@@ -1181,7 +1190,10 @@ func (s *setup) reopen(ctx context.Context, held string) (id string, opened bool
 		s.term.Say("the repository is locked by another restic (exit 11) — a prune or a check from elsewhere: whether this key can write to it, or remove a lock file, was not checked; restic never passes a lock nothing holds by itself: if the holder is gone, restic unlock clears it from the holder's own host at once, from elsewhere once it is half an hour old, or with --remove-all when nothing else holds the repository" + resticSaid(held))
 		return id, true, nil
 	case o.Result == "exit-code" && o.ExitStatus == 12:
-		// The lock-taking opening has run (exit 11): `writing` stands.
+		// The lock-taking opening has run (exit 11): `writing` stands
+		// until the next opening, which clears it on its own exit 12 —
+		// though the race at exit 11 may have left a lock (accepted, a
+		// row).
 		return "", false, nil
 	case o.Result == "exit-code" && o.ExitStatus == 1:
 		return "", false, errors.New("restic could not open the repository (exit 1): " + record.Text(message))
@@ -1249,6 +1261,13 @@ func (s *setup) lockLeftLine() string {
 	return lockLeft
 }
 
+// unlockWhere is where restic unlock clears a lock file the opening
+// left, and with what: a key that may delete, which the key setup
+// was given may not be — from this box at once once setup has ended,
+// since restic takes a lock of this host whose pid is gone for stale
+// [M4 cases C, D]; from elsewhere once it is half an hour old.
+const unlockWhere = "from this box at once once setup has ended, given that key's credentials; from another machine that holds it once the lock is half an hour old; or with restic unlock --remove-all sooner, when nothing else holds the repository"
+
 // lockLeft is the opening's word on what a stop leaves; lockLeftMade
 // the same after init made the repository.
 const madeNothingMore = "the repository was made with the password shown, and nothing more of setup's has been written"
@@ -1300,6 +1319,15 @@ func (s *setup) repository(ctx context.Context, role string, within time.Duratio
 		}
 	}()
 	errFile := s.errFile(role)
+	// What an earlier unit of the role said goes before this one
+	// starts: the manager truncates the files only when it starts the
+	// unit, and one it never started would be read with the last
+	// attempt's words.
+	for _, f := range []string{errFile, s.outFile(role)} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return unit.Outcome{}, "", err
+		}
+	}
 	what, known := unitDescriptions[role]
 	if !known {
 		what = role + " the repository"
