@@ -29,18 +29,18 @@ Needs real B2 (the owner's, or a key file by `--env-file`): the key-making recip
 | a `debian:13` container has no CA certificates | RC step 5; L6 | the look, the recovery and the RC page's off-box machine install `restic ca-certificates` (rclone likewise) |
 | B2 keys: no command given; the console has three presets | the owner's run (keys made with `create-key`); L6 for the forms | the exact commands; why the presets will not do; a new master key after |
 | check 3's probe fails for a typed password | RC check 3; D27; L7 | `read -rs RESTIC_PASSWORD && export RESTIC_PASSWORD`, the box's key |
-| B2 lists versions by name; `ls` with a folder in the URI fails; rclone lists no version of a hidden file | RC check 4, lifecycle day 1 (0 lines vs 179) | `| sort -k3,4`; "never rclone's listing" |
-| "A rebuilt box" assumes a box repo; backups never hold `/etc/hotserve` | the owner; L5 | what to keep off the box, and putting it back without `make push` |
-| the block before the credentials read odd | the owner at 4e; L3, L4 | "Set it up": setup first, then the declaration; the smoke's seven lines in that order |
+| B2 lists versions by name; `ls` with a folder in the URI fails; rclone lists no version of a hidden file | RC check 4, lifecycle day 1 (0 lines vs 179) | `| sort -k3,4`; "never rclone's listing" *(2026-10-24, PR #356: the guide sorts by the millisecond upload stamp in each file id, `sort -t_ -k9,9`, measured as `rc-runs/rc-results/L10-timeline-sort.out`; the rclone line is cited to this record, no capture)* |
+| "A rebuilt box" assumes a box repo; backups never hold `/etc/hotserve` | the owner; L5 | what to keep off the box, and putting it back without `make push` *(reversed by the owner, 2026-10-24, PR #356: the guide says what a backup does not hold and that the Caddyfile and secrets come back from the box repo; no recipe for a box without one)* |
+| the block before the credentials read odd | the owner at 4e; L3, L4 | "Set it up": setup first, then the declaration; the smoke's seven lines in that order *(2026-10-24, PR #356: the order was kept — the smoke block's lines are the box channel's since, and the guide says in one sentence that setup first works too)* |
 | a read-only key: setup accepts; runs fail after ~14½ min, drills ~14 min | `RC-check6.out` | measured on B2, in place of "traced, not run" |
 | measured on B2, "unverified" comes off | checks 1, 2, 3, 4, 6, 7, 8 (timing), §7.4 | guide intro, bucket section, After an attack, the last section; RC page per check |
 | still open: check 5, check 8's egress, the 1-day lifecycle read (2026-10-06) | another session writes them into the plan | folded in before review; else ask |
 
 ## 3. Decided without asking (one line each)
 
-- "Set it up" becomes setup first, then the declaration: both orders measured (L3–L4; #168's P3), and the owner read the other as odd.
+- "Set it up" becomes setup first, then the declaration: both orders measured (L3–L4; #168's P3), and the owner read the other as odd. *(2026-10-24, PR #356: not done — the order stayed as the box channel wrote it; one sentence says setup first works too.)*
 - The guide's opening says B2 was measured on `v0.3.0-rc1` and S3 and Hetzner stay **unverified**; each claim names which.
-- `/etc/hotserve` kept off the box as a `tar` of the directory (L5), said to hold the apps' secrets.
+- `/etc/hotserve` kept off the box as a `tar` of the directory (L5), said to hold the apps' secrets. *(Reversed by the owner, 2026-10-24, PR #356: the guide carries no recipe for a box without a box repo — main's first deploy makes the repo and the rebuilt-box recipe presumes it; L5 and the later capture `rc-runs/rc-results/L11-tar-exclude-umask.out` stay as records.)*
 - Not this PR: #169–#176; any printed output; `nfpm.yaml` unless the owner says so (D8).
 
 ## 4. The owner's answers (2026-10-05)

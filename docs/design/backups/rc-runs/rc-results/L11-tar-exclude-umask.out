@@ -1,0 +1,59 @@
+## L11, 2026-10-24: a kept-copy tar line for a box without a box repo, carried by docs/backups.md "A rebuilt box" in PR #356 until the owner dropped the recipe the same day (the guide's way back is the box repo); a record, not guidance. On Debian 13, dev container
+ Container hotserve-dev-run-016a8ffd374f Creating 
+ Container hotserve-dev-run-016a8ffd374f Created 
+Debian GNU/Linux 13 (trixie)
+tar (GNU tar) 1.35
+$ find etc/hotserve | sort
+etc/hotserve
+etc/hotserve/Caddyfile
+etc/hotserve/age
+etc/hotserve/age.pub
+etc/hotserve/age/identity
+etc/hotserve/agenda.env
+etc/hotserve/demo.env
+etc/hotserve/deploy.key
+etc/hotserve/deploy.key.pub
+etc/hotserve/secrets
+etc/hotserve/secrets/demo.env
+$ umask
+0022
+$ sh -c 'umask 077; tar --exclude=hotserve/age --exclude=hotserve/age.pub -czf /root/etc-hotserve.tar.gz -C /etc hotserve'   (paths under $d)
+$ tar -tzf /root/etc-hotserve.tar.gz
+hotserve/
+hotserve/secrets/
+hotserve/secrets/demo.env
+hotserve/deploy.key
+hotserve/agenda.env
+hotserve/Caddyfile
+hotserve/demo.env
+hotserve/deploy.key.pub
+$ stat -c "%A %a %U:%G %n" /root/etc-hotserve.tar.gz
+-rw------- 600 root:root /root/etc-hotserve.tar.gz
+## the after-an-attack extraction as the guide prints it: the same archive, deploy.key* left out of the extraction
+$ sudo tar -xzf etc-hotserve.tar.gz -C /etc --exclude="hotserve/deploy.key*"   (the guide quotes the pattern with single quotes; here -C $d/new, no sudo)
+$ find new/hotserve | sort
+new/hotserve
+new/hotserve/Caddyfile
+new/hotserve/agenda.env
+new/hotserve/demo.env
+new/hotserve/secrets
+new/hotserve/secrets/demo.env
+$ stat -c "%A %a %n" new/hotserve/secrets new/hotserve/secrets/demo.env
+drwxr-xr-x 755 new/hotserve/secrets
+-rw-r--r-- 644 new/hotserve/secrets/demo.env
+
+## L11b: a bare debian:13 image — what apt brings with backblaze-b2, restic and rclone
+$ dpkg -l ca-certificates (before)
+un  ca-certificates <none>       <none>       (no description available)
+$ apt-get install -s backblaze-b2 | grep -A1 "additional packages" | grep -c ca-certificates   # 1 = brought in
+1
+$ apt-get install -s restic | grep -A1 "additional packages" | grep -c ca-certificates   # 1 = brought in
+0
+$ apt-get install -s rclone | grep -A1 "additional packages" | grep -c ca-certificates   # 1 = brought in
+0
+$ apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances backblaze-b2 | grep -c "^ca-certificates"
+1
+$ apt-cache depends rclone | grep -i cert
+  Suggests: ca-certificates
+$ apt-cache depends restic | grep -i cert
+(none)
