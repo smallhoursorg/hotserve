@@ -11,8 +11,9 @@
 // nothing else; whitespace around a key is trimmed; the last assignment
 // of a key wins; a line whose first character is # or ; is a comment; a
 // line with no =, or with a name the manager does not take, is skipped;
-// a byte that is not UTF-8 makes the manager refuse the whole file. In
-// a value: whitespace at either end is trimmed unless escaped or
+// a NUL anywhere, or a byte that is not UTF-8 in a key or a value, makes
+// the manager refuse the whole file, and one in a comment or a line with
+// no = does not [M91]. In a value: whitespace at either end is trimmed unless escaped or
 // quoted; outside quotes a backslash escapes the byte after it, a line
 // end included, which joins the lines; inside double quotes only \, ",
 // $ and ` are unescaped and any other byte keeps its backslash; inside
