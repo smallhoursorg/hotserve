@@ -938,10 +938,12 @@ It needs no privilege.
   restic never passes a stale lock by itself [M75], which the
   opening's clock line says: `restic unlock`, with a key that may
   delete, removes it from the box at once once setup has ended, given
-  that key's credentials — restic takes a same-host lock whose pid is
-  gone for stale [M4 cases C, D] — from another machine that holds it
-  once it is half an hour old, or with `--remove-all` when nothing
-  else holds the repository); init is left
+  that key's credentials, if no other machine with this hostname runs
+  restic against the repository — restic takes a same-host lock whose
+  pid is gone for stale [M4 cases C, D], and a live lock that a second
+  machine of the same hostname wrote too [M4 case E] — otherwise from
+  another machine that holds it once it is half an hour old, or with
+  `--remove-all` when nothing else holds the repository); init is left
   running, said, and waited for by whatever comes next.
 - `setup`, for a repository that is there already, or one it has just
   made: a key that cannot write a lock file to it, or a storage that
@@ -1150,11 +1152,16 @@ What can be known to fail is refused before anything is asked for
      storage that refuses or does not answer deletes, and where the
      lock goes: `restic unlock`, with a key that may delete — not the
      one refused, and not one the box holds — removes it from this box
-     at once once setup has ended, given that key's credentials (restic
-     takes a same-host lock whose pid is gone for stale [M4 cases C,
-     D]), from another machine that holds it once it is half an hour
-     old, or `restic unlock --remove-all` sooner, when nothing else
-     holds the repository;
+     at once once setup has ended, given that key's credentials, if no
+     other machine with this hostname runs restic against the
+     repository (restic takes a same-host lock whose pid is gone for
+     stale [M4 cases C, D], and so strips a live lock that a second
+     machine of the same hostname wrote, an old box still running
+     beside its rebuild, with exit 0 and nothing said [M4 case E]: a
+     prune from elsewhere could then delete what that machine's backup
+     is writing); otherwise from another machine that holds it once it
+     is half an hour old, or `restic unlock --remove-all` sooner, when
+     nothing else holds the repository;
    - exit 1 — a write refused (S3's 403 [M3]), a storage gone, a read
      that failed — or the clock, where restic retries (B2's 401, which
      it retried for a quarter of an hour [measured, RC check 6]): one

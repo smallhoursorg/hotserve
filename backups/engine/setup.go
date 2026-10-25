@@ -1320,8 +1320,11 @@ func (s *setup) lockLeftLine() string {
 // left, and with what: a key that may delete, which the key setup
 // was given may not be — from this box at once once setup has ended,
 // since restic takes a lock of this host whose pid is gone for stale
-// [M4 cases C, D]; from elsewhere once it is half an hour old.
-const unlockWhere = "from this box at once once setup has ended, given that key's credentials; from another machine that holds it once the lock is half an hour old; or with restic unlock --remove-all sooner, when nothing else holds the repository"
+// [M4 cases C, D], but only where no other machine of this hostname
+// runs restic against the repository, since it takes that machine's
+// live lock for stale as well [M4 case E]; otherwise from elsewhere
+// once it is half an hour old.
+const unlockWhere = "from this box at once, once setup has ended, given that key's credentials, if no other machine with this hostname runs restic against the repository; otherwise from another machine that holds it once the lock is half an hour old; or with restic unlock --remove-all sooner, when nothing else holds the repository"
 
 // lockLeft is the opening's word on what a stop leaves; lockLeftMade
 // the same after init made the repository.
