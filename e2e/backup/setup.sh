@@ -187,8 +187,9 @@ says "Repository password (new)" && fail "a password was made for a repository t
 # (500, as B2's 401 was retried for a quarter of an hour [RC check 6]),
 # which the clock ends — 30 s in this box's binary. The opening once
 # only read, so both were taken, and every run after failed; it takes
-# the repository's lock now, and each ends on one neutral line with the
-# last line restic said. Then a key that may write and not delete (the
+# the repository's lock now, and each ends on one neutral line with
+# what restic said, without its retry lines. Then a key that may write
+# and not delete (the
 # proxy refuses DELETE alone): restic writes the lock file, cannot
 # remove it, says so on stderr ("error while unlocking:") and exits 0
 # [M4 case A] — the opening reads that line, and refuses the key.

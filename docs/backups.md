@@ -573,8 +573,9 @@ Each is **unverified**, and a check the release candidate runs
   there without coming down to your machine.
 - **A read-only key**: `setup` opens a repository that is there
   already taking its lock, which writes a lock file and removes it. A
-  key that cannot write ends setup on one neutral line with restic's
-  own last line — at once where the storage says so plainly, at its
+  key that cannot write a lock file ends setup on one neutral line with
+  what restic said, without its retry lines, cut at 300 characters — at
+  once where the storage says so plainly, at its
   two-minute clock where restic retries — and a key that wrote the lock
   file and could not remove it is refused by restic's own word that it
   could not, `error while unlocking:`
