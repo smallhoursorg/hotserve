@@ -135,12 +135,14 @@ func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten
 		{"M4 G's shape at exit 1: a cause before restic's trailing hint line is kept", func(b *box) {
 			b.outcome["open"], b.openErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, "Fatal: unable to open repository at s3:http://e2e-s3:9000/box: wrong password or no key found\nthe `unlock` command can be used to remove stale locks\n"
 		}, exit1 + "Fatal: unable to open repository at s3:http://e2e-s3:9000/box: wrong password or no key found the `unlock` command can be used to remove stale locks", ""},
-		{"exit 1 on a read before any write (a storage that went away): the neutral line, all restic said from its head", func(b *box) {
-			// Three retry lines fill record.Text's 300 runes before the
-			// Fatal line: what is said is the head, the cause past the
-			// cut (reported with the round, 2026-10-25).
+		{"exit 1 on a read retried three times, then the Fatal (a storage that went away): the retries go before the cut, and the Fatal's cause is quoted", func(b *box) {
+			// Three retry lines alone would fill record.Text's 300 runes
+			// before the Fatal line.
 			b.outcome["open"], b.openErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, strings.Repeat(load+"\n", 3)+"Fatal: unable to open repository at s3:http://e2e-s3:9000/box: Load(<config/>, 0, 0) failed: client.GetObject: 503 Slow Down\n"
-		}, exit1 + load + " " + load, ""},
+		}, exit1 + "Fatal: unable to open repository at s3:http://e2e-s3:9000/box: Load(<config/>, 0, 0) failed: client.GetObject: 503 Slow Down", ""},
+		{"exit 1 where the retries are all restic said: the last of them is quoted", func(b *box) {
+			b.outcome["open"], b.openErr = unit.Outcome{Result: "exit-code", ExitStatus: 1}, strings.Repeat(load+"\n", 2)+b2+"\n"
+		}, exit1 + b2, ""},
 		{"exit 1 with nothing said: the neutral line, in hotserve's words for restic's exit 1", func(b *box) {
 			b.outcome["open"] = unit.Outcome{Result: "exit-code", ExitStatus: 1}
 		}, exit1 + "restic failed (exit 1): the storage could not be reached, or refused the key, or something else went wrong", ""},

@@ -1154,7 +1154,9 @@ What can be known to fail is refused before anything is asked for
      neutral line. Exit 1 is "restic could not open the repository with
      its lock (exit 1): …" with all restic said, cleaned — restic
      prints hint lines last [M4 case G], and the cause is before them —
-     and cut at 300 characters; the clock is "restic had not finished
+     less restic's retry lines ("… returned error, retrying after …")
+     wherever another line remains, the last of them kept where they are
+     all it said, and then cut at 300 characters; the clock is "restic had not finished
      opening the repository with its lock within 2m0s" with the last
      line restic said, and that a lock file restic was writing may
      stay, with where `restic unlock` clears it, as the interrupt says.

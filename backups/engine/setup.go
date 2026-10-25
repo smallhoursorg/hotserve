@@ -1114,8 +1114,10 @@ func (s *setup) openRepository(ctx context.Context) (id string, opened bool, err
 	case o.Result == "exit-code" && o.ExitStatus == 1:
 		// The whole of what restic said, cleaned, as the reopen quotes
 		// it: restic prints hint lines last [M4 case G], and the cause
-		// is before them.
-		said := record.Text(message)
+		// is before them. Its retry lines go first, before the cut:
+		// a minute of them would fill the 300 runes and leave the cause
+		// past it.
+		said := record.Text(s.withoutRetries("open"))
 		if said == "" {
 			said, _ = resticFailure(o)
 		}
@@ -1150,6 +1152,31 @@ func (s *setup) unlockFailed() string {
 		return remove
 	}
 	return unlocking
+}
+
+// withoutRetries is what a unit's restic wrote to stderr, by role, less
+// its retry lines ("… returned error, retrying after …") wherever any
+// other line remains: they name the storage's answer, which the line
+// after them repeats, and a minute of them would fill record.Text's
+// cut before the cause. Where the retries are all restic said, the last
+// of them is kept.
+func (s *setup) withoutRetries(role string) string {
+	raw, _ := os.ReadFile(s.errFile(role))
+	var kept []string
+	lastRetry := ""
+	for _, l := range strings.Split(string(raw), "\n") {
+		switch {
+		case record.Clean(l) == "":
+		case strings.Contains(l, "returned error, retrying after"):
+			lastRetry = l
+		default:
+			kept = append(kept, l)
+		}
+	}
+	if len(kept) == 0 && lastRetry != "" {
+		kept = []string{lastRetry}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // resticSaid is restic's words, appended, where it had any.
