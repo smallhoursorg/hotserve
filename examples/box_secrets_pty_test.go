@@ -159,7 +159,7 @@ func (r *boxRepo) pasteAtPrompt(t *testing.T, set func(*syscall.Termios), gap ti
 	case <-time.After(30 * time.Second):
 		// Stopped (^Z) or waiting for more: either way, not done.
 		_ = cmd.Process.Kill()
-		<-waited
+		<-waited //nolint:errcheck // killed: the exit is ours, not the test's
 		t.Fatalf("still running 30 s after the keys %q", writes)
 	}
 	if err != nil {

@@ -1983,7 +1983,7 @@ func TestDestructWaitsForADeployInFlight(t *testing.T) {
 			release(tc.fetchErr)
 			for _, ch := range []chan error{deployed, destructed} {
 				select {
-				case <-ch:
+				case <-ch: //nolint:errcheck // whatever each comes to: the test judges what is left running
 				case <-time.After(5 * time.Second):
 					t.Fatal("the deploy and then Destruct must both end")
 				}
