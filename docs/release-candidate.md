@@ -127,13 +127,17 @@ That both keys work without `listAllBucketNames` or `readBuckets`,
 which the guide does not give them: **unverified**.
 
 Where `setup` finds a repository there already — check 4's copy, check
-7's second box, check 9 — it holds the key to writing a lock file and
-removing it. After such a `setup`, and before the next run,
-`restic list locks --no-lock | wc -l` from the off-box machine should
-be 0: where B2 refused a delete by name to a key without `deleteFiles`
-(check 3's first step), restic would exit 0 with a warning, `setup`
-would pass, and the lock would stay, holding off a `prune` until
-`restic unlock` removes it.
+7's second box, check 9 — its opening takes the repository's lock,
+writing a lock file and removing it. After such a `setup`, and before
+the next run, `restic list locks --no-lock | wc -l` from the off-box
+machine should be 0. Where B2 refuses a delete by name to a key
+without `deleteFiles` (check 3's first step), restic exits 0 and says
+`error while unlocking:`, and `setup` refuses the key, naming the lock
+it left: `restic opened the repository and could not remove the lock
+file it wrote (restic said: Remove(<lock/…>) failed: …)`, then where
+`restic unlock` clears it (check 6 has the whole line). That lock is
+removed with a key that may delete, and, as check 3 says, the bucket's
+design is decided before any other check.
 
 ## 3. Keys that cannot destroy a version
 
