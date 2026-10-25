@@ -87,6 +87,13 @@ func TestWhateverLeavesInitRunningLeavesItWhatItNeeds(t *testing.T) {
 // holder, and setup goes on. However it is refused, setup ends before
 // anything of its own is written.
 func TestAKeyThatCannotWriteAnExistingRepositoryIsRefusedBeforeAnythingIsWritten(t *testing.T) {
+	// The remedy every lock-left row ends with, written out: plain
+	// unlock from this box strips a live lock of a second machine of
+	// the same hostname [M4 case E], so the from-this-box clause is
+	// qualified.
+	if unlockWhere != "from this box at once, once setup has ended, given that key's credentials, if no other machine with this hostname runs restic against the repository; otherwise from another machine that holds it once the lock is half an hour old; or with restic unlock --remove-all sooner, when nothing else holds the repository" {
+		t.Fatalf("the lock-left remedy is %q", unlockWhere)
+	}
 	// M4 case A, three times out of three: DELETE refused (403), exit 0.
 	// As captured, the last line with no newline after it.
 	const unlockRefused = "Remove(<lock/bb19e73ef3>) failed: client.RemoveObject: Access Denied.\nerror while unlocking: client.RemoveObject: Access Denied."
