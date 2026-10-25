@@ -506,3 +506,250 @@ So E stands: a live restic (state Tl, held), its lock with this box's
 hostname and a pid the box does not run — a second machine of the same
 hostname, as restic on this box sees it — and unlock in setup's shape
 removed it.
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Case G, and case A's opening twice more — taken the same day on a
+# fresh box (same image, same compose project of its own), the capture
+# above unchanged:
+#
+#   COMPOSE_PROJECT_NAME=hotserve-m4 docker compose up --build -d e2e-s3 e2e-backup-box
+#   COMPOSE_PROJECT_NAME=hotserve-m4 docker compose cp m4g.sh e2e-backup-box:/root/m4g.sh
+#   COMPOSE_PROJECT_NAME=hotserve-m4 docker compose exec -T e2e-backup-box chmod 0755 /root/m4g.sh
+#   COMPOSE_PROJECT_NAME=hotserve-m4 docker compose exec -T e2e-backup-box /root/m4g.sh
+
+## the script: /root/m4g.sh
+
+#!/bin/bash
+# M4, case G and case A again (#352, 2026-10-25): what the locking opening
+# says when another restic holds the repository exclusively and the
+# storage refuses the DELETE of the opening's own lock; and case A's
+# opening twice more. Built nothing; measures only. The helpers below are
+# m4-unlock.sh's, verbatim: every restic measured runs in setup's shape.
+set -u
+. /lib.sh
+. /lib-backup.sh
+wait_for_systemd
+id hotserve-backup >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-hotserve hotserve-backup
+
+M=/root/m4
+rm -rf "$M" /root/m4-cache /tmp/m4-ecache
+mkdir -p "$M"
+PW=m4-repository-password
+envfile() { # <file> <repository>: the staged file's shape, as setup writes it
+	printf 'RESTIC_REPOSITORY=%s\nRESTIC_PASSWORD=%s\nAWS_ACCESS_KEY_ID=AKIDE2EFIXTURE\nAWS_SECRET_ACCESS_KEY=e2e-fixture-key-not-a-secret\n' "$2" "$PW" >"$1"
+	chmod 0600 "$1"
+}
+envfile "$M/direct.env" s3:http://e2e-s3:9000/m4repo
+envfile "$M/proxy.env" s3:http://127.0.0.1:9100/m4repo
+# The measurement's own look, as root, straight at e2e-s3, its own cache.
+look() { (
+	set -a
+	. "$M/direct.env"
+	RESTIC_CACHE_DIR=/root/m4-cache
+	set +a
+	restic "$@"
+); }
+locks() { # the repository's locks, each as restic reads it
+	ids=$(look list locks --no-lock 2>&1)
+	echo "locks after: $(printf '%s\n' "$ids" | grep -c .)"
+	for id in $ids; do
+		echo "  $id: $(look cat lock "$id" --no-lock 2>&1 | tr -d '\n' | tr -s ' ')"
+	done
+}
+secs() { awk "BEGIN{printf \"%.1f\", $(date +%s.%N)-$1}"; }
+
+VIEW='-/usr -/bin -/sbin -/lib -/lib64 -/etc/passwd -/etc/group -/etc/ld.so.cache -/etc/ld.so.conf -/etc/ld.so.conf.d -/etc/alternatives -/etc/localtime -/etc/ssl/certs -/etc/ssl/openssl.cnf -/etc/ca-certificates -/etc/resolv.conf -/etc/hosts -/etc/nsswitch.conf -/run/systemd/resolve'
+# shape <label> <env file> <restic args…>: CMD is that unit's systemd-run,
+# property for property as Spec.properties() renders a resticUnit.
+shape() {
+	label=$1 env=$2
+	shift 2
+	name=hotserve_backup_m4_$label.service
+	CMD=(systemd-run --wait --collect --expand-environment=no --unit="$name"
+		-p "Description=m4 $label" -p Type=oneshot -p TimeoutStartSec=infinity -p KillMode=control-group
+		-p TemporaryFileSystem=/:ro -p PrivateTmp=yes -p PrivateDevices=yes -p PrivateNetwork=no
+		-p NoNewPrivileges=yes -p CapabilityBoundingSet= -p AmbientCapabilities=
+		-p ProtectControlGroups=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectKernelLogs=yes
+		-p RestrictNamespaces=yes -p RestrictRealtime=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes -p UMask=0077
+		-p "StandardError=truncate:$M/$label.err" -p User=hotserve-backup -p "EnvironmentFile=$env"
+		-p Environment=RESTIC_CACHE_DIR=/var/cache/hotserve-backup -p Environment=HOME=/nonexistent -p Environment=TZ=UTC
+		-p "StandardOutput=truncate:$M/$label.out" -p CacheDirectory=hotserve-backup
+		-p "BindReadOnlyPaths=$VIEW" /usr/bin/restic "$@")
+	echo "\$ restic $*    [unit $name, setup's shape, $(basename "$env")]"
+}
+said() { # <label> <rc> <started>: what the unit's restic said, and how it ended
+	echo "[exit $2, $(secs "$3")s]"
+	grep -h 'Finished with result\|Main processes terminated\|Service runtime' "$M/$1.run" | sed 's/^/  systemd-run: /'
+	[ -s "$M/$1.out" ] && { echo "  --- stdout"; sed 's/^/  /' "$M/$1.out"; }
+	[ -s "$M/$1.err" ] && { echo "  --- stderr"; sed 's/^/  /' "$M/$1.err"; }
+	true
+}
+unit() { # <label> <env file> <restic args…>: one unit, waited for
+	shape "$@"
+	s=$(date +%s.%N)
+	"${CMD[@]}" >"$M/$1.run" 2>&1
+	said "$1" $? "$s"
+	locks
+}
+capped() { # <label> <env file> <restic args…>: one unit, stopped from outside at 180 s
+	shape "$@"
+	s=$(date +%s.%N)
+	"${CMD[@]}" >"$M/$1.run" 2>&1 &
+	client=$!
+	for t in 30 60 90 120 150 180; do
+		for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+			kill -0 "$client" 2>/dev/null || break 2
+			sleep 1
+		done
+		echo "  at ${t}s: running; stderr lines $(wc -l <"$M/$1.err"), \"retrying after\" lines $(grep -c 'retrying after' "$M/$1.err")"
+	done
+	if kill -0 "$client" 2>/dev/null; then
+		echo "  stopped from outside at $(secs "$s")s (systemctl stop, as setup's clock does): the brief's three minutes"
+		systemctl stop "$name"
+	fi
+	wait "$client"
+	said "$1" $? "$s"
+	locks
+}
+proxy() { # <status> <methods>: the box's own proxy to e2e-s3, answering those methods itself
+	printf '{\n\tadmin off\n\tauto_https off\n}\nhttp://127.0.0.1:9100 {\n\t@refused method %s\n\trespond @refused %s\n\treverse_proxy e2e-s3:9000\n}\n' "$2" "$1" >"$M/proxy.Caddyfile"
+	echo "## the proxy: $2 answered $1 by the proxy itself, everything else passed to e2e-s3:9000"
+	sed 's/^/  /' "$M/proxy.Caddyfile"
+	systemctl stop m4-proxy.service 2>/dev/null
+	systemctl reset-failed m4-proxy.service 2>/dev/null
+	systemd-run --quiet --collect --unit=m4-proxy.service /usr/bin/hotserve run --config "$M/proxy.Caddyfile" --adapter caddyfile
+	i=0
+	until curl -s -o /dev/null http://127.0.0.1:9100/ || [ "$i" -ge 100 ]; do
+		i=$((i + 1))
+		sleep 0.1
+	done
+	systemctl is-active --quiet m4-proxy.service || { echo "FATAL: the proxy did not start: $(systemctl status m4-proxy.service 2>&1 | tail -5)"; exit 1; }
+}
+wait_lock() { # until the repository holds a lock (up to 60 s)
+	i=0
+	until [ "$(look list locks --no-lock 2>/dev/null | grep -c .)" -ge 1 ] || [ "$i" -ge 600 ]; do
+		i=$((i + 1))
+		sleep 0.1
+	done
+}
+
+echo "# M4 case G, and case A's opening twice more — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+echo "box: hostname $(hostname), $(restic version), $(systemctl --version | head -1)"
+look init 2>&1 | head -1 | sed 's/^/  /'
+echo "## G, before: something for check to read — a backup of /usr by root, straight to e2e-s3"
+look backup /usr --quiet >"$M/G-data.out" 2>&1
+echo "[exit $?] restic backup /usr --quiet"
+locks
+
+echo
+echo "## G. a live exclusive lock held from elsewhere: restic check --read-data by root under another hostname (its own UTS namespace), held with SIGSTOP, as M2 held one"
+(
+	set -a
+	. "$M/direct.env"
+	set +a
+	export RESTIC_CACHE_DIR=/root/m4-gcache
+	exec unshare --uts /bin/sh -c 'hostname m4-elsewhere && exec /usr/bin/restic check --read-data' >"$M/G-holder.out" 2>"$M/G-holder.err"
+) &
+gholder=$!
+wait_lock
+gpid=$(pgrep -n -f '^/usr/bin/restic check --read-data')
+kill -STOP "$gpid"
+echo "  the holder: $(ps -o pid=,stat=,user=,args= -p "$gpid"); hostname in its UTS namespace: $(nsenter -t "$gpid" -u hostname)"
+locks
+proxy 403 DELETE
+unit G-open "$M/proxy.env" cat config
+echo "  the holder after it: $(ps -o pid=,stat= -p "$gpid" || echo gone)"
+echo "### the holder let go and killed, then every lock cleared (root, straight to e2e-s3, unlock --remove-all)"
+kill -CONT "$gpid" 2>/dev/null
+kill -KILL "$gpid" 2>/dev/null
+wait "$gholder" 2>/dev/null
+look unlock --remove-all 2>&1 | sed 's/^/  /'
+locks
+
+echo
+echo "## A, again: the locking opening through the proxy refusing DELETE (403), twice more"
+unit A-again-1 "$M/proxy.env" cat config
+unit A-again-2 "$M/proxy.env" cat config
+
+systemctl stop m4-proxy.service 2>/dev/null
+echo
+echo "# done $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+## the run
+
+# M4 case G, and case A's opening twice more — 2026-10-25 12:51:45 UTC
+box: hostname 674ddd9fee62, restic 0.18.0 compiled with go1.24.4 on linux/arm64, systemd 257 (257.13-1~deb13u1)
+  created restic repository bde365989f at s3:http://e2e-s3:9000/m4repo
+## G, before: something for check to read — a backup of /usr by root, straight to e2e-s3
+[exit 0] restic backup /usr --quiet
+locks after: 0
+
+## G. a live exclusive lock held from elsewhere: restic check --read-data by root under another hostname (its own UTS namespace), held with SIGSTOP, as M2 held one
+  the holder:     175 Tl   root     /usr/bin/restic check --read-data; hostname in its UTS namespace: m4-elsewhere
+locks after: 1
+  1403fae957fbf9c080aab54b490d768d2f52a3c7f665cc9de514b994b2260944: { "time": "2026-10-25T12:51:50.128917801Z", "exclusive": true, "hostname": "m4-elsewhere", "username": "root", "pid": 175}
+## the proxy: DELETE answered 403 by the proxy itself, everything else passed to e2e-s3:9000
+  {
+  	admin off
+  	auto_https off
+  }
+  http://127.0.0.1:9100 {
+  	@refused method DELETE
+  	respond @refused 403
+  	reverse_proxy e2e-s3:9000
+  }
+$ restic cat config    [unit hotserve_backup_m4_G-open.service, setup's shape, proxy.env]
+[exit 11, 0.5s]
+  systemd-run: Finished with result: exit-code
+  systemd-run: Main processes terminated with: code=exited, status=11/n/a
+  systemd-run: Service runtime: 534ms
+  --- stdout
+  repo already locked, waiting up to 0s for the lock
+  --- stderr
+  unable to create lock in backend: repository is already locked exclusively by PID 175 on m4-elsewhere by root (UID 0, GID 0)
+  lock was created at 2026-10-25 12:51:50 (1.728985751s ago)
+  storage ID 1403fae9
+  the `unlock` command can be used to remove stale locks
+locks after: 1
+  1403fae957fbf9c080aab54b490d768d2f52a3c7f665cc9de514b994b2260944: { "time": "2026-10-25T12:51:50.128917801Z", "exclusive": true, "hostname": "m4-elsewhere", "username": "root", "pid": 175}
+  the holder after it:     175 Tl
+### the holder let go and killed, then every lock cleared (root, straight to e2e-s3, unlock --remove-all)
+  successfully removed 1 locks
+locks after: 0
+
+## A, again: the locking opening through the proxy refusing DELETE (403), twice more
+$ restic cat config    [unit hotserve_backup_m4_A-again-1.service, setup's shape, proxy.env]
+[exit 0, 0.7s]
+  systemd-run: Finished with result: success
+  systemd-run: Main processes terminated with: code=exited, status=0/SUCCESS
+  systemd-run: Service runtime: 685ms
+  --- stdout
+  {
+    "version": 2,
+    "id": "bde365989f57ff1c3b35db4b70808391d28c3539699cd4fede83d95e7e5ad5fc",
+    "chunker_polynomial": "3417dd3ea46a1b"
+  }
+  --- stderr
+  Remove(<lock/74a5af2646>) failed: client.RemoveObject: Access Denied.
+  error while unlocking: client.RemoveObject: Access Denied.locks after: 1
+  74a5af26467919e35b4241e7b65d92e803fdf1282843a55b8bf166ffcd0a0ab1: { "time": "2026-10-25T12:51:54.169737011Z", "exclusive": false, "hostname": "674ddd9fee62", "username": "hotserve-backup", "pid": 339, "uid": 995, "gid": 995}
+$ restic cat config    [unit hotserve_backup_m4_A-again-2.service, setup's shape, proxy.env]
+[exit 0, 0.7s]
+  systemd-run: Finished with result: success
+  systemd-run: Main processes terminated with: code=exited, status=0/SUCCESS
+  systemd-run: Service runtime: 679ms
+  --- stdout
+  {
+    "version": 2,
+    "id": "bde365989f57ff1c3b35db4b70808391d28c3539699cd4fede83d95e7e5ad5fc",
+    "chunker_polynomial": "3417dd3ea46a1b"
+  }
+  --- stderr
+  Remove(<lock/ad8ca0a298>) failed: client.RemoveObject: Access Denied.
+  error while unlocking: client.RemoveObject: Access Denied.locks after: 2
+  74a5af26467919e35b4241e7b65d92e803fdf1282843a55b8bf166ffcd0a0ab1: { "time": "2026-10-25T12:51:54.169737011Z", "exclusive": false, "hostname": "674ddd9fee62", "username": "hotserve-backup", "pid": 339, "uid": 995, "gid": 995}
+  ad8ca0a2986b92d5354042cab7486fb8a518eb13421e45439273a4b5db889390: { "time": "2026-10-25T12:51:55.764231804Z", "exclusive": false, "hostname": "674ddd9fee62", "username": "hotserve-backup", "pid": 392, "uid": 995, "gid": 995}
+
+# done 2026-10-25 12:51:57 UTC
+m4g exit 0
