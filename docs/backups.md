@@ -85,7 +85,9 @@ capabilities — Read and Write, which may delete, Read Only and Write
 Only — so make the two keys once from the command line, with Debian
 13's `backblaze-b2` (3.19; a `debian:13` container will do: apt
 brings the CA certificates with it, which it does not with `restic`
-or `rclone` [measured]):
+or `rclone` [measured: the `apt-get install -s` and `apt-cache depends`
+lines of
+[`docs/design/backups/rc-runs/rc-results/L11-tar-exclude-umask.out`](design/backups/rc-runs/rc-results/L11-tar-exclude-umask.out)]):
 
 ```sh
 apt-get update && apt-get install -y backblaze-b2
@@ -255,7 +257,11 @@ of your own with Debian's restic (0.18), in `bash`, with your own
 machine's key and the repository's password (in a `debian:13`
 container, `apt-get install -y restic ca-certificates`: restic alone
 brings no CA certificates, and fails `x509: certificate signed by
-unknown authority` [measured]): `restic snapshots` for
+unknown authority` [measured: the failure in
+[`docs/design/backups/rc-runs/rc-results/L6-offbox-container.out`](design/backups/rc-runs/rc-results/L6-offbox-container.out),
+the dependency in the `apt-cache depends restic` line of
+[`docs/design/backups/rc-runs/rc-results/L11-tar-exclude-umask.out`](design/backups/rc-runs/rc-results/L11-tar-exclude-umask.out)]):
+`restic snapshots` for
 whether the backups are fresh, and `restic check --read-data` for
 whether anything under them was hidden, overwritten or damaged, which a
 fresh-looking listing does not show.
@@ -391,6 +397,14 @@ minted with the old one is refused: a flat 401, and the journal's
 `webhook auth failed` line carries, in its `refused` field,
 `local:<path>: go-jose/go-jose: error in cryptographic primitive`
 ([liveswap/README.md](../liveswap/README.md)).
+
+Every other `env_file` the Caddyfile names comes back only if it is in
+the box repo. One made by hand, such as `/etc/hotserve/demo.env`, is in
+neither the backup nor the repo, and a launch that reads a missing env
+file fails. Move a hand-made one in by
+[Move a hand-made env file in](secrets.md#move-a-hand-made-env-file-in)
+while the old box still runs: until then, nothing this guide covers
+restores it.
 
 ## The weekly drill, and what it costs
 
@@ -570,7 +584,15 @@ Three things the copy needs, each seen going wrong without it:
 decides whether it was: with `RESTIC_REPOSITORY` set to the new bucket,
 `restic snapshots` and `restic check --no-lock --read-data`. A check
 that finds errors means the moment was too late — make another copy,
-earlier; the copy never changes the attacked bucket, so trying again
+earlier. A check can also come back clean on a moment too late: an
+attack that first hides the newest snapshot leaves a copy after that
+hide whole, and short of it. So for a moment taken from the bucket's
+history, the newest snapshot `restic snapshots` lists for each app must
+be the one `hotserve-backup status` named before the attack — the
+`snapshot <id>` on its `last complete backup` line; one missing means
+the moment fell after the attack began, and an earlier one is needed.
+(A copy at `status`'s own minute holds the backup before that one, as
+below.) The copy never changes the attacked bucket, so trying again
 costs only the copy. Earlier is safe: a moment in the middle of a run
 leaves that run's unfinished files, which restic calls "non-critical"
 (`1 additional files were found in the repo, which likely contain
@@ -639,16 +661,20 @@ every backup — and restic changes a master key only by moving the data
 into a new repository (`restic copy`) or starting a new one. Anyone who
 later reads the bucket with them can read the backups.
 
-Whoever had root had the apps' secrets too: every env file under
-`/etc/hotserve/secrets` in clear, and the box's key with them. Then
-every value changes — database passwords, third-party keys — on the
-rebuilt box in this order: `make rekey` first, since `recipients`
-still names the old box's key and a `make secret` before it would
-encrypt to that key and the workflow refuse the push
-([A rebuilt box](secrets.md#a-rebuilt-box)); then each value set anew
-with `make secret` ([Add a secret](secrets.md#add-a-secret)); then
-the first deploy. `make rekey` alone re-encrypts the values the
-attacker holds.
+Whoever had root had the apps' secrets too: every env file the
+Caddyfile names, in clear — those under `/etc/hotserve/secrets` and
+any made by hand — and the box's key with them. Then every value of
+every one of them changes — database passwords, third-party keys,
+hand-made files' included — on the rebuilt box in this order: `make
+rekey` first, since `recipients` still names the old box's key and a
+`make secret` before it would encrypt to that key and the workflow
+refuse the push ([A rebuilt box](secrets.md#a-rebuilt-box)); then each
+value set anew with `make secret` ([Add a secret](secrets.md#add-a-secret)),
+a hand-made file's too, with the app's block changed to read
+`/etc/hotserve/secrets/<app>.env` — not imported by
+[the door](secrets.md#move-a-hand-made-env-file-in), which would carry
+the attacker's values in; then the first deploy. `make rekey` alone
+re-encrypts the values the attacker holds.
 
 ## Against a real provider
 

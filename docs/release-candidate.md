@@ -25,7 +25,10 @@ every one is still **unverified**.
 0.18 and the [look](backups.md#look-from-your-own-machine) lines' first
 three set, with its own key; where it is a `debian:13` container,
 install `ca-certificates` beside `restic` and `rclone`: apt brings it
-with neither (rclone only suggests it; measured), and
+with neither (rclone only suggests it; measured: the `apt-get install
+-s` and `apt-cache depends` lines of
+[`docs/design/backups/rc-runs/rc-results/L11-tar-exclude-umask.out`](design/backups/rc-runs/rc-results/L11-tar-exclude-umask.out)),
+and
 restic without it fails every https storage,
 `x509: certificate signed by unknown authority`.
 
@@ -81,8 +84,9 @@ password — **unverified** on B2.
 both its lines. Each as [Backups](backups.md) shows it: **unverified**
 over S3's and Hetzner's TLS; the e2e server over TLS from a private CA gave
 exactly those lines, and MinIO the look's. **On B2:** all of it, as
-written, from an arm64 Hetzner VPS; the drill 10 s, the look's check
-`no errors were found`.
+written — the box's lines on an arm64 Hetzner VPS, the look from the
+owner's laptop in a `debian:13` container with `ca-certificates`
+added; the drill 10 s, the look's check `no errors were found`.
 
 ## 3. Keys that cannot destroy a version
 
