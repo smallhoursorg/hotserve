@@ -2,7 +2,7 @@ module github.com/smallhoursorg/hotserve/penaltybox
 
 // The Go toolchain is pinned by the golang image in docker-compose.yml —
 // no toolchain directive needed here.
-go 1.26.1
+go 1.27.1
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.7

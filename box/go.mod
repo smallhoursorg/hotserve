@@ -7,7 +7,7 @@ module github.com/smallhoursorg/hotserve/box
 
 // The Go toolchain is pinned by the golang image in docker-compose.yml —
 // no toolchain directive needed here.
-go 1.26.1
+go 1.27.1
 
 // The box imports liveswap's deploy trust and response filter (the
 // allowed direction, DESIGN-box.md); built only from this repo, so the

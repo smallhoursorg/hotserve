@@ -5,12 +5,12 @@
 // this repo, never fetched with `go get`.
 module github.com/smallhoursorg/hotserve
 
-go 1.26.1
+go 1.27.1
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/darkweak/souin/plugins/caddy v1.7.9
-	github.com/darkweak/storages/otter/caddy v0.0.20
+	github.com/darkweak/storages/otter/caddy v0.0.22
 	github.com/smallhoursorg/hotserve/box v0.0.0-00010101000000-000000000000
 	github.com/smallhoursorg/hotserve/liveswap v0.0.0-00010101000000-000000000000
 	github.com/smallhoursorg/hotserve/penaltybox v0.0.0-00010101000000-000000000000
@@ -51,8 +51,8 @@ require (
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/darkweak/souin v1.7.9 // indirect
-	github.com/darkweak/storages/core v0.0.20 // indirect
-	github.com/darkweak/storages/otter v0.0.19 // indirect
+	github.com/darkweak/storages/core v0.0.21 // indirect
+	github.com/darkweak/storages/otter v0.0.21 // indirect
 	github.com/dgraph-io/badger v1.6.2 // indirect
 	github.com/dgraph-io/badger/v2 v2.2007.4 // indirect
 	github.com/dgraph-io/ristretto v0.2.0 // indirect
