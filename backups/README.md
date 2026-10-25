@@ -935,15 +935,17 @@ It needs no privilege.
   seconds for the look that comes first): the look or the opening is
   stopped, and nothing of setup's has been written (an opening stopped
   between writing restic's lock file and removing it leaves it, and
-  restic never passes a stale lock by itself [M75]: `restic unlock`
-  removes it from the box at once, once setup has ended — restic takes
-  a same-host lock whose pid is gone for stale [M4 cases C, D] — from
-  another machine once it is half an hour old, or with `--remove-all`
-  when nothing else holds the repository); init is left
+  restic never passes a stale lock by itself [M75], which the
+  opening's clock line says: `restic unlock`, with a key that may
+  delete, removes it from the box at once once setup has ended, given
+  that key's credentials — restic takes a same-host lock whose pid is
+  gone for stale [M4 cases C, D] — from another machine that holds it
+  once it is half an hour old, or with `--remove-all` when nothing
+  else holds the repository); init is left
   running, said, and waited for by whatever comes next.
 - `setup`, for a repository that is there already, or one it has just
   made: a key that cannot write a lock file to it, or a storage that
-  refuses the write, on one neutral line with restic's last; and a key
+  refuses the write, on one neutral line with what restic said; and a key
   that wrote the lock file and could not remove it, by restic's own
   word that it could not, `error while unlocking:` [M4 cases A, B]
   ("Setup", 7).
@@ -1139,20 +1141,28 @@ What can be known to fail is refused before anything is asked for
      elsewhere, would exit 11 for good. The refusal names both causes
      that look alike from the box, a key that may not delete and a
      storage that refuses or does not answer deletes, and where the
-     lock goes: `restic unlock` removes it from this box at once once
-     setup has ended (restic takes a same-host lock whose pid is gone
-     for stale [M4 cases C, D]), from another machine once it is half
-     an hour old, or `restic unlock --remove-all` sooner, when nothing
-     else holds the repository;
+     lock goes: `restic unlock`, with a key that may delete — not the
+     one refused, and not one the box holds — removes it from this box
+     at once once setup has ended, given that key's credentials (restic
+     takes a same-host lock whose pid is gone for stale [M4 cases C,
+     D]), from another machine that holds it once it is half an hour
+     old, or `restic unlock --remove-all` sooner, when nothing else
+     holds the repository;
    - exit 1 — a write refused (S3's 403 [M3]), a storage gone, a read
      that failed — or the clock, where restic retries (B2's 401, which
      it retried for a quarter of an hour [measured, RC check 6]): one
-     neutral line, "restic could not open the repository with its lock
-     (exit 1): …" or "restic had not finished opening the repository
-     with its lock within 2m0s", with the last line restic said. No
-     cause is named, since a key replaced for a storage that throttled
-     reads is the wrong one; a run with a key that cannot write fails
-     that long after it starts, every hour;
+     neutral line. Exit 1 is "restic could not open the repository with
+     its lock (exit 1): …" with all restic said, cleaned — restic
+     prints hint lines last [M4 case G], and the cause is before them —
+     less restic's retry lines ("… returned error, retrying after …")
+     wherever another line remains, the last of them kept where they are
+     all it said, and then cut at 300 characters; the clock is "restic had not finished
+     opening the repository with its lock within 2m0s" with the last
+     line restic said, and that a lock file restic was writing may
+     stay, with where `restic unlock` clears it, as the interrupt says.
+     No cause is named, since a key replaced for a storage that
+     throttled reads is the wrong one; a run with a key that cannot
+     write fails that long after it starts, every hour;
    - exit 11, another restic holding the repository (a prune or a check
      from elsewhere): restic looks for other locks before it writes its
      own, and leaves nothing [M4 case G]. The opening is read again
@@ -1293,7 +1303,8 @@ severity × occurrence × detection, then the fix's size and risk.
 | An exit 1 at the opening whose own last line says "context canceled" is appended as the storage's word. | `lastSaid` | 2 | 1 | 3 | 6 | size 1, risk 2 | restic's stuck-request watchdog is five minutes and the opening's clock two, so within the clock the only cancel is setup's own, which is passed over; accepted (2026-10-23, the write-check PR). |
 | At the opening's clock, a stop of the unit the manager could not confirm ends setup in the runner's words ("the unit could not be confirmed gone: hotserve_backup_open_…"), with no word of the key, the lock file that may stay, or `restic unlock`; and the reopen's clock (after exit 11) ends in the runner's bare clock line, with no word that the exit-11 opening may have left a lock. | `openRepository` and `reopen` (`backups/engine/setup.go`), the `err != nil` arms; the look's clock ends the same way | 2 | 2 | 1 | 4 | size 2, risk 2 (a wording for `unit.ErrNotConfirmedGone` in the opening, as `check.go`'s probe has) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-23, the write-check PR, scored three times). The line names the unit, and `systemctl status` of it shows restic still at its retries; the operator's remedy is the one the clock refusal gives. |
 | A Ctrl-C at the opening that lands before restic has started (between the password's prompt and the manager taking the unit) ends with the interrupt's word that a lock file restic was writing may stay, though nothing ran. | `openRepository` sets `writing` before the unit; `err` (`backups/engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 2 (set the flag from the runner once the unit has started) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-23, the write-check PR). "May stay" holds either way, and `restic list locks` from your own machine answers it; the reopen after an exit 11 runs on the same context, and an interrupt there says the same, which is right of it: the lock-taking opening has run. |
-| After a successful init, the opening with the lock that follows it (for restic's word on a lock file it could not remove) meets a storage slow to show the new repository (exit 10, or 12), and setup ends "does not open yet … run setup again" after the password was shown and stored. | the init path of `Setup` (`backups/engine/setup.go`) | 2 | 3 | 1 | 6 | size 1, risk 2 (skip the opening after init, and with it the delete check on a first setup) | Rule 2 holds: red, named, with the remedy — setup again looks first, finds the repository, asks for the password shown, and opens it with the lock. Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-24, the write-check PR). |
+| After a successful init, the opening with the lock that follows it (for restic's word on a lock file it could not remove) meets a storage slow to show the new repository (exit 10, or 12), or a transient exit 1 or its clock, and setup ends — "does not open yet … run setup again", or the neutral exit-1 or clock line — after the password was shown and stored. | the init path of `Setup` (`backups/engine/setup.go`) | 2 | 3 | 1 | 6 | size 1, risk 2 (skip the opening after init, which leaves a key that cannot delete unchecked on a first setup) | Rule 2 holds: red, named, with "keep it" for the password and the remedy — setup again looks first, finds the repository, asks for the password shown, and opens it with the lock. Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-24, the write-check PR; extended to the transient exit 1 and the clock 2026-10-25). |
+| After an exit 11, a later opening that exits 12 (a wrong password typed at the next asking) clears `writing`, so a Ctrl-C at the asking after it says "nothing has been written", though the race at exit 11 may have left a lock of the opening's. | `openRepository`'s exit-12 arm, after `reopen` (`backups/engine/setup.go`) | 2 | 1 | 3 | 6 | size 1, risk 2 (`writing` made sticky once an exit 11 has been seen) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-25, #352's redesign). Occurrence 1: the race at exit 11, a key that may not delete, and a wrong password after it. `restic list locks` from your own machine shows the lock if there is one. |
 | A restic that rewords its `error while unlocking:` line would let a key that may write and not delete through `setup`: the opening exits 0, says nothing setup reads, `repository ready` is said, and every run after leaves one more lock, which restic never passes by itself [M75], until the first prune, or a check from elsewhere, exits 11 for good, naming the locks. | `unlockFailed` (`backups/engine/setup.go`) | 3 | 2 | 3 | 18 | size 3, risk 2 (lock listings before and after the opening, read and matched: the machinery the redesign removed, each part of it with hazards of its own; `restic unlock` after the opening instead removes a live lock of a same-hostname machine [M4 case E]) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-25, #352's redesign). Occurrence 2: a rewording in the restic a box runs, and hotserve shipping for it without its e2e — the support matrix is Debian 13 alone, which ships restic 0.18.0 and writes the line [M4 case A, three times out of three; case B], and the e2e's DELETE-refused case asserts the refusal, so a rewording goes red there before it ships. The key is refused in the end by restic itself, at the first prune, named. |
 | The race at exit 11: an exclusive lock that appears between restic's look for other locks and its write of its own — restic writes its lock, finds the other on its second look and removes its own, which a key that may not delete cannot do — leaves that lock, and setup goes on with the key's deleting unchecked. | `reopen` (`backups/engine/setup.go`) | 3 | 2 | 1 | 6 | size 2, risk 2 (read restic's own line on the exit-11 stderr too, and refuse on it; no test can make the race) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-25, #352's redesign). Occurrence 2: an exclusive prune or check from elsewhere starting within that moment of setup, and a key that may not delete. A plain exit 11 leaves nothing of the opening's own: restic looked before it wrote [M4 case G]. Named: the exit-11 line says "whether this key can write to it, or remove a lock file, was not checked". |
 | On the tryShown path after an init that exited 1 past the opening (`initRan`, not `made`), an interrupt during the opening says "nothing of setup's has been written; a lock file … may stay" and, on the same line, that init "may have made the repository". | `err` and `lockLeftLine` (`backups/engine/setup.go`); `TestAnInterruptDuringTheOpeningNamesTheLockItMayLeave` pins the line verbatim, as a pin of this accepted wording | 2 | 3 | 1 | 6 | size 2, risk 2 (`lockLeftLine` keyed on `initRan` too) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-24, the write-check PR). Both halves are true of their own things — nothing of this setup's opening is in the repository, and the earlier init may have written — and the fate names what to do. |
