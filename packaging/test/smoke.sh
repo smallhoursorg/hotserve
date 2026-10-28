@@ -1036,7 +1036,7 @@ st=$(systemctl show -P ActiveState hotserve)
 [ "$st" = failed ] || die "an upgrade over a failed hotserve left it '$st', not failed: it started it, or cleared the failure"
 grep -A1 -x 'hotserve is enabled but not running. Start it with:' /tmp/stopped.out | grep -qx '  systemctl start hotserve' \
 	|| die "an upgrade over a failed hotserve did not give the start line, with no sudo"
-grep -q -e 'restarted\.' -e 'FAILED' /tmp/stopped.out \
+grep -q -e '^hotserve restarted\.$' -e 'restarting onto the new version FAILED' /tmp/stopped.out \
 	&& die "an upgrade over a failed hotserve also said it restarted, or that the restart failed"
 # Recover the way the failed restart's hint says, so stage 4 starts
 # from a serving box. reset-failed first: stages 3 to 3c started the
