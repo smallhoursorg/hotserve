@@ -23,8 +23,8 @@
 #
 # Stage 2c runs the "Set it up" lines of the backups guide — read out
 # of docs/backups.md itself, mounted at /docs-backups.md, so the lines
-# run are the lines written — as root, with status as an administrator
-# in adm alone, against an S3 server in this container, and then holds
+# run are the lines written — as root, with validate and status as an
+# account with no privilege, against an S3 server in this container, and then holds
 # the package to the table in backups/README.md: the timers enabled
 # once, an administrator's
 # disable kept across an upgrade, stopped and masked on remove, enabled
@@ -888,7 +888,7 @@ status=$(curl -s --max-time 5 -H "Authorization: Bearer $TOKEN" "$HOOK")
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "app not served after hotserve's automatic restart"
 echo "SIGKILL: systemd restarted hotserve (NRestarts=1); app pid $pid_live reattached"
 
-stage "stage 2c: backups — the guide's 'Set it up' lines, as an administrator"
+stage "stage 2c: backups — the guide's 'Set it up' lines, as root, and validate and status as a user with no privilege"
 # What the package set up, before any line of the guide runs: the
 # programs it depends on (installed in stage 1 without recommended
 # packages, so they came by Depends alone), the account as setup makes
@@ -950,10 +950,11 @@ until curl -s -o /dev/null http://127.0.0.1:9000/; do
 	[ "$i" -ge 30 ] && die "rclone serve s3 not up within 15s: $(cat /tmp/s3.log)"
 	sleep 0.5
 done
-# Root runs the guide's lines, as written; the administrator Hardening
-# makes, in adm alone with no sudo (the image has none), runs status.
+# Root runs the guide's lines, as written, but validate and status,
+# which need no privilege: an account in no group at all runs those,
+# with no sudo (the image has none) — less than the administrator
+# Hardening makes, who has adm besides.
 useradd -m admin
-usermod -aG adm admin
 as_admin() { runuser -u admin -- sh -c "$1"; }
 # The app's data, as the app itself would make it: a database and an
 # uploads directory under its shared/, the hotserve user's.
@@ -1035,8 +1036,11 @@ for line in "${docs[@]}"; do
 		grep -q "demo: backed up first: snapshot [0-9a-f]\{8\} (restore --snapshot" "$OUT" || die "the restore into place did not back the app up first: $(cat "$OUT")"
 		grep -q "demo: restored from snapshot" "$OUT" || die "the restore into place restored nothing: $(cat "$OUT")"
 		;;
+	"hotserve-backup validate "*)
+		as_admin "$line" >"$OUT" 2>&1 || die "validate with no privilege exits $?: $(cat "$OUT")"
+		;;
 	"hotserve-backup status")
-		as_admin "$line" >"$OUT" 2>&1 || die "status as the administrator, adm alone, exits $?: $(cat "$OUT")"
+		as_admin "$line" >"$OUT" 2>&1 || die "status with no privilege exits $?: $(cat "$OUT")"
 		grep -q "^demo: ok: " "$OUT" || die "status does not say demo is ok: $(cat "$OUT")"
 		grep -q "restore last proven" "$OUT" || die "status does not say demo's restore is proven: $(cat "$OUT")"
 		;;
@@ -1055,7 +1059,7 @@ grep -q "not /tmp — /root, /srv, /var/backups, or a root-owned directory of yo
 snaps=$(systemd-run --quiet --pipe --wait --collect -p User=hotserve-backup -p EnvironmentFile=$CRED -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent /usr/bin/restic snapshots --no-lock --json --tag pre-restore 2>/dev/null | grep -o '"short_id"' | wc -l)
 [ "$snaps" = 1 ] || die "want one pre-restore snapshot, the repository holds $snaps"
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "the app is not served after the backups"
-echo "the guide's lines ran as written, as root, and status as the administrator: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot"
+echo "the guide's lines ran as written, as root, and validate and status with no privilege: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot"
 
 stage "stage 3: reinstall — upgrade path, the box's config kept, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')

@@ -423,7 +423,7 @@ its check 41/52 `clean` included.
 
 On a box that an earlier release set up with a `b2:` repository, with
 the candidate installed: `systemctl start hotserve-backup.service`,
-then `hotserve-backup status`. The run refuses at once, before
+then `hotserve-backup status` as root. The run refuses at once, before
 any unit starts, in these words (in its journal,
 `journalctl -u hotserve-backup.service`, after the date and host):
 

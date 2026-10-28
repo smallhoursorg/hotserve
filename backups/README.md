@@ -58,7 +58,7 @@ it runs `validate` and `status`, which need no root.
 The package's smoke test (`make install-test`) runs exactly those lines,
 read out of that page, as root, on a fresh Debian 13 with no `sudo`,
 the `.deb` just installed and an S3 server beside it; watches the
-timer fire; reads `status` as an administrator in `adm` alone; refuses
+timer fire; runs `validate` and `status` as an account with no privilege; refuses
 `--to /tmp/…` (every directory on the way has to be root's own, "A
 restore"); finds the `pre-restore` snapshot; and takes the package
 through upgrade, remove, reinstall and purge, holding it to this table:
@@ -1505,7 +1505,7 @@ severity × occurrence × detection, then the fix's size and risk.
   that no timer fires into a scenario.
 - `make package` and `make install-test` — the `.deb` built and
   installed under real systemd on a fresh Debian 13: the "Set it up"
-  lines of `docs/backups.md` as an administrator, and the package's
+  lines of `docs/backups.md` as root, and the package's
   transitions table with its edges.
 
 ### On a new Debian release

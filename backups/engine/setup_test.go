@@ -517,14 +517,22 @@ func TestTheRunsRemedyPastesAsOneLiteralArgument(t *testing.T) {
 }
 
 // The record keeps the run's b2: refusal whole for a bucket and path of
-// up to 55 characters, the slash between them counted (the README's
-// accepted residual), and cuts one longer.
+// up to 55 characters, the slash between them counted, and the URL to
+// paste whole up to 182 (the README's accepted residual); one more cuts
+// each.
 func TestTheRunsB2RefusalFitsTheRecordUpTo55Characters(t *testing.T) {
-	for n, whole := range map[int]bool{55: true, 56: false} {
-		repo := "b2:" + strings.Repeat("b", 20) + ":" + strings.Repeat("p", n-21)
+	for _, c := range []struct {
+		n          int
+		whole, url bool
+	}{{55, true, true}, {56, false, true}, {182, false, true}, {183, false, false}} {
+		repo := "b2:" + strings.Repeat("b", 20) + ":" + strings.Repeat("p", c.n-21)
 		msg := b2RunRefused(repo).Error()
-		if got := record.Text(msg) == msg; got != whole {
-			t.Errorf("%d characters: kept whole = %v, want %v (%d runes)", n, got, whole, len([]rune(msg)))
+		kept := record.Text(msg)
+		if got := kept == msg; got != c.whole {
+			t.Errorf("%d characters: kept whole = %v, want %v (%d runes)", c.n, got, c.whole, len([]rune(msg)))
+		}
+		if got := strings.Contains(kept, b2AsS3(repo)); got != c.url {
+			t.Errorf("%d characters: URL kept = %v, want %v", c.n, got, c.url)
 		}
 	}
 }

@@ -29,15 +29,17 @@ it all.
 
 ## Who runs these
 
-On the box, every command below is root's but
-`hotserve-backup validate` and `hotserve-backup status`: run them as
-root over SSH (`ssh root@box.example.com`, the way back
-[Hardening](hardening.md) keeps). An administrator of your own whose
-`sudo` is root's puts the word before them. The administrator
-Hardening makes is in the `adm` group alone, with no `sudo`: they — or
-an agent working as one — read the journal and run
-`hotserve-backup validate` and `hotserve-backup status`, which need no
-privilege. The Caddyfile reaches
+On the box, `hotserve-backup setup`, `restore`, `drill`, `run` and
+`sweep`, and every `systemctl` line that starts, stops, reloads,
+enables or disables a unit, are root's: run them as root over SSH
+(`ssh root@box.example.com`, the way back [Hardening](hardening.md)
+keeps). An administrator of your own whose `sudo` is root's puts the
+word before them. What only reads needs no privilege:
+`hotserve-backup validate` and `status`, `systemctl list-timers` and
+`systemctl --failed`, and the journal through the `adm` group. The
+administrator Hardening makes is in that group alone, with no `sudo`:
+they — or an agent working as one — run those. Run as root, `status`
+also checks the credential file, which only root can read. The Caddyfile reaches
 the box by a signed push from its repository, and the box runs
 `hotserve-backup validate` on each one before it is applied
 ([examples/box](../examples/box/README.md)). Keep `setup` for a person:
@@ -253,8 +255,8 @@ hotserve-backup restore demo
 <!-- smoke: end -->
 
 The package's smoke test (`make install-test`) runs exactly those
-lines, read out of this page, as root — `status` as an administrator
-in `adm` alone — on a fresh Debian 13 with the `.deb` just installed
+lines, read out of this page, as root — `validate` and `status` as an
+account with no privilege — on a fresh Debian 13 with the `.deb` just installed
 and no `sudo`. Keep the block in the
 box repo's Caddyfile: a push of a file without it stops that app's
 backups, and a run says so once. The other order works too: `setup`
