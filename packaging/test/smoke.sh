@@ -932,9 +932,9 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 	[ "$(systemctl show -p ActiveState --value "$u")" = inactive ] && [ "$(systemctl show -p Result --value "$u")" = success ] \
 		|| die "$u after install: $(systemctl show -p ActiveState,Result "$u" | tr '\n' ' ') — nothing may start before setup"
 done
-# Anchored at the line's start, so no sudo stands before it; not -x:
-# apt runs the maintainer scripts on a pty, and each line ends in \r.
-grep -q "^  hotserve-backup setup <repository>" /tmp/install.out \
+# The whole line, so no sudo stands before it: apt runs the maintainer
+# scripts on a pty, and each line ends in \r, taken off first.
+tr -d '\r' </tmp/install.out | grep -qx "  hotserve-backup setup <repository>" \
 	|| die "postinstall did not say that the timers wait for setup"
 grep -q "refuse that account" /tmp/install.out \
 	&& die "postinstall warned of the account it had just made: $(grep hotserve-backup /tmp/install.out)" || true
