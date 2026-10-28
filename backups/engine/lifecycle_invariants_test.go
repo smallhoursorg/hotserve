@@ -63,7 +63,7 @@ func plainBox(t *testing.T) (*box, *term) { return restoreBox(t), nil }
 // this is what holds when the file goes between that check and the
 // run's own.
 func TestNothingStartsBeforeSetup(t *testing.T) {
-	note := " is from before this version and is not read: run `sudo hotserve-backup setup <its RESTIC_REPOSITORY>`, which asks for its RESTIC_PASSWORD; then remove it"
+	note := " is from before this version and is not read: run `hotserve-backup setup <its RESTIC_REPOSITORY>` as root, which asks for its RESTIC_PASSWORD; then remove it"
 	for _, cmd := range runDrillRestore {
 		for _, old := range []string{"", ", with the old file beside"} {
 			t.Run(cmd.name+old, func(t *testing.T) {
@@ -192,13 +192,13 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		{"sqlite3", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/sqlite3" } }, "sqlite3 is not installed at /usr/bin/sqlite3: apt install sqlite3"},
 		{"hotserve", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve" } }, "hotserve is not installed at /usr/bin/hotserve"},
 		{"hotserve-backup", func(b *box) { b.haveProgram = func(path string) bool { return path != "/usr/bin/hotserve-backup" } }, "hotserve-backup is not installed at /usr/bin/hotserve-backup, where the units run it"},
-		{"the account", func(b *box) { b.account = false }, "the hotserve-backup account is not there: sudo hotserve-backup setup <repository> makes it (" + useraddArgv() + ")"},
+		{"the account", func(b *box) { b.account = false }, "the hotserve-backup account is not there: hotserve-backup setup <repository>, as root, makes it (" + useraddArgv() + ")"},
 		// A b2: repository, which setup refuses: one written by hand, or
 		// set up before setup refused it. Every unit would run restic's
 		// own B2 backend (#177).
 		{"a repository other than b2:", func(b *box) {
 			writeOrPanic(b.cfg.EnvFile, "RESTIC_REPOSITORY=b2:hs-backups:dev\nRESTIC_PASSWORD=the-secret\nB2_ACCOUNT_ID=K001\nB2_ACCOUNT_KEY=k\n")
-		}, "the repository is b2:, which is not supported: sudo hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3-compatible endpoint, with an application key; restic's own B2 backend retries a failed upload without end"},
+		}, "the repository is b2:, which is not supported: as root, hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3-compatible endpoint, with an application key; restic's own B2 backend retries a failed upload without end"},
 		// A file the manager could not read either: said, in place of
 		// every unit failing to start.
 		{"a credential file that can be read", func(b *box) {
@@ -389,7 +389,7 @@ func TestAnAccountHotserveDidNotMakeIsRefused(t *testing.T) {
 			if err == nil {
 				t.Fatalf("not refused: %+v", rep)
 			}
-			for _, w := range []string{"the hotserve-backup account on this box was not made by hotserve", "remove it (userdel hotserve-backup)", useraddArgv(), "if it is one you made for hotserve, mark it: usermod --comment made-by-hotserve hotserve-backup"} {
+			for _, w := range []string{"the hotserve-backup account on this box was not made by hotserve", "as root, remove it (userdel hotserve-backup) and run hotserve-backup setup <repository>", useraddArgv(), "if it is one you made for hotserve, mark it: usermod --comment made-by-hotserve hotserve-backup"} {
 				if !strings.Contains(err.Error(), w) {
 					t.Errorf("err = %v\nwant it to say %q", err, w)
 				}

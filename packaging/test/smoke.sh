@@ -23,9 +23,10 @@
 #
 # Stage 2c runs the "Set it up" lines of the backups guide — read out
 # of docs/backups.md itself, mounted at /docs-backups.md, so the lines
-# run are the lines written — as an administrator under sudo, against an
-# S3 server in this container, and then holds the package to the table
-# in backups/README.md: the timers enabled once, an administrator's
+# run are the lines written — as root, with status as an administrator
+# in adm alone, against an S3 server in this container, and then holds
+# the package to the table in backups/README.md: the timers enabled
+# once, an administrator's
 # disable kept across an upgrade, stopped and masked on remove, enabled
 # again on reinstall, and purge keeping the credential file and saying
 # why (expect_backup_state, a row per transition). And to the edges of
@@ -931,7 +932,7 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 	[ "$(systemctl show -p ActiveState --value "$u")" = inactive ] && [ "$(systemctl show -p Result --value "$u")" = success ] \
 		|| die "$u after install: $(systemctl show -p ActiveState,Result "$u" | tr '\n' ' ') — nothing may start before setup"
 done
-grep -q "sudo hotserve-backup setup <repository>" /tmp/install.out \
+grep -qx "  hotserve-backup setup <repository>" /tmp/install.out \
 	|| die "postinstall did not say that the timers wait for setup"
 grep -q "refuse that account" /tmp/install.out \
 	&& die "postinstall warned of the account it had just made: $(grep hotserve-backup /tmp/install.out)" || true
@@ -949,13 +950,10 @@ until curl -s -o /dev/null http://127.0.0.1:9000/; do
 	[ "$i" -ge 30 ] && die "rclone serve s3 not up within 15s: $(cat /tmp/s3.log)"
 	sleep 0.5
 done
-# The administrator the guide is written for: not root, sudo.
+# Root runs the guide's lines, as written; the administrator Hardening
+# makes, in adm alone with no sudo (the image has none), runs status.
 useradd -m admin
-echo 'admin ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/admin
-chmod 0440 /etc/sudoers.d/admin
-visudo -c -q || die "the smoke's sudoers line does not parse"
-# runuser, not `su -`: su -c drops the controlling terminal (sudo
-# then finds no /dev/tty to ask at), runuser keeps it [measured].
+usermod -aG adm admin
 as_admin() { runuser -u admin -- sh -c "$1"; }
 # The app's data, as the app itself would make it: a database and an
 # uploads directory under its shared/, the hotserve user's.
@@ -975,20 +973,20 @@ mapfile -t docs < <(awk '/<!-- smoke: begin -->/{on=1; next} /<!-- smoke: end --
 # guide, or one added that nothing here checks, fails rather than
 # passing as "ran as written".
 want="hotserve-backup validate /etc/hotserve/Caddyfile
-sudo systemctl reload hotserve
-sudo hotserve-backup setup $S3REPO
-sudo systemctl start hotserve-backup.service
+systemctl reload hotserve
+hotserve-backup setup $S3REPO
+systemctl start hotserve-backup.service
 hotserve-backup status
-sudo hotserve-backup restore demo --to /root/demo-restored
-sudo hotserve-backup restore demo"
+hotserve-backup restore demo --to /root/demo-restored
+hotserve-backup restore demo"
 [ "$(printf '%s\n' "${docs[@]}")" = "$want" ] \
 	|| die "the guide's smoke block is not the seven lines this stage runs and checks; it holds: $(printf '%s | ' "${docs[@]}")"
 for line in "${docs[@]}"; do
 	echo "docs/backups.md: $line"
 	case "$line" in
-	"sudo hotserve-backup setup "*)
-		converse "runuser -u admin -- sh -c '$line'" "$P_KEY" "$S3KEY" "$P_SECRET" "$S3SECRET" "$P_STORED" stored \
-			|| die "setup as the administrator failed: $(cat "$OUT")"
+	"hotserve-backup setup "*)
+		converse "$line" "$P_KEY" "$S3KEY" "$P_SECRET" "$S3SECRET" "$P_STORED" stored \
+			|| die "setup as root failed: $(cat "$OUT")"
 		grep -q "account hotserve-backup: present" "$OUT" || die "setup did not find the package's account: $(cat "$OUT")"
 		grep -q "repository ready: $S3REPO (new, id " "$OUT" || die "setup did not make the repository: $(cat "$OUT")"
 		grep -q "^next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer)" "$OUT" \
@@ -1032,18 +1030,18 @@ for line in "${docs[@]}"; do
 		[ -f /var/lib/hotserve-backup/status.json ] || die "the timer's run wrote no record"
 		echo "the timer fired ($((i / 2))s after the minute), and its run ended success under the unit's hardening"
 		;;
-	"sudo hotserve-backup restore demo")
-		printf 'demo\n' | as_admin "$line" >"$OUT" 2>&1 || die "the restore into place failed: $(cat "$OUT")"
+	"hotserve-backup restore demo")
+		printf 'demo\n' | sh -c "$line" >"$OUT" 2>&1 || die "the restore into place failed: $(cat "$OUT")"
 		grep -q "demo: backed up first: snapshot [0-9a-f]\{8\} (restore --snapshot" "$OUT" || die "the restore into place did not back the app up first: $(cat "$OUT")"
 		grep -q "demo: restored from snapshot" "$OUT" || die "the restore into place restored nothing: $(cat "$OUT")"
 		;;
 	"hotserve-backup status")
-		as_admin "$line" >"$OUT" 2>&1 || die "status as the administrator, no sudo, exits $?: $(cat "$OUT")"
+		as_admin "$line" >"$OUT" 2>&1 || die "status as the administrator, adm alone, exits $?: $(cat "$OUT")"
 		grep -q "^demo: ok: " "$OUT" || die "status does not say demo is ok: $(cat "$OUT")"
 		grep -q "restore last proven" "$OUT" || die "status does not say demo's restore is proven: $(cat "$OUT")"
 		;;
 	*)
-		as_admin "$line" >"$OUT" 2>&1 || die "'$line' as the administrator exits $?: $(cat "$OUT")"
+		sh -c "$line" >"$OUT" 2>&1 || die "'$line' as root exits $?: $(cat "$OUT")"
 		;;
 	esac
 done
@@ -1051,13 +1049,13 @@ done
 	|| die "the restore --to put nothing there: $(find /root/demo-restored 2>&1 | head)"
 # Not in the guide's lines, and true of them: the --to rule, and the
 # pre-restore snapshot the restore into place named.
-as_admin "sudo hotserve-backup restore demo --to /tmp/demo-restored" >"$OUT" 2>&1 && die "a restore --to /tmp was accepted" || true
+hotserve-backup restore demo --to /tmp/demo-restored </dev/null >"$OUT" 2>&1 && die "a restore --to /tmp was accepted" || true
 grep -q "not /tmp — /root, /srv, /var/backups, or a root-owned directory of your own" "$OUT" || die "the --to rule's words are missing: $(cat "$OUT")"
 [ ! -e /tmp/demo-restored ] || die "a refused --to made its directory"
 snaps=$(systemd-run --quiet --pipe --wait --collect -p User=hotserve-backup -p EnvironmentFile=$CRED -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent /usr/bin/restic snapshots --no-lock --json --tag pre-restore 2>/dev/null | grep -o '"short_id"' | wc -l)
 [ "$snaps" = 1 ] || die "want one pre-restore snapshot, the repository holds $snaps"
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" || die "the app is not served after the backups"
-echo "the guide's lines ran as written, as the administrator: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot"
+echo "the guide's lines ran as written, as root, and status as the administrator: validate, reload, setup, a run, status, a restore --to, a restore into place with its pre-restore snapshot"
 
 stage "stage 3: reinstall — upgrade path, the box's config kept, app survival"
 pid_before=$(printf '%s' "$status" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
@@ -1144,19 +1142,19 @@ echo "reinstall preserved config and user; hotserve restarted and reattached to 
 # and deb-systemd-invoke starts nothing disabled); enabled again, an
 # upgrade keeps them so.
 expect_backup_state "after an upgrade" enabled active "$CRED_SHA"
-as_admin "sudo systemctl disable --now hotserve-backup.timer hotserve-backup-drill.timer"
+systemctl disable --now hotserve-backup.timer hotserve-backup-drill.timer
 expect_backup_state "disabled by the administrator" disabled inactive "$CRED_SHA"
 dpkg -i "$deb" >/dev/null
 expect_backup_state "after an upgrade, disabled before it" disabled inactive "$CRED_SHA"
-as_admin "sudo systemctl enable --now hotserve-backup.timer hotserve-backup-drill.timer"
+systemctl enable --now hotserve-backup.timer hotserve-backup-drill.timer
 dpkg -i "$deb" >/dev/null
 expect_backup_state "after an upgrade, enabled before it" enabled active "$CRED_SHA"
 # The timers as dh_installsystemd has them (the owner, 2026-09-27): an
 # upgrade restarts a timer that is enabled, one an administrator
 # stopped among them — the README says so, and to disable it to keep
 # it off — and leaves one the administrator masked masked.
-as_admin "sudo systemctl stop hotserve-backup.timer"
-as_admin "sudo systemctl mask --now hotserve-backup-drill.timer"
+systemctl stop hotserve-backup.timer
+systemctl mask --now hotserve-backup-drill.timer
 dpkg -i "$deb" >/dev/null
 [ "$(systemctl is-active hotserve-backup.timer || true)" = active ] \
 	|| die "after an upgrade, a timer stopped and left enabled is $(systemctl is-active hotserve-backup.timer || true): dh_installsystemd restarts it"
@@ -1165,9 +1163,9 @@ dpkg -i "$deb" >/dev/null
 # running either way.)
 [ "$(systemctl is-enabled hotserve-backup-drill.timer || true)" = masked ] && [ "$(systemctl is-active hotserve-backup-drill.timer || true)" != active ] \
 	|| die "after an upgrade, the administrator's mask of hotserve-backup-drill.timer is $(systemctl is-enabled hotserve-backup-drill.timer || true), $(systemctl is-active hotserve-backup-drill.timer || true)"
-as_admin "sudo systemctl unmask hotserve-backup-drill.timer"
+systemctl unmask hotserve-backup-drill.timer
 systemctl reset-failed hotserve-backup-drill.timer 2>/dev/null || true
-as_admin "sudo systemctl start hotserve-backup-drill.timer"
+systemctl start hotserve-backup-drill.timer
 expect_backup_state "after an upgrade, one timer stopped and one masked, and the mask taken off" enabled active "$CRED_SHA"
 systemctl is-active --quiet hotserve || die "hotserve not active after the upgrade cycle"
 # A user directory that does not answer: postinstall's lookups of the
@@ -1927,7 +1925,7 @@ dpkg -s hotserve | grep -q '^Status: install ok installed$' || die "hotserve is 
 getent passwd hotserve-backup >/dev/null && die "the account was made: the row proves nothing" || true
 grep -q "hotserve: the hotserve-backup account could not be made (useradd: group hotserve-backup exists" /tmp/install-noaccount.log \
 	|| die "postinstall did not say that the account could not be made, and why: $(cat /tmp/install-noaccount.log)"
-grep -q "sudo hotserve-backup setup <repository> makes it, or says why it cannot" /tmp/install-noaccount.log \
+grep -q "nothing else of hotserve does: hotserve-backup setup <repository> makes it, or says why it cannot" /tmp/install-noaccount.log \
 	|| die "postinstall did not say what makes the account: $(cat /tmp/install-noaccount.log)"
 timeout 300 systemctl enable --now hotserve || die "hotserve did not start on the box where the account could not be made"
 expect_backup_state "installed where the account cannot be made" enabled active "$CRED_SHA"

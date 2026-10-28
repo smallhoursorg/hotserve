@@ -50,15 +50,15 @@ has written the credential file: each service is conditioned on
 skipped, not failed. The lines that set it
 up — the declaration, `validate`, `setup`, a first run, `status`, a
 restore — are under "Set it up" in
-[docs/backups.md](../docs/backups.md#set-it-up). Those under `sudo` are
-root's: root over SSH, or an administrator whose `sudo` is root's. The
-administrator `docs/hardening.md` makes is in the `adm` group alone,
-with no `sudo`: it runs `validate` and `status`, which need no root.
+[docs/backups.md](../docs/backups.md#set-it-up). All but `validate`
+and `status` are root's, run as root over SSH. The administrator
+`docs/hardening.md` makes is in the `adm` group alone, with no `sudo`:
+it runs `validate` and `status`, which need no root.
 
 The package's smoke test (`make install-test`) runs exactly those lines,
-read out of that page, as an administrator under `sudo`, on a fresh
-Debian 13 with the `.deb` just installed and an S3 server beside it;
-watches the timer fire; reads `status` as that administrator; refuses
+read out of that page, as root, on a fresh Debian 13 with no `sudo`,
+the `.deb` just installed and an S3 server beside it; watches the
+timer fire; reads `status` as an administrator in `adm` alone; refuses
 `--to /tmp/…` (every directory on the way has to be root's own, "A
 restore"); finds the `pre-restore` snapshot; and takes the package
 through upgrade, remove, reinstall and purge, holding it to this table:
@@ -85,7 +85,7 @@ At the edges of those:
   the units it had started, by the exact names it recorded, and what it
   left mounted under `/run/hotserve-backup` — as the next run would
   have, since there will be none. A command that holds the run lock —
-  `sudo hotserve-backup run` from a shell, a restore at its prompt — is
+  `hotserve-backup run` from a shell, a restore at its prompt — is
   named by what the lock says and left to run, with its program gone
   from under it. Let it end first.
 - **A command and its helpers are one version.** A run starts its
@@ -836,7 +836,7 @@ It needs no privilege.
   point: nothing of hotserve-backup's is mounted there, and what it
   writes and removes there would go through the mount. Every command
   refuses, and names the `umount`.
-- By hand, after a command was killed: `sudo hotserve-backup sweep`
+- By hand, after a command was killed: `hotserve-backup sweep`
   takes away what it left — the units it recorded, and its mounts
   under `/run/hotserve-backup`, made private first — as the next run
   would. Never unmount or `rm -r` there by hand.
@@ -958,13 +958,13 @@ It needs no privilege.
   restore and a drill read the credential file's `RESTIC_REPOSITORY`
   as the manager would (the last assignment) and refuse a `b2:` one
   before any unit, the run recording it as its error: "the repository
-  is b2:, which is not supported: sudo hotserve-backup setup
+  is b2:, which is not supported: as root, hotserve-backup setup
   's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>' moves it to
   B2's S3-compatible endpoint, with an application key; restic's own
   B2 backend retries a failed upload without end" — the URL in single
   quotes, so that the command pasted as it is reaches setup whole, the
   escaping leaving no `'` in it, and short enough that the record's
-  300 runes keep all of it for a bucket and path of up to 59
+  300 runes keep all of it for a bucket and path of up to 55
   characters as escaped. A credential file they cannot read is refused there
   too, "the credential file <path> could not be read: <why>", where
   every unit would otherwise fail to start — one that is not a
@@ -1058,7 +1058,7 @@ Caddyfile.
 
 ## Setup
 
-`sudo hotserve-backup setup <repository>`, at a terminal. The
+`hotserve-backup setup <repository>`, as root, at a terminal. The
 repository is a restic URL — `s3:https://s3.example.com/bucket`, or
 on B2 its S3-compatible endpoint, `s3:https://s3.<region>.backblazeb2.com/bucket`
 — and not a secret; the
@@ -1369,7 +1369,7 @@ That a real bucket answers both with the one id is **unverified**.
 
 With the package, the first backup runs from `hotserve-backup.timer`
 within the hour and ten minutes of setup ("On a fresh box"), or now
-with `sudo systemctl start hotserve-backup.service`; setup's last line
+with `systemctl start hotserve-backup.service`; setup's last line
 says so. Without it, run `hotserve-backup run` hourly from a timer or
 cron entry of your own, or `status` goes unhealthy after 3 hours.
 
@@ -1397,7 +1397,7 @@ command line — with the cache where the units keep it, owned by the
 account:
 
 ```sh
-sudo systemd-run --quiet --pipe --wait --collect \
+systemd-run --quiet --pipe --wait --collect \
   -p User=hotserve-backup -p EnvironmentFile=/etc/hotserve-backup/repository.env \
   -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent \
   /usr/bin/restic init
@@ -1443,7 +1443,7 @@ severity × occurrence × detection, then the fix's size and risk.
 | On an S3 host other than AWS's and B2's, for which setup writes no region, every restic command's first request is minio-go's bucket-location lookup, which minio-go does not retry on a 5xx that carries no S3 error code: one such 500 puts restic's two retry lines on stderr beside a listing, exit 0, and the listing is not believed [M89: B2's documented JSON 5xx body, "Codes in the 5xx range … include JSON diagnostics" (Backblaze, Introduction to the S3-Compatible API), injected through a proxy]. An S3 XML 500 there is retried by minio-go in silence. | `besides` (`backups/engine/engine.go`); minio-go 7.0.89 `bucket-cache.go`, `executeMethod` in `api.go` | 2 | 3 | 1 | 6 | size 2, risk 3 (a region for every host would have to be asked for, and a wrong one is refused; reading restic's retry lines as harmless would believe a listing beside a line that means a snapshot was left out) | Rule 2 holds: the listing is a warning of the run, said as restic having something to say beside it, and the next run lists again. On AWS minio-go knows the region from a regional host alone (minio-go `pkg/s3utils/utils.go`, `GetRegionFromURL`, gives none for `s3.amazonaws.com`); there the guide's policy grants `s3:GetBucketLocation`, and AWS's errors are XML, which minio-go retries. On B2 setup writes it ("Setup", 4), and with it the same fault is silent (M89). Under rule 3 the product is under 20 (2026-10-23, #354). |
 | `status` as root says nothing of a credential file that sets `RESTIC_REPOSITORY_FILE`, which every run, restore and drill refuses; with no `RESTIC_REPOSITORY` beside it, its lint says that one is not set. | `showStatus` (`backups/cmd/hotserve-backup/main.go`); `repositoryInUse` (`backups/engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 1 (one more lint line in status) | Rule 2 holds: the run refuses before any unit in words that name the key and the remedy, and `status` shows that as the last run's error. Under rule 3 the product is under 20 (2026-10-24, #357 review round 2). |
 | A run, a restore and a drill refuse a `b2:` repository and a `RESTIC_REPOSITORY_FILE`, not every repository setup refuses: a hand-written `sftp:`, `rclone:`, local path or URL with credentials in it starts its units, which fail. | `repositoryInUse` (`backups/engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 2 (calling `RepositoryUsable` here too: a by-hand `rest:`, `gs:` or `swift:` file must still run) | Rule 2 holds: each fails at its first unit in restic's own words, the run red, and `status` as root warns of the file in setup's words. A `b2:` one is refused because it does not fail: it can hang (#177). Under rule 3 the product is under 20 (2026-10-24, #357 review round 2; the plan's "refuse everything setup refuses", declined as wider than #354). |
-| The run's `b2:` refusal has 114 runes before its URL's bucket and 127 after its path, and the record keeps 300 (`record.Text`): a bucket and path (escaped, with the slash between them) over 59 characters lose the end of the reason, and over 186 the end of the URL to paste, cut with a "…". | `b2RunRefused` (`backups/engine/setup.go`); `record.Text` | 3 | 5 | 1 | 15 | size 2, risk 2 (a wording for the record alone, or no URL in it past the cut; the wording was shortened in round 4 of #357's review, a fix to text a test checks) | Rule 2 holds: the cut is marked, and the journal keeps the whole line (`journalctl -u hotserve-backup.service`), since the error goes to stderr whole. A cut URL whose quote is closed and run points setup at a shorter path, where it finds no repository: it shows a new one's password (`Repository password (new)`) and asks that it be stored, where a move asks for the repository's own, puts the record aside, and ends `repository ready: … (new, …)`; `status` as root names the whole URL in its warning (severity 3 from round 13 of #357's review). The remedy is first by design, so the reason goes before it does. Under rule 3 the product is under 20 (2026-10-24, #357 review round 2). |
+| The run's `b2:` refusal has 118 runes before its URL's bucket and 127 after its path, and the record keeps 300 (`record.Text`): a bucket and path (escaped, with the slash between them) over 55 characters lose the end of the reason, and over 182 the end of the URL to paste, cut with a "…" (59 and 186 before #323's `as root`). | `b2RunRefused` (`backups/engine/setup.go`); `record.Text` | 3 | 5 | 1 | 15 | size 2, risk 2 (a wording for the record alone, or no URL in it past the cut; the wording was shortened in round 4 of #357's review, a fix to text a test checks) | Rule 2 holds: the cut is marked, and the journal keeps the whole line (`journalctl -u hotserve-backup.service`), since the error goes to stderr whole. A cut URL whose quote is closed and run points setup at a shorter path, where it finds no repository: it shows a new one's password (`Repository password (new)`) and asks that it be stored, where a move asks for the repository's own, puts the record aside, and ends `repository ready: … (new, …)`; `status` as root names the whole URL in its warning (severity 3 from round 13 of #357's review). The remedy is first by design, so the reason goes before it does. Under rule 3 the product is under 20 (2026-10-24, #357 review round 2). |
 | The run's remedy, pasted without its placeholder filled in (`<region>`, or `<bucket>` for a bare `b2:`), is taken by setup, which asks for the key and secret before restic refuses the host, and asks again up to its limit. | `backendOf` (`backups/engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 1 (a refusal of a URL holding `<` or `>` before any prompt) | Rule 2 holds: each look is refused at once in restic's words, which name the host with its `<region>` in it, and nothing is written. Under rule 3 the product is under 20 (2026-10-24, #357 review round 4). |
 | `status` as root reads the credential file with a plain read: a FIFO in its place, which the run refuses, holds `status` until interrupted. | `showStatus` (`backups/cmd/hotserve-backup/main.go`) | 2 | 1 | 5 | 10 | size 1, risk 2 (the run's `readRegular`, exported; no test of status's own read) | Only root makes the file anything but setup's regular one, and `status` is run at a terminal, where the wait is seen and interrupted; the run, which no one watches, refuses it. Under rule 3 the product is under 20 (2026-10-24, #357 review round 5). |
 | The run opens what the credential file's path leads to, a link followed as the manager follows it, before it asks whether it is a regular file: a device node there is opened by root (`O_RDONLY|O_NONBLOCK`) before it is refused. | `readRegular` (`backups/engine/setup.go`) | 2 | 1 | 5 | 10 | size 2, risk 1 (a stat before the open, as `box/envfiles.go` reads its files) | Only root puts anything but setup's regular file there, and the open reads nothing; the run then refuses it, named. Under rule 3 the product is under 20 (2026-10-24, #357 review round 8). |

@@ -10,7 +10,8 @@ box with the candidate's `.deb` ([Your first deploy](first-deploy.md)),
 against a bucket made for the purpose as
 [Backups](backups.md#before-you-start-the-bucket-and-what-it-protects)
 makes it — on B2 first, the provider it is easiest on, through its
-S3-compatible endpoint — following [Backups](backups.md) as written.
+S3-compatible endpoint — following [Backups](backups.md) as written,
+the box's commands as root ([Who runs these](backups.md#who-runs-these)).
 On B2, check 3's first step comes before every other: its answer
 decides whether the rest apply.
 
@@ -45,7 +46,7 @@ export AWS_REQUEST_CHECKSUM_CALCULATION=when_required
 
 Nothing here prints a storage key or secret: keys are read with
 `read`, never typed on a command line, and the credential file is shown
-by its keys alone (`sudo sed 's/=.*/=…/' /etc/hotserve-backup/repository.env`).
+by its keys alone (`sed 's/=.*/=…/' /etc/hotserve-backup/repository.env`).
 One secret is shown: `setup` on a new repository shows its password
 once, on the terminal (`Repository password (new): …`). Before you
 share a transcript of a check, put `<N characters>` in its place.
@@ -60,9 +61,9 @@ says, so set the box up afresh for check 2). A key made as Backups
 says should not be able to make a bucket at all:
 
 ```sh
-time sudo hotserve-backup setup b2:<bucket>:rc-check1    # refused before any prompt
-time sudo hotserve-backup setup <url of a bucket nobody has made>
-time sudo hotserve-backup setup <url>    # the right key id, a wrong secret, three times
+time hotserve-backup setup b2:<bucket>:rc-check1    # refused before any prompt
+time hotserve-backup setup <url of a bucket nobody has made>
+time hotserve-backup setup <url>    # the right key id, a wrong secret, three times
 ```
 
 The first is refused before it asks anything, exit 1, nothing written,
@@ -107,7 +108,7 @@ shown before the storage takes a key: **unverified**.
 ## 2. Set up, a first backup, status and the drill, over real TLS
 
 [Set it up](backups.md#set-it-up) as written, then
-`sudo hotserve-backup drill`, `hotserve-backup status`, and the
+`hotserve-backup drill`, `hotserve-backup status`, and the
 [look from your own machine](backups.md#look-from-your-own-machine),
 both its lines. Each as [Backups](backups.md) shows it: **unverified**
 over S3's and Hetzner's TLS; the e2e server over TLS from a private CA gave
@@ -167,7 +168,7 @@ attack would, should be `AccessDenied`. Both **unverified**.
 
 Then a locking command past restic's 22-minute mark: with the box's
 timers stopped, so that no run of its own holds a lock meanwhile
-(`sudo systemctl stop hotserve-backup.timer
+(`systemctl stop hotserve-backup.timer
 hotserve-backup-drill.timer`, and `start` after), from the off-box
 machine, with the *box's* key and the repository's password in
 `RESTIC_PASSWORD` (restic cannot read both it and the data from stdin),
@@ -188,8 +189,8 @@ with `AWS_DEFAULT_REGION` beside them, as in the look. The password in the envir
 restic cannot ask for it, `Fatal: cannot read both password and data
 from stdin`.)
 
-Then on the box, `sudo systemctl start hotserve-backup.service` twice,
-`sudo hotserve-backup drill` and `hotserve-backup status`. That the
+Then on the box, `systemctl start hotserve-backup.service` twice,
+`hotserve-backup drill` and `hotserve-backup status`. That the
 probe ends `snapshot … saved` after 30 minutes with no lock left, each
 lock it removed a delete marker over a version that stays, the runs end
 `ok`, and the drill proves and its check is `clean`: **unverified**
@@ -263,7 +264,7 @@ On another S3 provider, the `s3store:` lines alone, with its endpoint.
 write itself, and B2 is never asked. On AWS the box's key may not list
 versions, so the S3 line stops before it tries — #171.)
 
-Then on the box, `sudo systemctl start hotserve-backup.service` and
+Then on the box, `systemctl start hotserve-backup.service` and
 `hotserve-backup status`, and [After an attack](backups.md#after-an-attack)
 as written, with the account's key, from `status`'s minute and from the
 bucket's history, to compare; the copy is read with a new key of its
@@ -299,7 +300,7 @@ it, are still **unverified**.
 
 [Retention, off the box](backups.md#retention-off-the-box) as written,
 with the off-box machine's key; then on the box
-`sudo systemctl start hotserve-backup.service` and
+`systemctl start hotserve-backup.service` and
 `hotserve-backup status`. Each line as [Backups](backups.md) shows it:
 **unverified** on a provider; on the e2e server, as shown there.
 
@@ -324,7 +325,7 @@ A key that may read and not write, on a box that is not your real one,
 and a repository made beforehand with a key that may write:
 
 ```sh
-time sudo hotserve-backup setup <url>
+time hotserve-backup setup <url>
 ```
 
 `setup` opens a repository that is there already taking its lock —
@@ -390,7 +391,7 @@ take such a key, `setup` again with the box's own afterwards.
 Caddyfile from the box repo with `hotserve init`, as step 1 says —
 with `id -u hotserve` there not the first box's (make a system user or
 two before installing the package). Then
-`sudo ls -ln /var/lib/liveswap/<app>/shared`: every file the second
+`ls -ln /var/lib/liveswap/<app>/shared`: every file the second
 box's uid. **Unverified** on S3 and Hetzner; on the e2e server (uids 996
 and 993) the restore put back the database and the files, owned by
 993, and the first run and drill there were `ok` and proven. **On B2:**
@@ -405,7 +406,7 @@ On the box set up in check 2, with apps of a realistic size:
 
 ```sh
 du -sh /var/lib/liveswap/*/shared
-time sudo hotserve-backup drill
+time hotserve-backup drill
 ```
 
 then the provider's egress for that hour, from its console or bill.
@@ -421,13 +422,13 @@ its check 41/52 `clean` included.
 ## 9. A box set up on `b2:`, moved to B2's S3 endpoint
 
 On a box that an earlier release set up with a `b2:` repository, with
-the candidate installed: `sudo systemctl start hotserve-backup.service`,
-then `sudo hotserve-backup status`. The run refuses at once, before
+the candidate installed: `systemctl start hotserve-backup.service`,
+then `hotserve-backup status`. The run refuses at once, before
 any unit starts, in these words (in its journal,
 `journalctl -u hotserve-backup.service`, after the date and host):
 
 ```
-hotserve-backup[<pid>]: hotserve-backup: the repository is b2:, which is not supported: sudo hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>' moves it to B2's S3-compatible endpoint, with an application key; restic's own B2 backend retries a failed upload without end
+hotserve-backup[<pid>]: hotserve-backup: the repository is b2:, which is not supported: as root, hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>' moves it to B2's S3-compatible endpoint, with an application key; restic's own B2 backend retries a failed upload without end
 ```
 
 and `status` says `the last run ended early: the repository is b2:,
@@ -439,9 +440,9 @@ A restore and a drill refuse the same way. Then, with the same bucket
 and path, the same key id and secret, and the repository's password:
 
 ```sh
-sudo cat /var/lib/hotserve-backup/repository-id
-sudo hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>'
-sudo cat /var/lib/hotserve-backup/repository-id
+cat /var/lib/hotserve-backup/repository-id
+hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>'
+cat /var/lib/hotserve-backup/repository-id
 ```
 
 then, from the off-box machine, `restic list locks --no-lock | wc -l`

@@ -29,13 +29,15 @@ it all.
 
 ## Who runs these
 
-The lines below under `sudo` are root's. Run them as root over SSH
-(`ssh root@box.example.com`, the way back [Hardening](hardening.md)
-keeps), without the `sudo`, or as an administrator whose `sudo` is
-root's (Debian's `sudo` group). The administrator Hardening makes is in
-the `adm` group alone, with no `sudo`: they — or an agent working as
-one — read the journal and run `hotserve-backup validate` and
-`hotserve-backup status`, which need no privilege. The Caddyfile reaches
+On the box, every command below is root's but
+`hotserve-backup validate` and `hotserve-backup status`: run them as
+root over SSH (`ssh root@box.example.com`, the way back
+[Hardening](hardening.md) keeps). An administrator of your own whose
+`sudo` is root's puts the word before them. The administrator
+Hardening makes is in the `adm` group alone, with no `sudo`: they — or
+an agent working as one — read the journal and run
+`hotserve-backup validate` and `hotserve-backup status`, which need no
+privilege. The Caddyfile reaches
 the box by a signed push from its repository, and the box runs
 `hotserve-backup validate` on each one before it is applied
 ([examples/box](../examples/box/README.md)). Keep `setup` for a person:
@@ -220,7 +222,7 @@ is the first to fall out of the lock.
 
 ## Set it up
 
-As root, or an administrator whose `sudo` is root's:
+As root on the box:
 
 <!-- smoke: begin -->
 ```sh
@@ -235,24 +237,25 @@ As root, or an administrator whose `sudo` is root's:
 #    /etc/hotserve/Caddyfile, then, before it goes live, ask whether a
 #    run could plan from it:
 hotserve-backup validate /etc/hotserve/Caddyfile
-sudo systemctl reload hotserve
+systemctl reload hotserve
 # 2. The repository, once: the storage key is asked for at the terminal,
 #    and a new repository's password is shown once, to store elsewhere.
-sudo hotserve-backup setup s3:https://s3.example.com/my-backups
+hotserve-backup setup s3:https://s3.example.com/my-backups
 # 3. The first backup runs within the hour and ten minutes
 #    (systemctl list-timers hotserve-backup.timer), or now:
-sudo systemctl start hotserve-backup.service
+systemctl start hotserve-backup.service
 hotserve-backup status
 # 4. A restore: into a directory of root's own to look at, or into
 #    place — which backs the app up first, tagged pre-restore, and asks.
-sudo hotserve-backup restore demo --to /root/demo-restored
-sudo hotserve-backup restore demo
+hotserve-backup restore demo --to /root/demo-restored
+hotserve-backup restore demo
 ```
 <!-- smoke: end -->
 
 The package's smoke test (`make install-test`) runs exactly those
-lines, read out of this page, as an administrator under `sudo`, on a
-fresh Debian 13 with the `.deb` just installed. Keep the block in the
+lines, read out of this page, as root — `status` as an administrator
+in `adm` alone — on a fresh Debian 13 with the `.deb` just installed
+and no `sudo`. Keep the block in the
 box repo's Caddyfile: a push of a file without it stops that app's
 backups, and a run says so once. The other order works too: `setup`
 before any block says that a run would back nothing up.
@@ -260,7 +263,7 @@ before any block says that a run would back nothing up.
 `setup`, for a bucket nobody has made yet:
 
 ```
-$ sudo hotserve-backup setup s3:https://s3.example.com/my-backups
+$ hotserve-backup setup s3:https://s3.example.com/my-backups
 account hotserve-backup: present
 a run would back up demo, under /var/lib/liveswap
 Storage key id (AWS_ACCESS_KEY_ID): …
@@ -272,7 +275,7 @@ Store it off the box now, with the repository URL, s3:https://s3.example.com/my-
 Type stored to go on: stored
 repository ready: s3:https://s3.example.com/my-backups (new, id e9157010)
 credentials: /etc/hotserve-backup/repository.env (root, 0600)
-next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status
+next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, systemctl start hotserve-backup.service; then hotserve-backup status
 ```
 
 A wrong key is asked for again, up to three times, the password shown
@@ -306,7 +309,7 @@ no backup unit running now
 An app's first good backup, up to 1 GiB restored, is drilled by the
 run that made it, as here. A larger one is left to the weekly drill,
 and until then `status` says `restore not proven` and exits 1:
-`sudo hotserve-backup drill` proves it now. A run that fails is a
+`hotserve-backup drill` proves it now. A run that fails is a
 failed unit until the next one succeeds — `systemctl --failed` lists
 `hotserve-backup.service` — and `journalctl -u hotserve-backup.service`
 (the `adm` group reads it) has one line per app:
@@ -390,12 +393,12 @@ repository at all: [after an attack](#after-an-attack).
 
 ## Restore
 
-After a second run, `sudo systemctl start hotserve-backup.service`
+After a second run, `systemctl start hotserve-backup.service`
 (snapshot `39021de9`), into a new directory, to look before anything
 changes:
 
 ```
-$ sudo hotserve-backup restore demo --to /root/demo-restored
+$ hotserve-backup restore demo --to /root/demo-restored
 demo: restored from snapshot 39021de9 of 2026-10-03 07:01 UTC into /root/demo-restored: sqlite app.db, files uploads
 ```
 
@@ -408,7 +411,7 @@ Into place, with the app running. It asks, takes the app's name typed
 back for a yes, and backs the app up first:
 
 ```
-$ sudo hotserve-backup restore demo
+$ hotserve-backup restore demo
 demo: restore snapshot 39021de9, made 2026-10-03 07:01 UTC, into /var/lib/liveswap/demo/shared?
 What is there is backed up first. Its databases are then replaced and its files overwritten; what the snapshot does not hold is left.
 Type the app's name, demo, to go on: demo
@@ -416,7 +419,7 @@ demo: backed up first: snapshot 66e09572 (restore --snapshot 66e09572 puts back 
 demo: restored from snapshot 39021de9 of 2026-10-03 07:01 UTC into /var/lib/liveswap/demo/shared: sqlite app.db, files uploads
 ```
 
-`sudo hotserve-backup restore demo --snapshot 66e09572` undoes it: the
+`hotserve-backup restore demo --snapshot 66e09572` undoes it: the
 snapshot tagged `pre-restore` holds what was there. A restore needs the
 snapshot's size free twice over where the fetch and the app share a
 disk, and holds the run lock throughout: an hourly run that comes due
@@ -431,7 +434,7 @@ another uid, which a restore does not mind:
    and give it the box's Caddyfile with `hotserve init` from the box
    repository, as the first deploy did (step 3; with secrets,
    [A rebuilt box](secrets.md#a-rebuilt-box)).
-2. `sudo hotserve-backup setup <the same URL>`, with the box's key. It
+2. `hotserve-backup setup <the same URL>`, with the box's key. It
    finds the repository and asks for its password instead of making
    one:
 
@@ -442,7 +445,7 @@ another uid, which a restore does not mind:
    repository ready: s3:https://s3.example.com/my-backups (existing, id e9157010)
    ```
 
-3. Before each app's first deploy, `sudo hotserve-backup restore <app>`.
+3. Before each app's first deploy, `hotserve-backup restore <app>`.
    With nothing in place there is nothing to back up first:
 
    ```
@@ -457,7 +460,7 @@ another uid, which a restore does not mind:
 An hourly run that comes between 2 and 3 finds the data missing, and
 `status` says so and names the restore. A repository is one box's: if
 the old box still runs, turn its timers off first
-(`sudo systemctl disable --now hotserve-backup.timer hotserve-backup-drill.timer`).
+(`systemctl disable --now hotserve-backup.timer hotserve-backup-drill.timer`).
 
 **A backup holds what the apps declare under `shared/`, and nothing of
 `/etc/hotserve`**: not the Caddyfile, whose `backup` blocks a restore
@@ -494,10 +497,10 @@ Every Sunday between 03:30 and 03:40, the box's time — an offset of
 this box's own — the drill fetches the newest snapshot of every app
 whole, checks it as a restore would, and installs nothing; then it
 checks the repository's structure and one fifty-second of its data.
-`sudo hotserve-backup drill` runs it now:
+`hotserve-backup drill` runs it now:
 
 ```
-$ sudo hotserve-backup drill
+$ hotserve-backup drill
 demo: restore proven: snapshot 39021de9, on 2026-10-03 07:02 UTC
 repository: its structure, and data group 40/52: clean
 ```
@@ -598,7 +601,7 @@ Either way `restic list locks --no-lock` lists what is there. `restic
 unlock` removes a lock restic judges stale; whether it judges a dead
 prune's so was not tried. `restic unlock --remove-all` removes every
 lock, a running command's too, so first stop the box's timers and let
-any run end (`sudo systemctl stop hotserve-backup.timer
+any run end (`systemctl stop hotserve-backup.timer
 hotserve-backup-drill.timer`; `hotserve-backup status` says whether a
 unit is running), and have no command of your own running; then start
 the timers again, and prune. The
@@ -639,7 +642,7 @@ makes `status` unhealthy until a run makes another.
 fetch that come due wait for it, up to two hours, holding the run lock
 meanwhile, so the hours after fail too. The drill's check takes no
 lock, and a prune under way can make it say `damaged`;
-`sudo hotserve-backup drill` checks again at once, where the next drill
+`hotserve-backup drill` checks again at once, where the next drill
 is a week away. So prune at a quiet hour, away from the drill (Sunday
 from 03:30, the box's time).
 

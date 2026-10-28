@@ -205,7 +205,7 @@ func TestWhatStatusSays(t *testing.T) {
 			st: with(func(a *record.App) {
 				a.Class, a.Detail, a.Snapshot = record.DataMissing, "/var/lib/liveswap/blog/shared is gone, and was backed up before", nil
 			}),
-			says: []string{"blog: data missing", "was backed up before", "sudo hotserve-backup restore blog"}, never: []string{"pending"},
+			says: []string{"blog: data missing", "was backed up before", "`hotserve-backup restore blog`, as root,"}, never: []string{"pending"},
 		},
 		"a unit three hours in is running, not failed": {
 			st:      with(func(*record.App) {}),
@@ -330,7 +330,7 @@ func TestWhatStatusSays(t *testing.T) {
 		},
 		"no check, set up nine days ago": {
 			st: with(func(*record.App) {}), setUp: ago(9 * 24 * time.Hour),
-			says: []string{"the repository has not been checked since backups were set up, 2026-09-11 15:00 UTC, more than 8 days ago; `sudo hotserve-backup drill` checks it"},
+			says: []string{"the repository has not been checked since backups were set up, 2026-09-11 15:00 UTC, more than 8 days ago; `hotserve-backup drill`, as root, checks it"},
 		},
 		// A box set up before the check existed: none on record, but a
 		// drill lately, and the next drill checks. Not failing.
@@ -359,7 +359,7 @@ func TestWhatStatusSays(t *testing.T) {
 				st.CheckSince = at(9 * 24 * time.Hour)
 				return st
 			}(), setUp: ago(30 * 24 * time.Hour),
-			says: []string{"no check of the repository has come to a verdict since 2026-09-11 15:00 UTC, more than 8 days ago; `sudo hotserve-backup drill` checks it"},
+			says: []string{"no check of the repository has come to a verdict since 2026-09-11 15:00 UTC, more than 8 days ago; `hotserve-backup drill`, as root, checks it"},
 		},
 		"checks begun three days ago": {
 			st: func() *record.Status {
@@ -377,7 +377,7 @@ func TestWhatStatusSays(t *testing.T) {
 		},
 		"checked clean, nine days ago": {
 			st:   checked(record.CheckClean, "", 9*24*time.Hour),
-			says: []string{"repository last checked 2026-09-11 15:00 UTC: its structure, and data group 38/52: clean: old, more than 8 days ago; `sudo hotserve-backup drill` checks it"},
+			says: []string{"repository last checked 2026-09-11 15:00 UTC: its structure, and data group 38/52: clean: old, more than 8 days ago; `hotserve-backup drill`, as root, checks it"},
 		},
 		"checked and found damaged": {
 			st:   checked(record.CheckDamaged, "restic check found 2 errors, in 2 damaged packs", 48*time.Hour),

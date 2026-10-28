@@ -98,14 +98,14 @@ func Report(in Input) (lines []string, healthy bool) {
 	case c == nil && st.CheckSince != nil && now.Sub(*st.CheckSince) > CheckOldAfter:
 		// Drills that check have run, and none came to a verdict — each
 		// stopped, week on week — however recent the last of them.
-		bad("no check of the repository has come to a verdict since %s, more than %d days ago; `sudo hotserve-backup drill` checks it", when(*st.CheckSince), old)
+		bad("no check of the repository has come to a verdict since %s, more than %d days ago; `hotserve-backup drill`, as root, checks it", when(*st.CheckSince), old)
 	case c == nil && st.CheckSince == nil && !in.SetUp.IsZero() && now.Sub(in.SetUp) > CheckOldAfter && (st.LastDrill == nil || now.Sub(st.LastDrill.Time) > CheckOldAfter):
-		bad("the repository has not been checked since backups were set up, %s, more than %d days ago; `sudo hotserve-backup drill` checks it", when(in.SetUp), old)
+		bad("the repository has not been checked since backups were set up, %s, more than %d days ago; `hotserve-backup drill`, as root, checks it", when(in.SetUp), old)
 	case c == nil && !st.Started.IsZero():
 		say("the repository has not been checked yet: the weekly drill checks it")
 	case c == nil:
 	case c.Class == record.CheckClean && now.Sub(c.Time) > CheckOldAfter:
-		bad("repository last checked %s: its structure, and data group %s: clean: old, more than %d days ago; `sudo hotserve-backup drill` checks it", when(c.Time), record.Text(c.Group), old)
+		bad("repository last checked %s: its structure, and data group %s: clean: old, more than %d days ago; `hotserve-backup drill`, as root, checks it", when(c.Time), record.Text(c.Group), old)
 	case c.Class == record.CheckClean:
 		say("repository last checked %s: its structure, and data group %s: clean", when(c.Time), record.Text(c.Group))
 	default:
@@ -165,7 +165,7 @@ func Report(in Input) (lines []string, healthy bool) {
 		case app.Class == record.NotRun:
 			say("%s: not run: %s (data at %s)", n, record.Text(app.Detail), at)
 		case app.Class == record.DataMissing:
-			bad("%s: data missing: %s; `sudo hotserve-backup restore %s` puts its last snapshot back", n, record.Text(app.Detail), n)
+			bad("%s: data missing: %s; `hotserve-backup restore %s`, as root, puts its last snapshot back", n, record.Text(app.Detail), n)
 		default:
 			// The last run did not back this app up, however fresh the
 			// run before it.
@@ -187,7 +187,7 @@ func Report(in Input) (lines []string, healthy bool) {
 		if p := app.RestoreProven; p != nil {
 			line := fmt.Sprintf("%s: restore last proven: %s, snapshot %s", n, when(p.Time), short(p.Snapshot.ID))
 			if now.Sub(p.Time) > ProvenOldAfter {
-				bad("%s: old, more than %d days ago; `sudo hotserve-backup drill` proves one now", line, int(ProvenOldAfter.Hours()/24))
+				bad("%s: old, more than %d days ago; `hotserve-backup drill`, as root, proves one now", line, int(ProvenOldAfter.Hours()/24))
 			} else {
 				say("%s", line)
 			}
@@ -204,9 +204,9 @@ func Report(in Input) (lines []string, healthy bool) {
 			if d.Snapshot.ID != "" { // one it could not ask the repository for has none
 				of = "snapshot " + short(d.Snapshot.ID) + ", "
 			}
-			bad("%s: restore not proven: %s (%s%s); `sudo hotserve-backup drill` tries again", n, record.Text(d.Detail), of, when(d.Time))
+			bad("%s: restore not proven: %s (%s%s); `hotserve-backup drill`, as root, tries again", n, record.Text(d.Detail), of, when(d.Time))
 		case app.RestoreProven == nil:
-			bad("%s: restore not proven: no drill of it has run; `sudo hotserve-backup drill` proves it", n)
+			bad("%s: restore not proven: no drill of it has run; `hotserve-backup drill`, as root, proves it", n)
 		}
 	}
 

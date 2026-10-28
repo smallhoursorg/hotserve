@@ -29,16 +29,16 @@ FROM ${BASE_IMAGE}
 # the package came to lean on would fail there rather than pass by
 # apt's default.
 RUN printf 'APT::Install-Recommends "false";\n' > /etc/apt/apt.conf.d/99no-recommends
-# sudo: the backups README's lines are run as an administrator, under
-# sudo, the way they are written. restic, sqlite3 and ca-certificates
-# are NOT here: the package depends on them, and the smoke test proves
+# No sudo: the backups guide's lines are root's, and run as root, the
+# way they are written. restic, sqlite3 and ca-certificates are NOT
+# here: the package depends on them, and the smoke test proves
 # apt brings all three to an image that installs no recommended
 # package (nothing here speaks TLS; the smoke's servers are loopback
 # http).
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
 	&& apt-get install -y \
-		systemd systemd-sysv dbus curl sudo \
+		systemd systemd-sysv dbus curl \
 	&& rm -rf /var/lib/apt/lists/*
 COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 # The Debian image forbids maintainer scripts to start services

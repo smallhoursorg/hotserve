@@ -220,7 +220,7 @@ func useraddArgv() string { return strings.Join(useradd, " ") }
 // name carries whatever comment its administrator gives it, the mark
 // among them (the owner's review of #155).
 func accountUsable(ctx context.Context, acct passwd) error {
-	remedy := fmt.Sprintf("remove it (userdel %s) and run sudo hotserve-backup setup <repository>, which makes it (%s); or, if it is one you made for hotserve, mark it: usermod --comment %s %s",
+	remedy := fmt.Sprintf("as root, remove it (userdel %s) and run hotserve-backup setup <repository>, which makes it (%s); or, if it is one you made for hotserve, mark it: usermod --comment %s %s",
 		backupUser, useraddArgv(), accountMark, backupUser)
 	if acct.comment != accountMark {
 		return fmt.Errorf("the %s account on this box was not made by hotserve (its comment is %q, not %q): every restic unit runs as it, so hotserve uses only an account it made itself; %s",
@@ -264,7 +264,7 @@ func accountReady(ctx context.Context) (passwd, error) {
 		return passwd{}, err
 	}
 	if !acct.exists {
-		return passwd{}, fmt.Errorf("the %s account is not there: sudo hotserve-backup setup <repository> makes it (%s)", backupUser, useraddArgv())
+		return passwd{}, fmt.Errorf("the %s account is not there: hotserve-backup setup <repository>, as root, makes it (%s)", backupUser, useraddArgv())
 	}
 	return acct, accountUsable(ctx, acct)
 }
@@ -413,13 +413,13 @@ func b2Refused(repo string) error {
 // b2RunRefused is a run's, a restore's and a drill's word on a file that
 // names a b2: repository: what to run, first, so that the record's cut
 // (record.Text, 300 runes) takes the reason before the remedy — short,
-// so that the cut takes neither for a bucket and path of up to 59
+// so that the cut takes neither for a bucket and path of up to 55
 // characters as escaped (b2AsS3), the slash between them counted. The URL is in single quotes, so that the command pasted as
 // it is reaches setup whole: the placeholder's < and >, and a $, & or ;
 // the path may hold, are the shell's otherwise; b2AsS3 leaves no ' in it
 // to end the quotes.
 func b2RunRefused(repo string) error {
-	return fmt.Errorf("the repository is b2:, which is not supported: sudo hotserve-backup setup '%s' moves it to B2's S3-compatible endpoint, with an application key; %s", b2AsS3(repo), b2Why)
+	return fmt.Errorf("the repository is b2:, which is not supported: as root, hotserve-backup setup '%s' moves it to B2's S3-compatible endpoint, with an application key; %s", b2AsS3(repo), b2Why)
 }
 
 // b2AsS3 is a b2: repository's URL at B2's S3-compatible endpoint: the
@@ -641,7 +641,7 @@ func OldEnvFileNote(cfg Config) string {
 	if _, err := os.Lstat(cfg.OldEnvFile); cfg.OldEnvFile == "" || err != nil {
 		return ""
 	}
-	return fmt.Sprintf(" (%s is from before this version and is not read: run `sudo hotserve-backup setup <its RESTIC_REPOSITORY>`, which asks for its RESTIC_PASSWORD; then remove it)", cfg.OldEnvFile)
+	return fmt.Sprintf(" (%s is from before this version and is not read: run `hotserve-backup setup <its RESTIC_REPOSITORY>` as root, which asks for its RESTIC_PASSWORD; then remove it)", cfg.OldEnvFile)
 }
 
 // setup is one setup under way: the run whose lock it holds, the
@@ -1109,7 +1109,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 	// operator may want its contents once more.
 	if _, err := os.Lstat(cfg.OldEnvFile); cfg.OldEnvFile != "" && err == nil {
 		rep.OldEnvFile = cfg.OldEnvFile
-		term.Say(fmt.Sprintf("%s is still there, from before this version, and is not read; it holds a copy of the credential: remove it (sudo rm %s)", cfg.OldEnvFile, cfg.OldEnvFile))
+		term.Say(fmt.Sprintf("%s is still there, from before this version, and is not read; it holds a copy of the credential: remove it (rm %s)", cfg.OldEnvFile, cfg.OldEnvFile))
 	}
 	return rep, nil
 }

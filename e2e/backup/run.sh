@@ -38,7 +38,7 @@ echo "=== backup 0c: a b2: repository stops a run, before any unit ==="
 # B2's S3-compatible endpoint. Read as the manager reads the file: in
 # quotes, after an earlier line.
 printf 'RESTIC_REPOSITORY=%s\nRESTIC_PASSWORD=%s\nRESTIC_REPOSITORY="b2:hs-backups:dev"\nB2_ACCOUNT_ID=K001\nB2_ACCOUNT_KEY=k\n' "$REPO" "$PASSWORD" >"$ENVFILE"
-if run; then fail "a run with a b2: repository exited 0"; else grep -q "the repository is b2:, which is not supported: sudo hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3-compatible endpoint, with an application key" "$OUT" && pass "a run refuses a b2: repository, naming its S3 URL" || fail "the run's words: $(cat "$OUT")"; fi
+if run; then fail "a run with a b2: repository exited 0"; else grep -q "the repository is b2:, which is not supported: as root, hotserve-backup setup 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3-compatible endpoint, with an application key" "$OUT" && pass "a run refuses a b2: repository, naming its S3 URL" || fail "the run's words: $(cat "$OUT")"; fi
 [ "$(units_left)" = 0 ] && pass "and started no unit" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
 grep -q '"error": "the repository is b2:, which is not supported' "$STATUS" && pass "and the record says so, for status" || fail "the record: $(head -c 400 "$STATUS")"
 hotserve-backup status >"$OUT" 2>&1

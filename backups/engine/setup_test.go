@@ -509,10 +509,23 @@ func TestTheRunsRemedyPastesAsOneLiteralArgument(t *testing.T) {
 				t.Fatalf("%s holds a quote", u)
 			}
 			msg := b2RunRefused(repo).Error()
-			if want := "sudo hotserve-backup setup '" + u + "' moves it"; !strings.Contains(msg, want) {
+			if want := "as root, hotserve-backup setup '" + u + "' moves it"; !strings.Contains(msg, want) {
 				t.Fatalf("%s\nwant it to hold %s", msg, want)
 			}
 		})
+	}
+}
+
+// The record keeps the run's b2: refusal whole for a bucket and path of
+// up to 55 characters, the slash between them counted (the README's
+// accepted residual), and cuts one longer.
+func TestTheRunsB2RefusalFitsTheRecordUpTo55Characters(t *testing.T) {
+	for n, whole := range map[int]bool{55: true, 56: false} {
+		repo := "b2:" + strings.Repeat("b", 20) + ":" + strings.Repeat("p", n-21)
+		msg := b2RunRefused(repo).Error()
+		if got := record.Text(msg) == msg; got != whole {
+			t.Errorf("%d characters: kept whole = %v, want %v (%d runes)", n, got, whole, len([]rune(msg)))
+		}
 	}
 }
 
@@ -1148,7 +1161,7 @@ func TestTheOldFileStillThereIsSaid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.OldEnvFile != b.cfg.OldEnvFile || !strings.Contains(m.saidAll(), b.cfg.OldEnvFile+" is still there, from before this version, and is not read; it holds a copy of the credential: remove it (sudo rm "+b.cfg.OldEnvFile+")") {
+	if rep.OldEnvFile != b.cfg.OldEnvFile || !strings.Contains(m.saidAll(), b.cfg.OldEnvFile+" is still there, from before this version, and is not read; it holds a copy of the credential: remove it (rm "+b.cfg.OldEnvFile+")") {
 		t.Fatalf("report %+v\nsaid:\n%s", rep, m.saidAll())
 	}
 	if _, err := os.Lstat(b.cfg.OldEnvFile); err != nil {

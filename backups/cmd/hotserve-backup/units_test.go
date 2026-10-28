@@ -273,9 +273,9 @@ func TestSetupsClosingLineFollowsTheTimer(t *testing.T) {
 		{1, true, true, "the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer)", []string{"nothing runs it on a schedule", "not enabled"}},
 		// Active now and not enabled — started by hand, or disabled
 		// without --now: true until the next boot, and said so.
-		{1, true, false, "the first backup runs within the hour and ten minutes, but hotserve-backup.timer is not enabled: after a reboot nothing runs it (sudo systemctl enable hotserve-backup.timer)", []string{cron}},
-		{1, false, true, "nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a " + cron, []string{"within the hour"}},
-		{1, false, false, "nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer", []string{"within the hour"}},
+		{1, true, false, "the first backup runs within the hour and ten minutes, but hotserve-backup.timer is not enabled: after a reboot nothing runs it (systemctl enable hotserve-backup.timer)", []string{cron}},
+		{1, false, true, "nothing runs it on a schedule: systemctl enable --now hotserve-backup.timer, or run hotserve-backup run hourly from a " + cron, []string{"within the hour"}},
+		{1, false, false, "nothing runs it on a schedule: systemctl enable --now hotserve-backup.timer", []string{"within the hour"}},
 		{0, true, true, "the hourly timer backs it up from then on", []string{"nothing runs it on a schedule", "not enabled"}},
 		{0, true, false, "hotserve-backup.timer is not enabled: after a reboot nothing runs it", []string{cron}},
 		{0, false, false, "nothing runs it on a schedule", []string{"hourly timer backs it up"}},

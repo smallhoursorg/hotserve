@@ -215,12 +215,12 @@ func config() engine.Config {
 }
 
 // runner connects to the system manager, which takes root. The refusal
-// says to repeat the command under sudo and renders none of it: an
+// says to repeat the command as root and renders none of it: an
 // argument printed back would have to be quoted for a shell, and one
 // that was refused for holding a credential must not be echoed.
 func runner(ctx context.Context, what string) (*unit.Runner, error) {
 	if os.Geteuid() != 0 {
-		return nil, fmt.Errorf("a %s starts system units, which needs root: run the same command again under sudo", what)
+		return nil, fmt.Errorf("a %s starts system units, which needs root: run the same command again as root", what)
 	}
 	return unit.NewSystemRunner(ctx)
 }
@@ -260,7 +260,7 @@ func closing(apps int, active, enabled bool, err error) string {
 	if err != nil {
 		// No advice from not knowing: a scheduler added beside one that
 		// is there meets it on the run lock every hour.
-		return "next: could not tell whether hotserve-backup.timer is scheduled (" + err.Error() + "): systemctl list-timers hotserve-backup.timer says; to run a backup now, sudo systemctl start hotserve-backup.service"
+		return "next: could not tell whether hotserve-backup.timer is scheduled (" + err.Error() + "): systemctl list-timers hotserve-backup.timer says; to run a backup now, systemctl start hotserve-backup.service"
 	}
 	return nextLine(apps, active, enabled)
 }
@@ -269,19 +269,19 @@ func closing(apps int, active, enabled bool, err error) string {
 // timer is active on this box.
 func nextLine(apps int, active, enabled bool) string {
 	const (
-		notEnabled = "hotserve-backup.timer is not enabled: after a reboot nothing runs it (sudo systemctl enable hotserve-backup.timer)"
-		nothing    = "nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own"
+		notEnabled = "hotserve-backup.timer is not enabled: after a reboot nothing runs it (systemctl enable hotserve-backup.timer)"
+		nothing    = "nothing runs it on a schedule: systemctl enable --now hotserve-backup.timer, or run hotserve-backup run hourly from a timer or cron entry of your own"
 		declare    = "next: declare a backup in an app's Caddyfile block (liveswap/README.md); "
 	)
 	switch {
 	case apps > 0 && active && enabled:
-		return "next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status"
+		return "next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, systemctl start hotserve-backup.service; then hotserve-backup status"
 	case apps > 0 && active:
 		return "next: the first backup runs within the hour and ten minutes, but " + notEnabled + "; then hotserve-backup status"
 	case apps > 0:
 		return "next: " + nothing + "; then hotserve-backup status"
 	case active && enabled:
-		return declare + "the hourly timer backs it up from then on, or sudo systemctl start hotserve-backup.service runs one now"
+		return declare + "the hourly timer backs it up from then on, or systemctl start hotserve-backup.service runs one now"
 	case active:
 		return declare + "the hourly timer backs it up from then on, but " + notEnabled
 	}

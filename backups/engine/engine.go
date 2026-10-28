@@ -702,7 +702,7 @@ func runDirUsable(dir string) error {
 		return fmt.Errorf("whether %s is itself a mount point could not be read: %w", dir, err)
 	}
 	if mounted {
-		return fmt.Errorf("%s is itself a mount point: nothing of hotserve-backup's is mounted there, and what it writes and removes there would be written and removed through the mount; unmount it (sudo umount %s)", dir, dir)
+		return fmt.Errorf("%s is itself a mount point: nothing of hotserve-backup's is mounted there, and what it writes and removes there would be written and removed through the mount; unmount it (umount %s)", dir, dir)
 	}
 	return nil
 }

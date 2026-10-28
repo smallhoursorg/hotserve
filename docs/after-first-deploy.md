@@ -188,8 +188,8 @@ see during the restart, and how to pick a quiet moment for it.
   ([Upgrading](upgrading.md#patching-the-host)).
 - **Backups:** the package ships `hotserve-backup` and its timers;
   setting them up, checking on them and restoring are
-  [Backups](backups.md). Its `sudo` lines are root's, over SSH, and not
-  an administrator's; `hotserve-backup status` needs no privilege.
+  [Backups](backups.md). Its commands on the box are root's, over SSH,
+  but `hotserve-backup validate` and `status`, which need no privilege.
 - **Everything else:** [liveswap/README.md](../liveswap/README.md) is the
   reference for every option, status code and edge.
 

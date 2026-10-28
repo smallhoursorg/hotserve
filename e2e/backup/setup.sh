@@ -46,7 +46,7 @@ setup && fail "setup with no repository exited 0" || { says "^usage: hotserve-ba
 setup a b && fail "setup with two arguments exited 0" || { says "^usage:" && pass "and so is setup with two" || fail "said: $(cat "$OUT")"; }
 
 echo "=== setup 1: not root, no terminal: refused before anything is touched ==="
-as_nobody hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup as nobody exited 0" || { says "needs root: run the same command again under sudo" && ! says "$REPO" && pass "setup as nobody says to repeat the command under sudo, and renders none of it" || fail "as nobody: $(cat "$OUT")"; }
+as_nobody hotserve-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup as nobody exited 0" || { says "needs root: run the same command again as root" && ! says "$REPO" && pass "setup as nobody says to repeat the command as root, and renders none of it" || fail "as nobody: $(cat "$OUT")"; }
 setup "$REPO" </dev/null && fail "setup with no terminal exited 0" || { says "asks for secrets at a terminal, and there is none here; from a provisioning tool, write $ENVFILE by hand" && ! says "^usage" && ! says "no such device" && pass "setup with no terminal says so, and where to go" || fail "no terminal: $(cat "$OUT")"; }
 [ ! -e "$ETC" ] && pass "and nothing was made under /etc" || fail "$ETC exists: $(ls -la "$ETC")"
 [ "$(units_left)" = 0 ] && pass "and no unit was started" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
@@ -134,7 +134,7 @@ says "^looking for a repository at $REPO" && pass "the repository was looked for
 # This box's timer is not active (the image undoes the package's
 # enabling): setup says so, and how to have it; the package smoke sees
 # the other wording, with the timer active.
-says "^next: nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status" && pass "and what to do next, from the timer being inactive here" || fail "next: $(cat "$OUT")"
+says "^next: nothing runs it on a schedule: systemctl enable --now hotserve-backup.timer, or run hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status" && pass "and what to do next, from the timer being inactive here" || fail "next: $(cat "$OUT")"
 journalctl --sync >/dev/null 2>&1
 if ! journalctl --no-pager | grep -q "hotserve backup: init the repository"; then
 	fail "the journal does not show the init unit, so it cannot show what is not in it"
@@ -161,7 +161,7 @@ echo "=== setup 5: a file at the old path is named, and not read ==="
 mv "$ENVFILE" /root/env.keep
 printf 'RESTIC_PASSWORD=old\n' >"$OLD"
 chmod 0600 "$OLD"
-run && fail "a run with only the old file exited 0" || { says "not set up: $ENVFILE is not there" && says "$OLD is from before this version and is not read: run \`sudo hotserve-backup setup <its RESTIC_REPOSITORY>\`, which asks for its RESTIC_PASSWORD; then remove it" && ! says "lstat" && pass "a run names the new path, and says what to do with the old one" || fail "the run said: $(cat "$OUT")"; }
+run && fail "a run with only the old file exited 0" || { says "not set up: $ENVFILE is not there" && says "$OLD is from before this version and is not read: run \`hotserve-backup setup <its RESTIC_REPOSITORY>\` as root, which asks for its RESTIC_PASSWORD; then remove it" && ! says "lstat" && pass "a run names the new path, and says what to do with the old one" || fail "the run said: $(cat "$OUT")"; }
 [ "$(units_left)" = 0 ] && pass "and started nothing" || fail "units: $(systemctl list-units --all --no-legend 'hotserve_backup_*')"
 hotserve-backup status >"$OUT" 2>&1
 [ $? = 3 ] && says "$OLD is from before this version" && pass "status exits 3 and says the same" || fail "status: $(cat "$OUT")"
@@ -169,7 +169,7 @@ hotserve-backup status >"$OUT" 2>&1
 # the end: that file holds a copy of the credential.
 mv /root/env.keep "$ENVFILE"
 converse "hotserve-backup setup $REPO" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" "$pw"
-[ $? = 0 ] && says "$OLD is still there, from before this version, and is not read; it holds a copy of the credential: remove it (sudo rm $OLD)" && [ -f "$OLD" ] && pass "a setup with the old file still there says to remove it, and does not itself" || fail "the old file after a setup: $(grep "$OLD" "$OUT"; ls -la "$OLD" 2>&1)"
+[ $? = 0 ] && says "$OLD is still there, from before this version, and is not read; it holds a copy of the credential: remove it (rm $OLD)" && [ -f "$OLD" ] && pass "a setup with the old file still there says to remove it, and does not itself" || fail "the old file after a setup: $(grep "$OLD" "$OUT"; ls -la "$OLD" 2>&1)"
 rm -f "$OLD"
 
 echo "=== setup 6: mistakes over a working setup leave it as it was ==="
@@ -424,11 +424,11 @@ echo "=== setup 13: the file written by hand, and the documented init that never
 # The README's by-hand path: the file as setup would write it, and
 # restic init through the manager's own reading of it — never a shell's.
 write_env "$S3/byhand" 'p#a$s;s`w"x'
-sudo_run() { systemd-run --quiet --pipe --wait --collect -p User=hotserve-backup -p EnvironmentFile="$ENVFILE" -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent /usr/bin/restic "$@"; }
+by_hand() { systemd-run --quiet --pipe --wait --collect -p User=hotserve-backup -p EnvironmentFile="$ENVFILE" -p CacheDirectory=hotserve-backup -E RESTIC_CACHE_DIR=/var/cache/hotserve-backup -E HOME=/nonexistent /usr/bin/restic "$@"; }
 # The suite's own rr sources the file through the shell, which is the
 # very thing the scenario is about: the repository is read back the
 # way the manager reads the file.
-sudo_run init >"$OUT" 2>&1 && sudo_run cat config --no-lock >/root/byhand.cfg 2>&1 && grep -q '"id"' /root/byhand.cfg && pass "the documented by-hand init makes a repository the file opens, with a password a shell would have mangled" || fail "by hand: $(cat "$OUT" /root/byhand.cfg 2>&1 | tail -3)"
+by_hand init >"$OUT" 2>&1 && by_hand cat config --no-lock >/root/byhand.cfg 2>&1 && grep -q '"id"' /root/byhand.cfg && pass "the documented by-hand init makes a repository the file opens, with a password a shell would have mangled" || fail "by hand: $(cat "$OUT" /root/byhand.cfg 2>&1 | tail -3)"
 [ "$(stat -c %U /var/cache/hotserve-backup)" = hotserve-backup ] && pass "and leaves the cache the account's" || fail "cache owner: $(stat -c %U /var/cache/hotserve-backup)"
 cp /root/env.keep "$ENVFILE"
 

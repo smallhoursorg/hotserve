@@ -84,7 +84,7 @@ if [ "$backup_st" != 0 ] && [ "$backup_st" != 2 ]; then
 	124 | 137) why="the user directory did not answer within 30s" ;; # 137: killed after ignoring the SIGTERM
 	*) why="getent exited $backup_st" ;;
 	esac
-	echo "hotserve: whether the hotserve-backup account exists could not be told ($why); no account is made beside the directory's, and backups wait for it: sudo hotserve-backup account says when it is right" >&2
+	echo "hotserve: whether the hotserve-backup account exists could not be told ($why); no account is made beside the directory's, and backups wait for it: hotserve-backup account says when it is right" >&2
 elif nss getent passwd hotserve-backup >/dev/null 2>&1; then
 	# The rule is setup's, and in setup's words: the binary this package
 	# has just installed says whether the account is one setup and every
@@ -94,7 +94,7 @@ elif nss getent passwd hotserve-backup >/dev/null 2>&1; then
 		echo "hotserve: hotserve-backup setup, and every run, restore and drill, refuse that account until it is put right; hotserve-backup account says when it is" >&2
 	fi
 else
-	echo "hotserve: the hotserve-backup account could not be made (${why:-no reason was given}); backups wait for it, and nothing else of hotserve does: sudo hotserve-backup setup <repository> makes it, or says why it cannot" >&2
+	echo "hotserve: the hotserve-backup account could not be made (${why:-no reason was given}); backups wait for it, and nothing else of hotserve does: hotserve-backup setup <repository> makes it, or says why it cannot" >&2
 fi
 # The box applier's exchange tree, /var/lib/hotserve-box: made now that
 # the hotserve group exists, and again at every boot, each time with
@@ -321,9 +321,9 @@ if [ -d /run/systemd/system ]; then
 	fi
 	if systemctl is-enabled --quiet hotserve-backup.timer 2>/dev/null; then
 		echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
-		echo "  sudo hotserve-backup setup <repository>"
+		echo "  hotserve-backup setup <repository>"
 	else
-		echo "Backups: the hourly timer and the Sunday restore drill are disabled, as they were left; sudo systemctl enable --now hotserve-backup.timer hotserve-backup-drill.timer turns them on"
+		echo "Backups: the hourly timer and the Sunday restore drill are disabled, as they were left; systemctl enable --now hotserve-backup.timer hotserve-backup-drill.timer turns them on"
 	fi
 fi
 # Explicit, so no message above can decide the package's state.

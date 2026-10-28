@@ -229,11 +229,11 @@ purge)
 				inactive | failed) systemctl reset-failed "$u" 2>/dev/null || true ;;
 				"")
 					stuck=yes
-					echo "hotserve: $u, which a backup command left running, could not be asked about: the manager did not answer; if it runs, it holds the repository credential (sudo systemctl stop $u)" >&2
+					echo "hotserve: $u, which a backup command left running, could not be asked about: the manager did not answer; if it runs, it holds the repository credential (systemctl stop $u)" >&2
 					;;
 				*)
 					stuck=yes
-					echo "hotserve: $u, which a backup command left running, would not stop (it is $state): it holds the repository credential; stop it yourself (sudo systemctl stop $u)" >&2
+					echo "hotserve: $u, which a backup command left running, would not stop (it is $state): it holds the repository credential; stop it yourself (systemctl stop $u)" >&2
 					;;
 				esac
 			done <"$run/units"
@@ -255,7 +255,7 @@ purge)
 		fi
 	fi
 	if [ -e /etc/hotserve-backup/repository.env ]; then
-		echo "hotserve: /etc/hotserve-backup/repository.env is kept: it holds the repository password, the only way to read the backups already made. Remove it yourself once those backups are not needed: sudo rm -r /etc/hotserve-backup" >&2
+		echo "hotserve: /etc/hotserve-backup/repository.env is kept: it holds the repository password, the only way to read the backups already made. Remove it yourself once those backups are not needed: rm -r /etc/hotserve-backup" >&2
 	fi
 	;;
 *)
