@@ -39,9 +39,9 @@ word before them. What only reads needs no privilege:
 `systemctl --failed`, and the journal through the `adm` group. The
 administrator Hardening makes is in that group alone, with no `sudo`:
 they — or an agent working as one — run those. Run as root, `status`
-also checks the credential file, which only root can read. The Caddyfile reaches
-the box by a signed push from its repository, and the box runs
-`hotserve-backup validate` on each one before it is applied
+also checks the credential file, which only root can read. The
+Caddyfile reaches the box by a signed push from its repository, and the
+box runs `hotserve-backup validate` on each one before it is applied
 ([examples/box](../examples/box/README.md)). Keep `setup` for a person:
 it shows the repository password on the terminal it runs in, and it
 writes the one credential that reads every backup ever made.
@@ -256,11 +256,11 @@ hotserve-backup restore demo
 
 The package's smoke test (`make install-test`) runs exactly those
 lines, read out of this page, as root — `validate` and `status` as an
-account with no privilege — on a fresh Debian 13 with the `.deb` just installed
-and no `sudo`. Keep the block in the
-box repo's Caddyfile: a push of a file without it stops that app's
-backups, and a run says so once. The other order works too: `setup`
-before any block says that a run would back nothing up.
+account with no privilege — on a fresh Debian 13 with the `.deb` just
+installed and no `sudo`. Keep the block in the box repo's Caddyfile:
+a push of a file without it stops that app's backups, and a run says
+so once. The other order works too: `setup` before any block says
+that a run would back nothing up.
 
 `setup`, for a bucket nobody has made yet:
 

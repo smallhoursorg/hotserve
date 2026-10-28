@@ -24,12 +24,12 @@
 # Stage 2c runs the "Set it up" lines of the backups guide — read out
 # of docs/backups.md itself, mounted at /docs-backups.md, so the lines
 # run are the lines written — as root, with validate and status as an
-# account with no privilege, against an S3 server in this container, and then holds
-# the package to the table in backups/README.md: the timers enabled
-# once, an administrator's
-# disable kept across an upgrade, stopped and masked on remove, enabled
-# again on reinstall, and purge keeping the credential file and saying
-# why (expect_backup_state, a row per transition). And to the edges of
+# account with no privilege, against an S3 server in this container,
+# and then holds the package to the table in backups/README.md: the
+# timers enabled once, an administrator's disable kept across an
+# upgrade, stopped and masked on remove, enabled again on reinstall,
+# and purge keeping the credential file and saying why
+# (expect_backup_state, a row per transition). And to the edges of
 # each transition (#154): a run under way at an upgrade left alone to
 # finish, the timers' stamps and a killed run's mounts gone with the
 # package, and — stage 7 — an install where the account cannot be made,
@@ -932,7 +932,9 @@ for u in hotserve-backup.service hotserve-backup-drill.service; do
 	[ "$(systemctl show -p ActiveState --value "$u")" = inactive ] && [ "$(systemctl show -p Result --value "$u")" = success ] \
 		|| die "$u after install: $(systemctl show -p ActiveState,Result "$u" | tr '\n' ' ') — nothing may start before setup"
 done
-grep -qx "  hotserve-backup setup <repository>" /tmp/install.out \
+# Anchored at the line's start, so no sudo stands before it; not -x:
+# apt runs the maintainer scripts on a pty, and each line ends in \r.
+grep -q "^  hotserve-backup setup <repository>" /tmp/install.out \
 	|| die "postinstall did not say that the timers wait for setup"
 grep -q "refuse that account" /tmp/install.out \
 	&& die "postinstall warned of the account it had just made: $(grep hotserve-backup /tmp/install.out)" || true
@@ -1038,6 +1040,7 @@ for line in "${docs[@]}"; do
 		;;
 	"hotserve-backup validate "*)
 		as_admin "$line" >"$OUT" 2>&1 || die "validate with no privilege exits $?: $(cat "$OUT")"
+		grep -q "^a run would back up demo, under " "$OUT" || die "validate with no privilege did not see demo's declaration: $(cat "$OUT")"
 		;;
 	"hotserve-backup status")
 		as_admin "$line" >"$OUT" 2>&1 || die "status with no privilege exits $?: $(cat "$OUT")"
