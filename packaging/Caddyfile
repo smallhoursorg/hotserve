@@ -13,7 +13,7 @@
 # Check before reloading: a file that fails to load leaves the old config
 # running, but it also stops the next restart or upgrade from starting.
 #   hotserve validate --config /etc/hotserve/Caddyfile
-#   sudo systemctl reload hotserve
+#   systemctl reload hotserve
 
 {
 	# Admin API on a unix socket instead of the default localhost:2019.

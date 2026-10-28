@@ -176,7 +176,7 @@ EOF
 		echo "  The likely cause is something in /etc/hotserve/Caddyfile this version refuses. See why with:" >&2
 		echo "    journalctl -u hotserve -e" >&2
 		echo "    systemctl status hotserve" >&2
-		echo "  then fix it and run: sudo systemctl restart hotserve" >&2
+		echo "  then fix it and run: systemctl restart hotserve" >&2
 	elif [ "$restart" = ok ] && systemctl is-enabled --quiet hotserve 2>/dev/null; then
 		# Already set up: no start hint. If is-enabled itself fails,
 		# the hint below prints, which is harmless on an enabled unit.
@@ -186,11 +186,11 @@ EOF
 			# try-restart does not start a stopped or failed unit — an
 			# upgrade that fixes an earlier failed start included.
 			echo "hotserve is enabled but not running. Start it with:"
-			echo "  sudo systemctl start hotserve"
+			echo "  systemctl start hotserve"
 		fi
 	else
 		echo "hotserve installed. Start it with:"
-		echo "  sudo systemctl enable --now hotserve"
+		echo "  systemctl enable --now hotserve"
 	fi
 fi
 # The box applier's path unit, the way dh_installsystemd would have it:

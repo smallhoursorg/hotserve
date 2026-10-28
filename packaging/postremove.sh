@@ -125,7 +125,7 @@ purge)
 	if [ -d /etc/hotserve ] && ! rmdir /etc/hotserve 2>/dev/null; then
 		echo "hotserve: kept /etc/hotserve: it still holds $(ls -A /etc/hotserve | tr '\n' ' ' | sed 's/ $//')" >&2
 		if [ -e /etc/hotserve/age/identity ]; then
-			echo "  age/identity is the box's key for secrets, the one way to read the secrets its repository holds; once nothing needs them: sudo rm -r /etc/hotserve" >&2
+			echo "  age/identity is the box's key for secrets, the one way to read the secrets its repository holds; once nothing needs them: rm -r /etc/hotserve" >&2
 		fi
 	fi
 	# The starter's record.
