@@ -874,8 +874,10 @@ are the endpoint's own questions after them.
   21–36 mid-upload and 35–51 mid-fetch, exit 1 (or 130, restic giving
   up its lock) [M93]. The check, which takes no lock, holds a quarter
   of an hour mid-read for each five packs it has left [M94]. One that
-  answers a byte at a time is never given up on, which is #177's
-  question still.
+  answers a byte at a time is never given up on; `status` is red from
+  the third hour, naming the unit still running. Both are accepted
+  ([#177](https://github.com/smallhoursorg/hotserve/issues/177),
+  closed with their scores).
 - **Retention off the box**: **unverified**.
 
 **Through B2's S3-compatible endpoint**, besides every line above:

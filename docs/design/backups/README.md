@@ -12,7 +12,8 @@ operator guide is [docs/backups.md](../../backups.md) and the reference is
   bucket passed or were answered; check 5 (retention) and check 8's
   egress figure were not done.
 - The run found a hang that stops backups: a run's upload sat for 27 hours
-  on B2 with no output — **#177**, with the evidence and the options.
+  on B2 with no output — **#177**, with the evidence and the options;
+  closed 2026-10-29, after #368, with what is left accepted.
 - Every RC check on B2 ran through B2's native API — restic's own
   `b2:` backend, and rclone's and `backblaze-b2`'s B2 code. Since
   D13 (2026-10-23, #354) B2 is reached through restic's S3 backend at
