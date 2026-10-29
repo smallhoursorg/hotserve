@@ -888,7 +888,7 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 	// not hold, the first exits 1 and the second exits 0 having restored
 	// nothing [measured].
 	s := resticUnit(x.name("fetch", app), "hotserve backup: fetch a snapshot of "+app, x.cfg.EnvFile,
-		[]string{x.cfg.Restic, "restore", "--quiet", "--json", "--retry-lock", retryLock, id + ":/backup/" + app, "--target", "/restore"}, out)
+		append(append([]string{x.cfg.Restic, "restore", "--quiet", "--json", "--retry-lock", retryLock}, oneTry...), id+":/backup/"+app, "--target", "/restore"), out)
 	s.Binds = []unit.Bind{{Source: fetched, Dest: "/restore", Writable: true}}
 	o, err := x.start(ctx, s)
 	if err != nil {
@@ -905,9 +905,11 @@ func (x *run) fetch(ctx context.Context, app, id, fetched string) error {
 			// checked before it) — and restic gives them all the one
 			// status [measured]. So no cause is named: the journal has
 			// restic's words, which do name it. A storage that falls
-			// silent mid-fetch is retried instead, for 25 minutes and
-			// counting [measured]; one that answers in part ends in
-			// this same status. Not resticFailure's exit-1 words, which
+			// silent ends it in this same status, one try a request
+			// (oneTry): 15 minutes at the opening, 35 mid-fetch — or
+			// 130 after 51, restic's lock monitor giving up first,
+			// resticFailure's words and this app's own too [M93]; one
+			// that answers in part, in this one. Not resticFailure's exit-1 words, which
 			// blame the storage or the key and are repository-wide:
 			// here the repository has just answered the listing, and
 			// the next app is drilled all the same.

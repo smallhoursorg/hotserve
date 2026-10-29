@@ -867,9 +867,15 @@ are the endpoint's own questions after them.
   restic is built with retries a failed upload without limit, below
   restic's own retries; which failure it was is not known. Over S3,
   every sustained fault measured that answers ended the command, exit
-  1, some 15 minutes into the operation it failed, and a storage that
-  never answers did not within 40 minutes, which is #177's question
-  still [M87, M88].
+  1, some 15 minutes into the operation it failed [M87]. A storage that
+  takes the request and never answers ends the box's upload, fetch and
+  check, since they make one try at a request where restic would make
+  ten and took 100 minutes [M92]: after 15 minutes at the opening,
+  21–36 mid-upload and 35–51 mid-fetch, exit 1 (or 130, restic giving
+  up its lock) [M93]. The check, which takes no lock, holds a quarter
+  of an hour mid-read for each five packs it has left [M94]. One that
+  answers a byte at a time is never given up on, which is #177's
+  question still.
 - **Retention off the box**: **unverified**.
 
 **Through B2's S3-compatible endpoint**, besides every line above:

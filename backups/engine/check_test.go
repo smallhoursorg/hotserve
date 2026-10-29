@@ -239,7 +239,7 @@ func TestTheCheckTakesNoLockAndReadsItsWeeksGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	check := b.spec("repocheck")
-	want := []string{"/usr/bin/restic", "check", "--no-lock", "--json", "--read-data-subset=39/52"}
+	want := []string{"/usr/bin/restic", "check", "--no-lock", "--json", "-o", "s3.retries=1", "--read-data-subset=39/52"}
 	if !slices.Equal(check.Argv, want) {
 		t.Errorf("the check's command:\n%q\nwant\n%q", check.Argv, want)
 	}

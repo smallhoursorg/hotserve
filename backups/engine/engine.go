@@ -146,6 +146,25 @@ func (e upgradedError) Unwrap() error { return e.error }
 // does not read it from the environment.
 const retryLock = "2h"
 
+// oneTry is one attempt at each request where restic's S3 backend
+// makes ten (minio-go's default), for the upload, the fetch and the
+// check, which have no clock (D4). A storage that takes the request
+// and never answers holds each attempt until restic's five-minute
+// stuck-request watchdog ends it, so ten, under restic's own retries,
+// held a backup 100 minutes at the opening and 106 mid-upload; with
+// one, restic's own quarter of an hour of retries, each printed, is
+// all there is — 15 minutes at the opening, 21–36 mid-upload, 35–51
+// mid-fetch, where the packs in flight are given up a batch at a time
+// until restic's own lock monitor ends the command [M92, M93]. The
+// check takes no lock, so mid-read it has no such end: a quarter of
+// an hour for each five packs left in its group [M94].
+// A storage that answers is retried as long as before, and a
+// ten-minute silence still recovers. Every other backend ignores the
+// option [M92]. Not the listings: there one 500 retried by restic, not
+// minio-go, is a line on stderr [M92], and a listing with anything
+// beside it is not believed (besides).
+var oneTry = []string{"-o", "s3.retries=1"}
+
 // Runner is the part of unit.Runner a run uses.
 type Runner interface {
 	Run(ctx context.Context, s unit.Spec) (unit.Outcome, error)
@@ -1402,9 +1421,9 @@ var snapshotRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // from this run's own summary, never "the latest" — or none.
 func (x *run) upload(ctx context.Context, app string, binds []unit.Bind, masked []string, tags []string) (id string, class record.Class, detail string, repositoryWide bool) {
 	out := filepath.Join(x.dir, app+".summary.json")
-	argv := []string{x.cfg.Restic, "backup", "--quiet", "--json", "--retry-lock", retryLock,
-		"--exclude-file", excludePath,
-		"--host", "hotserve", "--tag", "hotserve", "--tag", "app:" + app}
+	argv := append([]string{x.cfg.Restic, "backup", "--quiet", "--json", "--retry-lock", retryLock}, oneTry...)
+	argv = append(argv, "--exclude-file", excludePath,
+		"--host", "hotserve", "--tag", "hotserve", "--tag", "app:"+app)
 	for _, tag := range tags {
 		argv = append(argv, "--tag", tag)
 	}

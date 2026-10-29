@@ -88,9 +88,10 @@ func groupNumber(s string) (int, bool) {
 	return n, true
 }
 
-// checkArgv is the check of one group: no lock, restic's words as JSON.
+// checkArgv is the check of one group: no lock, restic's words as JSON,
+// one try at each request (oneTry). The group is last.
 func checkArgv(restic, group string) []string {
-	return []string{restic, "check", "--no-lock", "--json", "--read-data-subset=" + group}
+	return append(append([]string{restic, "check", "--no-lock", "--json"}, oneTry...), "--read-data-subset="+group)
 }
 
 // checkRepository checks the repository's structure and one group of

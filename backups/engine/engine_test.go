@@ -521,6 +521,51 @@ func TestWhatEachUnitIsGiven(t *testing.T) {
 	}
 }
 
+// The units with no clock — the upload, the fetch and the check — make
+// one try at each S3 request, so a storage that never answers ends
+// them within restic's own retries (#177, M93); every other restic unit
+// keeps minio-go's ten, which a listing needs to stay silent over one
+// 500 (M89).
+func TestOnlyTheUnclockedUnitsMakeOneTry(t *testing.T) {
+	b := restoreBox(t)
+	if _, err := Run(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Drill(context.Background(), b.cfg, b); err != nil {
+		t.Fatal(err)
+	}
+	o := inPlace()
+	o.Confirm = func(RestoreAsk) bool { return true }
+	if _, err := Restore(context.Background(), b.cfg, b, o); err != nil {
+		t.Fatal(err)
+	}
+	unclocked := map[string]bool{"upload": true, "fetch": true, "repocheck": true}
+	seen := map[string]bool{}
+	for _, s := range b.specs {
+		if len(s.Argv) == 0 || s.Argv[0] != b.cfg.Restic {
+			continue
+		}
+		role := roleRe.FindStringSubmatch(s.Name)[1]
+		argv := " " + strings.Join(s.Argv, " ") + " "
+		tries := strings.Count(argv, " -o s3.retries=1 ")
+		switch {
+		case unclocked[role] && tries != 1:
+			t.Errorf("%s has no clock and makes ten tries at a request: %q", role, s.Argv)
+		case !unclocked[role] && strings.Contains(argv, "s3.retries"):
+			t.Errorf("%s is clocked, or a listing, and was given %q", role, s.Argv)
+		}
+		seen[role] = true
+	}
+	for role := range unclocked {
+		if !seen[role] {
+			t.Errorf("no %s unit was started (started: %s)", role, b.roles())
+		}
+	}
+	if !seen["history"] && !seen["vouch"] {
+		t.Errorf("no other restic unit was looked at (started: %s)", b.roles())
+	}
+}
+
 // Nothing an operator or an app chose is in any command line: systemd
 // never expands it there, and it is not there to expand.
 func TestDeclaredStringsNeverReachArgv(t *testing.T) {
