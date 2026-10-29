@@ -238,8 +238,8 @@ from an `http.Server` listening on the socket.
 hotserve's health probe arrives as `GET <health_path>` with
 `Host: localhost`; an app that allowlists hosts (Django's
 `ALLOWED_HOSTS`, Rails' `config.hosts`) must accept it. To poke a
-running app yourself, run as the hotserve user — `run/` is
-`0750 hotserve:hotserve` — and send the same request, as root:
+running app yourself, send the same request from a root shell, as the
+hotserve user (`run/` is `0750 hotserve:hotserve`):
 `runuser -u hotserve -- curl --unix-socket "$SOCKET" http://localhost/health`
 (the path is `.socket` in the status JSON).
 
@@ -1130,8 +1130,7 @@ the deploy then fails before any traffic moves. Until then a retry,
 a rollback included, gets the 409. To end a migration that hangs
 sooner than its `deadline`, stop its unit yourself; it is named
 `hotserve-<app>.<version>.<nonce>.prestart.service`. For example, as root:
-`runuser -u hotserve -- env XDG_RUNTIME_DIR=/run/user/$(id -u hotserve)
-systemctl --user stop 'hotserve-blog.*.prestart.service'`. The deploy
+`runuser -u hotserve -- env XDG_RUNTIME_DIR=/run/user/$(id -u hotserve) systemctl --user stop 'hotserve-blog.*.prestart.service'`. The deploy
 then fails as a failed `pre_start`.
 
 A hotserve stop or restart (a crash, `systemctl restart hotserve`, an
@@ -1602,8 +1601,8 @@ its socket (see [Sandbox](#sandbox)).
   flight has finished (the reload waits for it); if you instead edit the file and
   *restart* hotserve with the whole block gone, nothing is left to
   judge the old units and they keep running — decommission them
-  explicitly, as root: `runuser -u hotserve -- env XDG_RUNTIME_DIR=/run/user/$(id -u
-  hotserve) systemctl --user stop 'hotserve-*'`. Units are created with `Restart=no` — the
+  explicitly, as root:
+  `runuser -u hotserve -- env XDG_RUNTIME_DIR=/run/user/$(id -u hotserve) systemctl --user stop 'hotserve-*'`. Units are created with `Restart=no` — the
   watchdog is the only restarter of apps — and stopping a version kills its
   whole cgroup, so worker trees never outlive it.
 - **Changed app definitions apply at the app's next launch** — a
