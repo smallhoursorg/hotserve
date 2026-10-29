@@ -210,7 +210,7 @@ Each line: the failure → what rules it out. **(c)** = by construction,
 8. Busy database failing instantly → explicit `.timeout`. (c)
 9. Root-owned `-wal/-shm` locking the app out → root never runs `sqlite3`; A is uid `hotserve`. (c)
 10. A damaged copy passing → `integrity_check` verdict needs *both* exit 0 *and* output exactly `ok` [H: two failure shapes]. (t: both shapes)
-11. FIFO / device / socket / symlink as a database → `O_NOFOLLOW\|O_NONBLOCK` open + `fstat` regular file + SQLite header, before `sqlite3` [M1]. An empty file is "not a database". (t)
+11. FIFO / device / socket / symlink as a database → `O_NOFOLLOW|O_NONBLOCK` open + `fstat` regular file + SQLite header, before `sqlite3` [M1]. An empty file is "not a database". (t)
 12. `VACUUM INTO` refusing an existing target, or a full disk → staging is emptied by C at the start of every run; "disk is full" is its own reported class, with the bytes needed.
 13. Plaintext copies left behind → C runs after B on every path, and first thing next run; `BindsTo=` covers a killed run [M8]. (t: SIGKILL mid-run, assert staging empty after the next run)
 
