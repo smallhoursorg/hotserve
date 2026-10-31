@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1307,6 +1308,14 @@ func TestUnitStatusRunning(t *testing.T) {
 		{unitStatus{LoadState: "loaded", ActiveState: "inactive"}, false},
 		{unitStatus{LoadState: "loaded", ActiveState: "failed"}, false},
 		{unitStatus{LoadState: "not-found", ActiveState: "inactive"}, false},
+		// The manager does not know the unit: no active state at all.
+		{unitStatus{LoadState: "not-found"}, false},
+		// A daemon-reload could not read the unit's file back, or the
+		// file is gone; the manager still runs its process (#380).
+		{unitStatus{LoadState: "error", ActiveState: "active"}, true},
+		{unitStatus{LoadState: "bad-setting", ActiveState: "active"}, true},
+		{unitStatus{LoadState: "not-found", ActiveState: "active"}, true},
+		{unitStatus{LoadState: "error", ActiveState: "inactive"}, false},
 	} {
 		if got := tc.st.running(); got != tc.want {
 			t.Errorf("%+v running=%v want %v", tc.st, got, tc.want)
@@ -1552,5 +1561,92 @@ func TestSystemdRunnerPreflight(t *testing.T) {
 	conn.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("Preflight created %d units; it must create none", n)
+	}
+	// An environment the manager could start but not read back after a
+	// daemon-reload (#380): refused, naming the largest variable and
+	// never its value; the same from unitFor, the last word at launch.
+	big := spec
+	big.env = append([]string{"SMALL=1", "BIG=" + strings.Repeat("x", unitLineBudget)}, spec.env...)
+	err := r.Preflight(big)
+	if err == nil || !strings.Contains(err.Error(), "the largest variable, BIG,") || strings.Contains(err.Error(), "xxxx") {
+		t.Fatalf("an oversized environment must be refused naming the variable, not its value: %v", err)
+	}
+	var pe *preflightError
+	if !errors.As(err, &pe) {
+		t.Fatalf("the refusal must be a pre-flight error (a 422 at deploy), got %T", err)
+	}
+	if _, err := r.unitFor(big, false); err == nil || !strings.Contains(err.Error(), "the largest variable, BIG,") {
+		t.Fatalf("unitFor must refuse it too: %v", err)
+	}
+	if _, err := r.Start(big); err == nil {
+		t.Fatal("Start must refuse it before a unit exists")
+	}
+	conn.mu.Lock()
+	n = len(conn.started)
+	conn.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("an oversized environment reached the manager (%d units)", n)
+	}
+}
+
+// TestSweepResetsAFailedUnitWhoseFileDidNotLoad: a unit a daemon-reload
+// could not read back (LoadState error) that has since ended failed is
+// a leftover like any other: reset, so it does not sit in the manager
+// as failed for good, and so the sweep says so (#380).
+func TestSweepResetsAFailedUnitWhoseFileDidNotLoad(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	name, err := unitName(startSpec{app: "demo", version: "v9", nonce: "0a1b2c3d0a1b2c3d"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.setStatus(name, unitStatus{LoadState: "error", ActiveState: "failed", Result: "timeout"})
+	if err := r.Sweep("demo", nil); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if resets := conn.resets(); len(resets) != 1 || resets[0] != name {
+		t.Fatalf("resets %v: a failed unit the manager could not read back must be reset like any other", resets)
+	}
+	if _, err := conn.UnitStatus(context.Background(), name); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUnitLineLength pins the estimate against what the manager was
+// measured to write: plain ASCII one byte, a control or non-ASCII byte
+// four (30,000 bytes of CJK read back as a 120,187-byte line), a quote,
+// a backslash or a % two; and the bound against the transient files
+// measured — a 720 KiB environment's unit read back after a reload, a
+// 1.2 MiB one did not.
+func TestUnitLineLength(t *testing.T) {
+	if n := unitLineLength("Environment", []string{"A=b"}); n != len("Environment=")+3+3 {
+		t.Fatalf("A=b: %d", n)
+	}
+	cjk := strings.Repeat("語", 10000) // 30,000 bytes
+	if n := unitLineLength("", []string{cjk}); n < 120000 || n > 120100 {
+		t.Fatalf("30,000 bytes of CJK: %d, want about 120,000", n)
+	}
+	if n := unitLineLength("", []string{"%\"\\'"}); n != 1+3+8 { // %, a double quote, a backslash, a single quote
+		t.Fatalf("escaped punctuation: %d", n)
+	}
+	env := func(total int) []string {
+		var l []string
+		for i := 0; i*100*1024 < total; i++ {
+			l = append(l, "BIG"+strconv.Itoa(i)+"="+strings.Repeat("x", 100*1024))
+		}
+		return l
+	}
+	// An entry with no = (nothing of hotserve's makes one) is named as
+	// such, never printed: the refusal must not carry a value.
+	if err := checkUnitLines(startSpec{app: "a", env: []string{strings.Repeat("v", unitLineBudget)}, command: []string{"./server"}}); err == nil || !strings.Contains(err.Error(), "an entry with no =") || strings.Contains(err.Error(), "vvvv") {
+		t.Fatalf("an =-less entry must be refused without its value: %v", err)
+	}
+	if err := checkUnitLines(startSpec{app: "a", env: env(480 * 1024), command: []string{"./server"}}); err != nil {
+		t.Fatalf("480 KiB of environment must pass: %v", err)
+	}
+	if err := checkUnitLines(startSpec{app: "a", env: env(720 * 1024), command: []string{"./server"}}); err == nil {
+		t.Fatal("720 KiB of environment is past the bound (the file still read back, at 822 KB; 1.2 MiB did not, and the bound keeps the escaping's slack)")
+	}
+	if err := checkUnitLines(startSpec{app: "a", env: nil, command: []string{"./server", strings.Repeat("y", unitLineBudget)}}); err == nil || !strings.Contains(err.Error(), "the command of app a") {
+		t.Fatalf("an oversized command must be refused: %v", err)
 	}
 }

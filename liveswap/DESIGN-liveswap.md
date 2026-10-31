@@ -395,7 +395,10 @@ file inside the sandbox view, and an ELF built for another 64-bit
 machine is refused naming the box's architecture and the `runs-on`
 to build on, and a 32-bit ELF naming the architecture to build for,
 since units allow the native system-call ABI only (`elf.go`, twenty
-bytes of header, no dependency). The
+bytes of header, no dependency); an environment or a command whose
+line in the unit's file would pass half of systemd's 1 MiB line limit
+is refused too, naming the largest variable, since a `daemon-reload`
+could not read such a unit back (`checkUnitLines`, #380). The
 deploy runs it for the command and the `pre_start` in phase
 `preparing` and reports a refusal as a 422; every relaunch
 (`launchVersion`: recovery and the watchdog) runs it for the command
@@ -441,7 +444,11 @@ stops it.
 The runner's invariants are written in its doc comment. The ones the
 state machine leans on: a handle is declared dead only on an
 *observed* terminal unit state (a D-Bus outage never becomes a phantom
-crash and a duplicate instance); `Reattach` reports an unreadable unit
+crash and a duplicate instance), and an active state is a running unit
+whatever became of its file — a `daemon-reload` that cannot read a
+unit's transient file back (`error`, `bad-setting`, or `not-found`
+once the file is gone) leaves its process running, so the watcher
+follows it, `Stop` ends it and a sweep stops it (#380); `Reattach` reports an unreadable unit
 as an error, and recovery retries rather than launching beside it;
 `Stop` returns nil only once the unit is observed gone; a start or
 pre_start whose D-Bus call failed is reconciled by unit name and, if
