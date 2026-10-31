@@ -418,8 +418,9 @@ follow redirects: a 3xx answer is simply "not 2xx".
 A relaunch runs the deploy's pre-flight first, and a release it
 refuses is not retried: one built for another machine (a backup
 restored onto a box of the other architecture), or whose command is
-no longer there or outside the sandbox view, would only die as
-`203/EXEC` on every attempt. The watchdog then drops the instance —
+no longer there or outside the sandbox view, would only die at exec
+on every attempt (`exit status 127`, the shell's `not found` in the
+journal). The watchdog then drops the instance —
 nothing current, the proxy answers 5xx — logs the refusal once, parks
 in `idle`, and status names it in `last_failure`; boot recovery
 refuses such a release the same way, in the same field. A deploy of
@@ -527,7 +528,8 @@ surfaces, and it has a fallback there: the health gate fails the new
 version while the old one keeps serving. A command that is not in the
 view is refused before the unit is even created — at the deploy's
 pre-flight, as a 422 — with a message that says where the runtime has
-to live, rather than failing as a bare `203/EXEC`. The same pre-flight
+to live, rather than failing at exec with the shell's `not found`
+(`exit status 127`) in the journal. The same pre-flight
 refuses an executable built for another machine (an x86-64 tarball
 pushed to an arm64 box) naming the `runs-on` to build on, and a 32-bit
 executable, which a unit cannot run: units allow the box's native
@@ -1624,7 +1626,12 @@ its socket (see [Sandbox](#sandbox)).
   explicitly, as root:
   `runuser -u hotserve -- env XDG_RUNTIME_DIR=/run/user/$(id -u hotserve) systemctl --user stop 'hotserve-*'`. Units are created with `Restart=no` — the
   watchdog is the only restarter of apps — and stopping a version kills its
-  whole cgroup, so worker trees never outlive it.
+  whole cgroup, so worker trees never outlive it. Each unit shows a
+  `sleep infinity` beside the app in `systemctl --user status`: hotserve
+  starts every app behind a shell that forks that sibling and becomes
+  the app, because systemd 257 waits an app's `grace` on a stop only
+  when its process is not alone in the cgroup (#380). It dies with the
+  app and costs one task and about a megabyte.
 - **Changed app definitions apply at the app's next launch** — a
   deploy, a rollback, or a relaunch after a crash, a sustained health failure, or a reboot — never by
   restarting a running app mid-reload. To give an app one now, roll

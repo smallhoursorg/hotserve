@@ -441,11 +441,42 @@ func TestUnitExecStartIsByteExact(t *testing.T) {
 	if !ok || len(cmds) != 1 {
 		t.Fatalf("ExecStartEx = %#v, want one command", ex[0])
 	}
-	if cmds[0].Path != want[0] || !slices.Equal(cmds[0].Args, want) {
-		t.Fatalf("ExecStartEx argv = %q %q, want %q %q byte for byte", cmds[0].Path, cmds[0].Args, want[0], want)
+	// Behind the sibling shell, whose "$@" hands the words on untouched
+	// (withSibling); the app's argv is the tail, byte for byte.
+	if cmds[0].Path != siblingShell || !slices.Equal(cmds[0].Args, withSibling(want)) || !slices.Equal(appArgv(cmds[0].Args), want) {
+		t.Fatalf("ExecStartEx argv = %q %q, want %q behind the sibling shell, byte for byte", cmds[0].Path, cmds[0].Args, want)
 	}
 	if !slices.Equal(cmds[0].Flags, []string{"no-env-expand"}) {
 		t.Fatalf("ExecStartEx flags = %q, want exactly no-env-expand (and no ignore-failure: a failed command fails the unit)", cmds[0].Flags)
+	}
+}
+
+// TestEveryUnitCarriesASibling: the manager execs a shell that forks
+// one sleeping sibling into the cgroup and then becomes the app, so
+// systemd 257 waits the grace on every stop of a one-process app
+// (#380); and the argv read back from the manager is the app's own,
+// the shell stripped, so status, state.json and a reattach see what
+// the operator wrote. An argv of another shape (a unit from before the
+// sibling) reads back as it is.
+func TestEveryUnitCarriesASibling(t *testing.T) {
+	argv := []string{"./server", "--flag"}
+	got := withSibling(argv)
+	if got[0] != "/bin/sh" || got[1] != "-c" || !strings.Contains(got[2], "sleep infinity &") || !strings.HasSuffix(got[2], `exec "$@"`) || got[3] != siblingArgv0 || !slices.Equal(got[4:], argv) {
+		t.Fatalf("withSibling = %q", got)
+	}
+	if !slices.Equal(appArgv(got), argv) {
+		t.Fatalf("appArgv(withSibling) = %q, want %q", appArgv(got), argv)
+	}
+	st := statusFromProps(map[string]any{"ExecStart": [][]any{{"/bin/sh", got, false}}})
+	if !slices.Equal(st.ExecStart, argv) {
+		t.Fatalf("ExecStart read back = %q, want the app's argv %q", st.ExecStart, argv)
+	}
+	bare := statusFromProps(map[string]any{"ExecStart": [][]any{{"./server", argv, false}}})
+	if !slices.Equal(bare.ExecStart, argv) {
+		t.Fatalf("an argv with no sibling must read back as it is, got %q", bare.ExecStart)
+	}
+	if !slices.Equal(appArgv([]string{"/bin/sh", "-c", "echo", "x"}), []string{"/bin/sh", "-c", "echo", "x"}) {
+		t.Fatal("a shell command of the operator's own is not the sibling's and must not be stripped")
 	}
 }
 

@@ -56,7 +56,8 @@ func propValues(u unitSpec, name string) []any {
 
 // Promise: a unit has one Exec*= command, its ExecStartEx — no
 // ExecStopPost= or other — so the manager spawns one process per unit
-// (the app's own children join its namespaces as ever): on a user
+// (the app's own children join its namespaces as ever, the sibling the
+// shell forks before it execs the app among them, #380): on a user
 // manager a second process the manager spawns cannot join the IPC
 // namespace the first made (#311). The instance's socket is hotserve's
 // to remove, with the run dir (socketRef.retire), so a unit names no

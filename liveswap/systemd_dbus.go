@@ -323,7 +323,7 @@ func unitProperties(u unitSpec) []sddbus.Property {
 		sddbus.PropDescription(u.Description),
 		sddbus.PropType(typ),
 		{Name: "ExecStartEx", Value: godbus.MakeVariant([]execCommandEx{
-			{Path: u.ExecStart[0], Args: u.ExecStart, Flags: []string{"no-env-expand"}},
+			{Path: siblingShell, Args: withSibling(u.ExecStart), Flags: []string{"no-env-expand"}},
 		})},
 		{Name: "WorkingDirectory", Value: godbus.MakeVariant(u.WorkingDirectory)},
 		{Name: "Environment", Value: godbus.MakeVariant(env)},
@@ -418,6 +418,48 @@ type execCommandEx struct {
 	Path  string
 	Args  []string
 	Flags []string
+}
+
+// Every unit's command runs behind a shell that forks one sibling
+// process into the cgroup and then execs the app in its own place —
+// the app is still PID 1 of its namespace, with its own pid, argv and
+// exit status — because on systemd 257 the manager does not always
+// wait the grace for a one-process app (#380). Under PrivatePIDs= the
+// manager forks an intermediate that sends it the app's pid and
+// exits; a manager that reads the app's parent before that exit
+// records the pid as not its child ("Supervising process … which is
+// not our child" in the journal), counts it as nothing to wait for,
+// and with nothing else in the cgroup follows its SIGTERM with SIGKILL
+// at once, on every stop path: a deploy's, an operator's `systemctl
+// --user stop`, the manager's own shutdown at a reboot. A second
+// process in the cgroup is something to wait for, so the manager
+// holds TimeoutStopSec= as configured (unit_kill_context, v257);
+// measured, every instance with a sibling kept its grace, 22 of 36
+// without lost it. systemd 258 fixes the fork (commit 698ac172aa);
+// Debian 13 ships 257. The sibling sleeps, dies with the namespace
+// when the app exits, and is one task and about a megabyte; `sleep`
+// and `sh` are in every unit's view (/usr). no-env-expand still holds:
+// the argv reaches the shell byte for byte and "$@" hands it on.
+const (
+	siblingShell  = "/bin/sh"
+	siblingScript = `/usr/bin/sleep infinity & exec "$@"`
+	siblingArgv0  = "hotserve-app"
+)
+
+// withSibling is the argv the manager execs for an app's argv.
+func withSibling(argv []string) []string {
+	return append([]string{siblingShell, "-c", siblingScript, siblingArgv0}, argv...)
+}
+
+// appArgv is the app's argv from the one the manager reports, the
+// sibling shell stripped: what status, state.json and a reattach see.
+// An argv not in that shape (a unit of an older hotserve) is returned
+// as it is.
+func appArgv(argv []string) []string {
+	if len(argv) >= 4 && argv[0] == siblingShell && argv[1] == "-c" && argv[2] == siblingScript && argv[3] == siblingArgv0 {
+		return argv[4:]
+	}
+	return argv
 }
 
 // D-Bus shapes of the sandbox properties, as systemd's own
@@ -819,7 +861,7 @@ func propExecStart(props map[string]any) []string {
 	if !ok {
 		return nil
 	}
-	return append([]string(nil), argv...)
+	return append([]string(nil), appArgv(argv)...)
 }
 
 func propInt(props map[string]any, key string) int {

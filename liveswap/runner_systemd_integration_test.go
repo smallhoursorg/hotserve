@@ -1086,11 +1086,13 @@ func run(t *testing.T, name string, args ...string) string {
 // connection) never reaches them. A future round tempted to reinstate
 // it should fail here first.
 //
-// A missing interpreter rather than broken namespaces: 203/EXEC and
-// 226/NAMESPACE both come from the same forked child after the same
-// "done", and this one needs no host surgery to provoke. unitFor's own
-// in-view check passes — the script is executable and inside the
-// sandbox view — so the failure genuinely happens in the child.
+// A missing interpreter rather than broken namespaces: a failed exec
+// (the sibling shell's, exit status 127 with "not found" in the
+// journal) and 226/NAMESPACE both come from the same forked child
+// after the same "done", and this one needs no host surgery to
+// provoke. unitFor's own in-view check passes — the script is
+// executable and inside the sandbox view — so the failure genuinely
+// happens in the child.
 func TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds(t *testing.T) {
 	r := integrationRunner(t)
 	root, release, shared := sandboxRoot(t)
@@ -1126,8 +1128,8 @@ func TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds(t *testing
 	if exit == nil {
 		t.Fatal("no exit recorded for a unit observed dead")
 	}
-	if exit.ExecMainStatus != 203 {
-		t.Fatalf("ExecMainStatus = %d (%s), want 203/EXEC — the child died in exec, after the start job said done",
+	if exit.ExecMainStatus != 127 {
+		t.Fatalf("ExecMainStatus = %d (%s), want 127 — the sibling shell's exec of the script failed (its interpreter not found), after the start job said done",
 			exit.ExecMainStatus, exit.exitString())
 	}
 }
@@ -1276,4 +1278,127 @@ func TestIntegrationSystemdCapsHoldAndChangeLive(t *testing.T) {
 	if got := h.state().Caps; got.any() {
 		t.Errorf("handle reports %+v after lifting, want none", got)
 	}
+}
+
+// oneProcessApp is the shape #380 found: an app that is one process —
+// no worker, no shell child — which traps TERM, takes a few hundred
+// milliseconds of shell builtins to "drain", writes a marker and exits.
+// It stays one process by blocking on a FIFO open, not on a sleep.
+func oneProcessApp(t *testing.T, version string, grace time.Duration) (spec startSpec, shared string) {
+	t.Helper()
+	root, release, shared := sandboxRoot(t)
+	if err := unix.Mkfifo(filepath.Join(shared, "fifo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := "trap 'i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done; : > \"$SHARED/drained.txt\"; exit 0' TERM\n" +
+		": > \"$SHARED/ready.txt\"\n" +
+		"while :; do read x < \"$SHARED/fifo\"; done\n"
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return startSpec{
+		app: "itest", version: version, nonce: "0a1b2c3d0a1b2c3d", command: []string{"./server"}, dir: release,
+		env: []string{"PATH=" + os.Getenv("PATH"), "SHARED=" + shared}, grace: grace,
+		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
+	}, shared
+}
+
+// waitForFile polls for path, up to within.
+func waitForFile(t *testing.T, path string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not appear within %s", path, within)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// lostMainPIDRace reports whether the manager marked the unit's main
+// pid as not its child — the race #380 describes, logged by the manager
+// at the unit's start. A journal that cannot be read fails the test: a
+// count of zero must mean no lost race, not no journal.
+func lostMainPIDRace(t *testing.T, unit string) bool {
+	t.Helper()
+	out, err := exec.Command("journalctl", "-q", "-o", "cat", "--no-pager", "USER_UNIT="+unit).CombinedOutput()
+	if err != nil {
+		t.Fatalf("journalctl for %s: %v\n%s", unit, err, out)
+	}
+	return strings.Contains(string(out), "not our child")
+}
+
+// TestIntegrationSystemdOneProcessAppKeepsItsGrace: a one-process app
+// gets its grace on every stop path. On systemd 257 the manager marks
+// such a unit's main pid alien on half or more of its starts (the pid
+// namespace's intermediate exits after sending the pid, and the manager
+// may read the parent first), and then follows SIGTERM with SIGKILL at
+// once when nothing else is in the cgroup; the sibling every unit
+// carries (withSibling) is that something else (#380). Half the stops
+// are hotserve's (Stop), half the manager's alone (`systemctl --user
+// stop`: an operator's, or the shape of a reboot), which no code of
+// hotserve's could reach. Before the sibling, 22 of 36 such stops lost
+// their handler, every one of them a lost race; the run logs how many
+// starts lost it, so the lane shows the race was exercised.
+func TestIntegrationSystemdOneProcessAppKeepsItsGrace(t *testing.T) {
+	r := integrationRunner(t)
+	const n = 12
+	lost := 0
+	for i := 0; i < n; i++ {
+		spec, shared := oneProcessApp(t, "oneproc"+strconv.Itoa(i), 10*time.Second)
+		h, err := r.Start(spec)
+		if err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		waitForFile(t, filepath.Join(shared, "ready.txt"), 5*time.Second)
+		unit := h.state().Unit
+		started := time.Now()
+		how := "Stop"
+		if i%2 == 1 {
+			how = "systemctl --user stop"
+			run(t, "systemctl", "--user", "stop", unit)
+			waitDone(t, r, h)
+		} else if err := r.Stop(h, spec.grace); err != nil {
+			t.Fatalf("stop %d: %v", i, err)
+		}
+		took := time.Since(started)
+		raced := lostMainPIDRace(t, unit)
+		if raced {
+			lost++
+		}
+		if _, err := os.Stat(filepath.Join(shared, "drained.txt")); err != nil {
+			t.Fatalf("instance %d, %s (main pid marked alien: %v): its SIGTERM handler did not finish — SIGKILL came with no grace (stop took %s)", i, how, raced, took)
+		}
+		if took >= spec.grace {
+			t.Fatalf("instance %d, %s: took %s, the whole grace", i, how, took)
+		}
+	}
+	t.Logf("%d of %d starts had the manager mark the main pid alien (\"not our child\"); every handler finished", lost, n)
+}
+
+// TestIntegrationSystemdPreStartKeepsItsGraceAtDeadline: a pre_start
+// that runs past the unit's own TimeoutStartSec= is stopped by the
+// manager with its grace, the sibling in its cgroup too. Before it, a
+// one-process migration at its deadline was SIGKILLed at once.
+func TestIntegrationSystemdPreStartKeepsItsGraceAtDeadline(t *testing.T) {
+	r := integrationRunner(t)
+	spec, shared := oneProcessApp(t, "predeadline", 5*time.Second)
+	spec.startTimeout = 700 * time.Millisecond
+	started := time.Now()
+	err := r.RunOnce(context.Background(), spec)
+	took := time.Since(started)
+	if err == nil {
+		t.Fatal("a pre_start past its deadline must fail")
+	}
+	if _, serr := os.Stat(filepath.Join(shared, "drained.txt")); serr != nil {
+		t.Fatalf("the pre_start's SIGTERM handler did not finish: SIGKILL came with no grace (took %s, %v): %v", took, err, serr)
+	}
+	if took >= spec.startTimeout+spec.grace {
+		t.Fatalf("took %s: the whole grace", took)
+	}
+	t.Logf("pre_start ended at its deadline with its grace: handler ran, took %s (%v)", took, err)
 }

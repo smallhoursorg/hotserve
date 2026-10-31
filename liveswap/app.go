@@ -943,7 +943,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// the command and the pre_start resolve to files inside the
 	// sandbox view, built for this machine. A tarball from the wrong
 	// runner is refused here as the deployer's error (422) with the
-	// fix named, rather than surfacing as a 203/EXEC a phase later.
+	// fix named, rather than surfacing as a failed exec a phase later.
 	ma.setPhase(c, "preparing")
 	if err := preflightResult("pre-flight", c.runner.Preflight(l.startSpec(spec, spec.command))); err != nil {
 		return err
@@ -1427,7 +1427,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	// that cannot run on this box — built for another machine, its
 	// command gone from the view — is refused here as a preflightError,
 	// which every caller treats as permanent, rather than started to die
-	// 203/EXEC and be restarted for ever. After the sweep, so a refusal
+	// at exec and be restarted for ever. After the sweep, so a refusal
 	// still leaves the ledger settled.
 	ss := l.startSpec(spec, spec.command)
 	if err := c.runner.Preflight(ss); err != nil {
