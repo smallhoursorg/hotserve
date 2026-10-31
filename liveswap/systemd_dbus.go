@@ -449,16 +449,20 @@ type execCommandEx struct {
 // PWD` first: dash exports PWD, and invariant 8 of the runner says a
 // unit's environment is exactly the one the caller built. Both tools
 // are Essential on Debian and under /usr, which every view binds;
-// Preflight still checks them (siblingToolsPresent), because a shell
-// whose sleep fails execs the app alone, the race open and nothing
-// red. no-env-expand still holds: the argv reaches the shell byte for
+// Preflight still checks them (siblingToolsPresent), and the script
+// runs `sleep 0` once before the fork and exits 127 if it cannot —
+// a shell whose `sleep … &` failed would otherwise exec the app
+// alone, the race open and the unit green, with one line in the
+// journal. (A sleep that starts and then exits on `infinity` is not
+// caught: a sleep in /usr/bin that is not coreutils' is not Debian.)
+// no-env-expand still holds: the argv reaches the shell byte for
 // byte and "$@" hands it on. The script is a wire format: appArgv
 // recognises units of this hotserve by it, so a change here makes
 // every running unit read back as the shell's argv until relaunched.
 const (
 	siblingShell  = "/bin/sh"
 	siblingSleep  = "/usr/bin/sleep"
-	siblingScript = `unset PWD; ` + siblingSleep + ` infinity & exec "$@"`
+	siblingScript = `unset PWD; ` + siblingSleep + ` 0 || exit 127; ` + siblingSleep + ` infinity & exec "$@"`
 	siblingArgv0  = "hotserve-app"
 )
 

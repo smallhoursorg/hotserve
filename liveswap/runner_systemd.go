@@ -580,10 +580,10 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 // siblingToolsPresent: the shell and the sleep every unit's command
 // runs behind (withSibling) exist and execute on this host. Both are
 // Essential on Debian and under /usr, in every view, so this is a
-// host that is not the supported one; it is checked because the
-// failure is silent otherwise: a shell whose `sleep … &` fails prints
-// one line to the app's journal and execs the app alone, with the
-// one-process race of #380 open and the unit green.
+// host that is not the supported one. The script itself exits 127 if
+// its `sleep 0` cannot run (red, the watchdog's crash); this check
+// says so before a unit exists, in the language the operator can act
+// on.
 func siblingToolsPresent(shell, sleep string) error {
 	for _, p := range []string{shell, sleep} {
 		fi, err := os.Stat(p)

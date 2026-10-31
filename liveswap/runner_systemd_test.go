@@ -466,7 +466,7 @@ func TestEveryUnitCarriesASibling(t *testing.T) {
 	// previous binary started read back as the shell's argv in status
 	// and state.json after an upgrade, with this test still green if
 	// it only looked for the parts.
-	if got[0] != "/bin/sh" || got[1] != "-c" || got[2] != `unset PWD; /usr/bin/sleep infinity & exec "$@"` || got[3] != "hotserve-app" || !slices.Equal(got[4:], argv) {
+	if got[0] != "/bin/sh" || got[1] != "-c" || got[2] != `unset PWD; /usr/bin/sleep 0 || exit 127; /usr/bin/sleep infinity & exec "$@"` || got[3] != "hotserve-app" || !slices.Equal(got[4:], argv) {
 		t.Fatalf("withSibling = %q", got)
 	}
 	if !slices.Equal(appArgv(got), argv) {
@@ -485,10 +485,10 @@ func TestEveryUnitCarriesASibling(t *testing.T) {
 	}
 }
 
-// TestPreflightRefusesAHostWithoutTheSiblingTools: a shell whose
-// `sleep … &` fails prints one line to the app's journal and execs the
-// app alone, the one-process race open and the unit green, so the two
-// tools are checked before a unit exists, and the refusal names them.
+// TestPreflightRefusesAHostWithoutTheSiblingTools: the script exits
+// 127 when its sleep cannot run, but that is after the unit exists, as
+// a crash; the two tools are checked before, and the refusal names
+// them.
 func TestPreflightRefusesAHostWithoutTheSiblingTools(t *testing.T) {
 	if err := siblingToolsPresent(siblingShell, siblingSleep); err != nil {
 		t.Fatalf("this host has both tools, yet: %v", err)

@@ -2128,8 +2128,11 @@ func ParseEnvLines(name string, data []byte) ([]string, error) {
 }
 
 // ValidEnvKey reports whether key is a name an env file may carry: what
-// systemd accepts in Environment= (envKeyRe).
-func ValidEnvKey(key string) bool { return validEnvKey(key) }
+// systemd accepts in Environment= (envKeyRe), less the four names the
+// sibling shell resets at its start (shellOwnedEnvKeys), which
+// RenderEnvFile refuses — so the box's name checks refuse a secret
+// called PWD where it is named, not at the render.
+func ValidEnvKey(key string) bool { return validEnvKey(key) && !shellOwnedEnvKey(key) }
 
 // RenderEnvFile is the inverse of the reading above, for the files the box
 // writes from a repository's secrets (box/DESIGN-box.md, "Values and the

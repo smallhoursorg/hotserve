@@ -453,8 +453,9 @@ of a one-process app lost that race, and each of those lost its SIGTERM
 handler; with a `sleep` child in the cgroup 11 of 12 lost the race and
 none lost the handler (#380). systemd 258 fixes the fork (commit
 `698ac172aa`, `FORK_DETACH`); Debian 13 ships 257. So every unit's
-command runs behind `/bin/sh -c 'unset PWD; /usr/bin/sleep infinity &
-exec "$@"'` (`withSibling`, systemd_dbus.go): the shell forks one
+command runs behind `/bin/sh -c 'unset PWD; /usr/bin/sleep 0 || exit
+127; /usr/bin/sleep infinity & exec "$@"'` (`withSibling`,
+systemd_dbus.go): the shell forks one
 sleeping sibling into the cgroup and becomes the app, which is still
 PID 1 of its namespace with its own pid, argv and exit status, and the
 manager has something to wait for, so it holds `TimeoutStopSec=` as
@@ -471,8 +472,10 @@ as `env` and `env_file` keys (`shellOwnedEnvKey`), named; measured,
 every other inherited variable passes byte for byte and nothing is
 added. Both tools are Essential on Debian and under /usr,
 which every view binds; Preflight checks them all the same
-(`siblingToolsPresent`), because a shell whose `sleep` fails execs the
-app alone, the race open and nothing red. The argv the manager reports
+(`siblingToolsPresent`), and the script runs `sleep 0` once before the
+fork and exits 127 if it cannot, because a shell whose `sleep … &`
+failed would otherwise exec the app alone, the race open and the unit
+green. The argv the manager reports
 is read back with the shell stripped (`appArgv`), so status,
 `state.json` and a reattach see the operator's command. A stop
 hotserve drives is still the plain stop job, and `Stop` returns nil

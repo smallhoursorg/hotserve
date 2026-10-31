@@ -2391,6 +2391,22 @@ func TestParseEnvFileRejectsInvalidKeys(t *testing.T) {
 	}
 }
 
+// The exported predicate the box names its secrets by refuses the four
+// shell-owned names too, so a secret called PWD is refused where it is
+// named rather than at RenderEnvFile.
+func TestValidEnvKeyRefusesShellOwnedNames(t *testing.T) {
+	for _, k := range []string{"IFS", "OPTIND", "PPID", "PWD"} {
+		if ValidEnvKey(k) {
+			t.Errorf("ValidEnvKey(%q) = true; the sibling shell resets it", k)
+		}
+	}
+	for _, k := range []string{"PWD_X", "IFS2", "HOME", "DATABASE_URL"} {
+		if !ValidEnvKey(k) {
+			t.Errorf("ValidEnvKey(%q) = false", k)
+		}
+	}
+}
+
 // The four names the sibling shell resets at its start (IFS, OPTIND,
 // PPID, PWD) are refused with the line, like an invalid key: a value
 // for one would not reach the app.

@@ -117,6 +117,9 @@ func FuzzRenderEnvFile(f *testing.F) {
 	} {
 		f.Add(c[0], c[1], c[2], c[3])
 	}
+	for _, k := range []string{"IFS", "OPTIND", "PPID", "PWD"} {
+		f.Add(k, "x", "GOOD", "1") // refused: the sibling shell resets these
+	}
 	f.Fuzz(func(t *testing.T, k1, v1, k2, v2 string) {
 		if strings.Contains(k1, "=") || strings.Contains(k2, "=") {
 			return // the pair's key is what precedes its first "="
@@ -125,7 +128,7 @@ func FuzzRenderEnvFile(f *testing.F) {
 		out, err := RenderEnvFile(vars)
 		if err != nil {
 			carriable := func(k, v string) bool {
-				return validEnvKey(k) && !strings.ContainsAny(v, "\n\r\x00") && utf8.ValidString(v)
+				return validEnvKey(k) && !shellOwnedEnvKey(k) && !strings.ContainsAny(v, "\n\r\x00") && utf8.ValidString(v)
 			}
 			if carriable(k1, v1) && carriable(k2, v2) && k1 != k2 {
 				t.Fatalf("RenderEnvFile(%q) refused pairs the format carries: %v", vars, err)
