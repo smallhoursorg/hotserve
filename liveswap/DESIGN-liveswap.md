@@ -465,7 +465,11 @@ at the stop's SIGTERM with the rest of the cgroup, so the app gets one
 SIGCHLD then, as a prefork master does from a worker. It costs one task
 (`tasks_max`'s floor is 2 for it) and about a megabyte, and shows in
 `systemctl --user status` beside the app. `unset PWD` keeps invariant 8
-(dash exports it). Both tools are Essential on Debian and under /usr,
+(dash exports it), and the four names dash resets at its start
+whatever it inherited — `IFS`, `OPTIND`, `PPID`, `PWD` — are refused
+as `env` and `env_file` keys (`shellOwnedEnvKey`), named; measured,
+every other inherited variable passes byte for byte and nothing is
+added. Both tools are Essential on Debian and under /usr,
 which every view binds; Preflight checks them all the same
 (`siblingToolsPresent`), because a shell whose `sleep` fails execs the
 app alone, the race open and nothing red. The argv the manager reports

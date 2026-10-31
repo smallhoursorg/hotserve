@@ -180,6 +180,9 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if !validEnvKey(key) {
 				return d.Errf("env key %q is not a valid environment variable name (must match %s)", key, envKeyRe)
 			}
+			if shellOwnedEnvKey(key) {
+				return d.Errf("env key %q %s", key, shellOwnedEnvKeyMsg)
+			}
 			if cfg.Env == nil {
 				cfg.Env = make(map[string]string)
 			}

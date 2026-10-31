@@ -176,7 +176,10 @@ are unset after everything else, because they name the user manager's
 own runtime directory and bus — the sockets a sandboxed app must not
 hold. Setting either has no effect rather than an error. Keys must be valid
 variable names (`[A-Za-z_][A-Za-z0-9_]*`) — systemd rejects anything
-else, so config load does too. Anything more an app needs must be
+else, so config load does too. Four names are the shell's: `IFS`,
+`OPTIND`, `PPID` and `PWD` are reset by the `/bin/sh` every unit runs
+behind (below, "worker trees never outlive it"), so `env` and
+`env_file` refuse them rather than pass a value that would not arrive. Anything more an app needs must be
 passed explicitly via `env` or `env_file`. Apps get the user manager's
 resource limits; each unit sets its open-files limit (soft and hard)
 to the manager's ceiling, which the package raises to match

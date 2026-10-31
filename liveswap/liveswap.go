@@ -545,6 +545,9 @@ func (a *App) Validate() error {
 			if !validEnvKey(k) {
 				return fmt.Errorf("app %s: env key %q is not a valid environment variable name (must match %s)", name, k, envKeyRe)
 			}
+			if shellOwnedEnvKey(k) {
+				return fmt.Errorf("app %s: env key %q %s", name, k, shellOwnedEnvKeyMsg)
+			}
 		}
 		if len(cfg.Command) == 0 {
 			return fmt.Errorf("app %s: command is required", name)
@@ -633,6 +636,12 @@ func (a *App) Validate() error {
 		// parser's (minMemoryMax, maxCPUQuota).
 		if cfg.TasksMax < 0 || cfg.CPUQuota < 0 {
 			return fmt.Errorf("app %s: tasks_max and cpu_quota must not be negative, got %d and %d", name, cfg.TasksMax, cfg.CPUQuota)
+		}
+		if cfg.TasksMax == 1 {
+			// The sleeping sibling every unit carries (#380) is one of
+			// the tasks: a cap of 1 refuses its fork and the shell dies
+			// before the app runs.
+			return fmt.Errorf("app %s: tasks_max must be at least 2, got 1; leave it out for the default", name)
 		}
 		if cfg.MemoryMax > 0 && cfg.MemoryMax < minMemoryMax {
 			return fmt.Errorf("app %s: memory_max must be at least %s, got %d bytes", name, humanize.Bytes(minMemoryMax), cfg.MemoryMax)

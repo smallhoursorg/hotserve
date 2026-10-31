@@ -1379,6 +1379,7 @@ func TestRenderEnvFileRefusesWhatTheFormatCannotCarry(t *testing.T) {
 		{[]string{"my-var=v"}, "not a valid environment variable name"},
 		{[]string{"=v"}, "not a valid environment variable name"},
 		{[]string{"novalue"}, "not a valid environment variable name"},
+		{[]string{"OPTIND=2"}, "set by the shell"},
 		{[]string{"K=a", "L=b", "K=c"}, "K is given twice"},
 	} {
 		_, err := RenderEnvFile(c.vars)
@@ -2387,6 +2388,18 @@ func TestParseEnvFileRejectsInvalidKeys(t *testing.T) {
 	_, err := parseEnvFile(envFile)
 	if err == nil || !strings.Contains(err.Error(), `"my-var"`) || !strings.Contains(err.Error(), ":2:") {
 		t.Fatalf("an invalid key must be named with its line, got %v", err)
+	}
+}
+
+// The four names the sibling shell resets at its start (IFS, OPTIND,
+// PPID, PWD) are refused with the line, like an invalid key: a value
+// for one would not reach the app.
+func TestParseEnvFileRejectsShellOwnedKeys(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "app.env")
+	must(t, os.WriteFile(envFile, []byte("GOOD=1\nPPID=2\n"), 0o600))
+	_, err := parseEnvFile(envFile)
+	if err == nil || !strings.Contains(err.Error(), `"PPID" is set by the shell`) || !strings.Contains(err.Error(), ":2:") {
+		t.Fatalf("a shell-owned key must be named with its line, got %v", err)
 	}
 }
 
