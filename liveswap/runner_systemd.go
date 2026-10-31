@@ -513,7 +513,8 @@ func unitNonce(name string) (string, bool) {
 // working directory, so "./server" must become "<release>/server".
 // exec.LookPath also checks the file is executable, which turns a
 // missing or non-executable binary into a clear Start error instead of
-// a unit that fails a moment later with status 203.
+// a unit that fails a moment later at the sibling shell's exec (exit
+// status 127, "not found" in the journal).
 func resolveCommand(cmd, dir string) (string, error) {
 	if strings.Contains(cmd, "/") && !filepath.IsAbs(cmd) {
 		cmd = filepath.Join(dir, cmd)
@@ -550,14 +551,15 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 	// which under a deny-by-default sandbox is not the unit's: a
 	// runtime installed outside /usr — /opt/node/bin/node, an asdf
 	// or nvm shim under a home directory — resolves here and then
-	// does not exist in there. systemd would report that as a bare
-	// status=203/EXEC after the unit has already been created, so
-	// say it now, in the language the operator can act on.
+	// does not exist in there. The sibling shell would report that as
+	// `exec: …: not found`, exit status 127, after the unit has
+	// already been created, so say it now, in the language the
+	// operator can act on.
 	// Resolved, because LookPath does not follow symlinks: a shim at
 	// /usr/local/bin/node -> /opt/node/bin/node is under the /usr
-	// base entry and would pass unresolved, then die as the very
-	// 203/EXEC this check exists to replace — the symlink is inside
-	// the view, its target is not.
+	// base entry and would pass unresolved, then die at the very
+	// exec this check exists to replace — the symlink is inside the
+	// view, its target is not.
 	target = argv0
 	if t, err := filepath.EvalSymlinks(argv0); err == nil {
 		target = t
@@ -569,7 +571,27 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 		}
 		return "", "", &preflightError{fmt.Sprintf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir and the OS runtime (/usr and a named handful of /etc), and nothing else on this host — ship the runtime inside the release, or install it under /usr", target, spec.app, via)}
 	}
+	if err := siblingToolsPresent(siblingShell, siblingSleep); err != nil {
+		return "", "", err
+	}
 	return argv0, target, nil
+}
+
+// siblingToolsPresent: the shell and the sleep every unit's command
+// runs behind (withSibling) exist and execute on this host. Both are
+// Essential on Debian and under /usr, in every view, so this is a
+// host that is not the supported one. The script itself exits 127 if
+// its `sleep 0` cannot run (red, the watchdog's crash); this check
+// says so before a unit exists, in the language the operator can act
+// on.
+func siblingToolsPresent(shell, sleep string) error {
+	for _, p := range []string{shell, sleep} {
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Mode().Perm()&0o111 == 0 {
+			return &preflightError{fmt.Sprintf("%s is missing or not executable on this host: every app unit runs its command behind `%s -c '%s'`, so the manager waits the app's grace on systemd 257 (#380); the supported host is Debian 13, where both are Essential", p, shell, siblingScript)}
+		}
+	}
+	return nil
 }
 
 // Preflight is a launch's early word, a deploy's and a relaunch's: the

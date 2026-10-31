@@ -943,7 +943,7 @@ func (ma *managedApp) deployLocked(ctx context.Context, req deployRequest, c col
 	// the command and the pre_start resolve to files inside the
 	// sandbox view, built for this machine. A tarball from the wrong
 	// runner is refused here as the deployer's error (422) with the
-	// fix named, rather than surfacing as a 203/EXEC a phase later.
+	// fix named, rather than surfacing as a failed exec a phase later.
 	ma.setPhase(c, "preparing")
 	if err := preflightResult("pre-flight", c.runner.Preflight(l.startSpec(spec, spec.command))); err != nil {
 		return err
@@ -1427,7 +1427,7 @@ func (ma *managedApp) launchVersion(c collaborators, version string) (*instance,
 	// that cannot run on this box — built for another machine, its
 	// command gone from the view — is refused here as a preflightError,
 	// which every caller treats as permanent, rather than started to die
-	// 203/EXEC and be restarted for ever. After the sweep, so a refusal
+	// at exec and be restarted for ever. After the sweep, so a refusal
 	// still leaves the ledger settled.
 	ss := l.startSpec(spec, spec.command)
 	if err := c.runner.Preflight(ss); err != nil {
@@ -1969,6 +1969,20 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func validEnvKey(key string) bool { return envKeyRe.MatchString(key) }
 
+// shellOwnedEnvKeys are the variables the sibling shell every unit
+// runs behind (withSibling, systemd_dbus.go) sets for itself at its
+// start whatever it inherited — measured on Debian 13's dash: IFS to
+// space-tab-newline, OPTIND to 1, PPID to its own parent, and PWD to
+// the working directory, which the script then unsets. Everything
+// else passes byte for byte and nothing is added. A value given for
+// one of these would not reach the app as built (invariant 8 of the
+// runner), so every place a key enters refuses it by name instead.
+var shellOwnedEnvKeys = map[string]bool{"IFS": true, "OPTIND": true, "PPID": true, "PWD": true}
+
+func shellOwnedEnvKey(key string) bool { return shellOwnedEnvKeys[key] }
+
+const shellOwnedEnvKeyMsg = "is set by the shell every app unit runs behind (/bin/sh resets IFS, OPTIND, PPID and PWD at its start), so an app cannot be given it"
+
 // The env_file mode check. hotserve reads the file as the hotserve
 // user, so its mode is not hotserve's concern; the documented
 // `install -m 0640 -o root -g hotserve` is for everyone else on the
@@ -2089,6 +2103,9 @@ func parseEnvLines(path string, data []byte) ([]string, error) {
 		if !validEnvKey(key) {
 			return nil, fmt.Errorf("%s:%d: %q is not a valid environment variable name (systemd requires %s)", path, i+1, key, envKeyRe)
 		}
+		if shellOwnedEnvKey(key) {
+			return nil, fmt.Errorf("%s:%d: %q %s", path, i+1, key, shellOwnedEnvKeyMsg)
+		}
 		value = strings.TrimSpace(value)
 		if len(value) >= 2 {
 			if (value[0] == '"' && value[len(value)-1] == '"') ||
@@ -2111,8 +2128,11 @@ func ParseEnvLines(name string, data []byte) ([]string, error) {
 }
 
 // ValidEnvKey reports whether key is a name an env file may carry: what
-// systemd accepts in Environment= (envKeyRe).
-func ValidEnvKey(key string) bool { return validEnvKey(key) }
+// systemd accepts in Environment= (envKeyRe), less the four names the
+// sibling shell resets at its start (shellOwnedEnvKeys), which
+// RenderEnvFile refuses — so the box's name checks refuse a secret
+// called PWD where it is named, not at the render.
+func ValidEnvKey(key string) bool { return validEnvKey(key) && !shellOwnedEnvKey(key) }
 
 // RenderEnvFile is the inverse of the reading above, for the files the box
 // writes from a repository's secrets (box/DESIGN-box.md, "Values and the
@@ -2132,6 +2152,9 @@ func RenderEnvFile(vars []string) ([]byte, error) {
 		key, value, found := strings.Cut(kv, "=")
 		if !found || !validEnvKey(key) {
 			return nil, fmt.Errorf("%q is not a valid environment variable name (systemd requires %s)", key, envKeyRe)
+		}
+		if shellOwnedEnvKey(key) {
+			return nil, fmt.Errorf("%q %s", key, shellOwnedEnvKeyMsg)
 		}
 		pairs = append(pairs, pair{key, value})
 	}

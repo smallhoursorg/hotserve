@@ -129,7 +129,7 @@ func TestEveryRelaunchPreflightsWhatItStarts(t *testing.T) {
 
 // A restart recovery the pre-flight refuses — a release restored onto
 // a box of another architecture — is refused once, as permanent: no
-// unit is started to die 203/EXEC and be restarted for ever. The
+// unit is started to die at its exec and be restarted for ever. The
 // ledger is settled first (the sweep runs), the launch's socket dir
 // goes, and status says why the app is not running.
 func TestRecoveryGivesUpOnARelaunchItsPreflightRefuses(t *testing.T) {

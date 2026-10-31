@@ -180,6 +180,9 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if !validEnvKey(key) {
 				return d.Errf("env key %q is not a valid environment variable name (must match %s)", key, envKeyRe)
 			}
+			if shellOwnedEnvKey(key) {
+				return d.Errf("env key %q %s", key, shellOwnedEnvKeyMsg)
+			}
 			if cfg.Env == nil {
 				cfg.Env = make(map[string]string)
 			}
@@ -300,7 +303,10 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			}
 			cfg.MemoryMax = size
 		case "tasks_max":
-			if err := parseCountArg(d, &cfg.TasksMax, 1); err != nil {
+			// 2, not 1: the sibling every unit carries (withSibling) is
+			// one task, so a cap of 1 refuses the fork of the sibling
+			// and the shell dies before the app runs.
+			if err := parseCountArg(d, &cfg.TasksMax, 2); err != nil {
 				return err
 			}
 		case "cpu_quota":

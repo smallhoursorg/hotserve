@@ -441,11 +441,70 @@ func TestUnitExecStartIsByteExact(t *testing.T) {
 	if !ok || len(cmds) != 1 {
 		t.Fatalf("ExecStartEx = %#v, want one command", ex[0])
 	}
-	if cmds[0].Path != want[0] || !slices.Equal(cmds[0].Args, want) {
-		t.Fatalf("ExecStartEx argv = %q %q, want %q %q byte for byte", cmds[0].Path, cmds[0].Args, want[0], want)
+	// Behind the sibling shell, whose "$@" hands the words on untouched
+	// (withSibling); the app's argv is the tail, byte for byte.
+	if cmds[0].Path != siblingShell || !slices.Equal(cmds[0].Args, withSibling(want)) || !slices.Equal(appArgv(cmds[0].Args), want) {
+		t.Fatalf("ExecStartEx argv = %q %q, want %q behind the sibling shell, byte for byte", cmds[0].Path, cmds[0].Args, want)
 	}
 	if !slices.Equal(cmds[0].Flags, []string{"no-env-expand"}) {
 		t.Fatalf("ExecStartEx flags = %q, want exactly no-env-expand (and no ignore-failure: a failed command fails the unit)", cmds[0].Flags)
+	}
+}
+
+// TestEveryUnitCarriesASibling: the manager execs a shell that forks
+// one sleeping sibling into the cgroup and then becomes the app, so
+// systemd 257 waits the grace on every stop of a one-process app
+// (#380); and the argv read back from the manager is the app's own,
+// the shell stripped, so status, state.json and a reattach see what
+// the operator wrote. An argv of another shape (a unit from before the
+// sibling) reads back as it is.
+func TestEveryUnitCarriesASibling(t *testing.T) {
+	argv := []string{"./server", "--flag"}
+	got := withSibling(argv)
+	// The script is pinned to the byte: appArgv recognises the units of
+	// this hotserve by it, so a reworded script would make every unit a
+	// previous binary started read back as the shell's argv in status
+	// and state.json after an upgrade, with this test still green if
+	// it only looked for the parts.
+	if got[0] != "/bin/sh" || got[1] != "-c" || got[2] != `unset PWD; /usr/bin/sleep 0 || exit 127; /usr/bin/sleep infinity & exec "$@"` || got[3] != "hotserve-app" || !slices.Equal(got[4:], argv) {
+		t.Fatalf("withSibling = %q", got)
+	}
+	if !slices.Equal(appArgv(got), argv) {
+		t.Fatalf("appArgv(withSibling) = %q, want %q", appArgv(got), argv)
+	}
+	st := statusFromProps(map[string]any{"ExecStart": [][]any{{"/bin/sh", got, false}}})
+	if !slices.Equal(st.ExecStart, argv) {
+		t.Fatalf("ExecStart read back = %q, want the app's argv %q", st.ExecStart, argv)
+	}
+	bare := statusFromProps(map[string]any{"ExecStart": [][]any{{"./server", argv, false}}})
+	if !slices.Equal(bare.ExecStart, argv) {
+		t.Fatalf("an argv with no sibling must read back as it is, got %q", bare.ExecStart)
+	}
+	if !slices.Equal(appArgv([]string{"/bin/sh", "-c", "echo", "x"}), []string{"/bin/sh", "-c", "echo", "x"}) {
+		t.Fatal("a shell command of the operator's own is not the sibling's and must not be stripped")
+	}
+}
+
+// TestPreflightRefusesAHostWithoutTheSiblingTools: the script exits
+// 127 when its sleep cannot run, but that is after the unit exists, as
+// a crash; the two tools are checked before, and the refusal names
+// them.
+func TestPreflightRefusesAHostWithoutTheSiblingTools(t *testing.T) {
+	if err := siblingToolsPresent(siblingShell, siblingSleep); err != nil {
+		t.Fatalf("this host has both tools, yet: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "sleep")
+	err := siblingToolsPresent(siblingShell, missing)
+	var pf *preflightError
+	if !errors.As(err, &pf) || !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "#380") {
+		t.Fatalf("a missing sleep must be a pre-flight refusal naming it, got %v", err)
+	}
+	notExec := filepath.Join(t.TempDir(), "sh")
+	if err := os.WriteFile(notExec, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := siblingToolsPresent(notExec, siblingSleep); !errors.As(err, &pf) || !strings.Contains(err.Error(), notExec) {
+		t.Fatalf("a shell that is not executable must be a pre-flight refusal naming it, got %v", err)
 	}
 }
 

@@ -56,7 +56,8 @@ func propValues(u unitSpec, name string) []any {
 
 // Promise: a unit has one Exec*= command, its ExecStartEx — no
 // ExecStopPost= or other — so the manager spawns one process per unit
-// (the app's own children join its namespaces as ever): on a user
+// (the app's own children join its namespaces as ever, the sibling the
+// shell forks before it execs the app among them, #380): on a user
 // manager a second process the manager spawns cannot join the IPC
 // namespace the first made (#311). The instance's socket is hotserve's
 // to remove, with the run dir (socketRef.retire), so a unit names no
@@ -1269,8 +1270,9 @@ func TestAppDirAliasToSiblingRefused(t *testing.T) {
 // supervisor's view of the filesystem, which under a deny-by-default
 // sandbox is not the unit's. A runtime installed outside /usr —
 // /opt/node/bin/node, an nvm shim under a home directory — resolves
-// here and then does not exist in there, and systemd reports that as a
-// bare status=203/EXEC after the unit has already been created.
+// here and then does not exist in there, and the sibling shell reports
+// that as `exec: …: not found`, exit status 127, after the unit has
+// already been created.
 func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
 	r, _ := newTestSystemdRunner(t)
 	root := t.TempDir()
@@ -1443,7 +1445,7 @@ func TestSymlinkedRootUnderPrivateTmpLaunches(t *testing.T) {
 // follow symlinks, so a shim under a bound directory pointing at an
 // unbound one (the vendored-runtime layout /usr/local/bin/node ->
 // /opt/node/bin/node) would pass an unresolved check and then die as
-// the bare 203/EXEC the check exists to replace.
+// the shell's `not found`, exit 127, the check exists to replace.
 func TestUnitForResolvesTheCommandBeforeTestingTheView(t *testing.T) {
 	r, _ := newTestSystemdRunner(t)
 	root := t.TempDir()

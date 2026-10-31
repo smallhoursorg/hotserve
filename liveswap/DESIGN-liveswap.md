@@ -438,6 +438,54 @@ logged, reset and relaunched. On process exit `Destruct` leaves units
 running for exactly that reason; only removing an app from the config
 stops it.
 
+What the unit does not give us by itself, on systemd 257, is the grace
+on a stop of a one-process app. Under `PrivatePIDs=` the manager forks
+an intermediate that sends it the app's pid and exits; a manager that
+reads the app's parent before that exit records the pid as not its
+child ("Supervising process … which is not our child" in the
+journal), counts it as nothing to wait for, and with nothing else in
+the cgroup follows its SIGTERM with SIGKILL at once
+(`unit_kill_context_one` returns `!is_alien`; `service_enter_signal`,
+v257), on every stop path: a deploy's, a sweep's, an operator's
+`systemctl --user stop`, the manager's own shutdown at a reboot.
+Measured 2026-10-31 in the dev-systemd lane (257.13): 22 of 36 stops
+of a one-process app lost that race, and each of those lost its SIGTERM
+handler; with a `sleep` child in the cgroup 11 of 12 lost the race and
+none lost the handler (#380). The manager's own shutdown, which is what
+a reboot does to the user's units, measured the same day in the same
+lane with twelve such apps: `systemctl stop user@0.service` from the
+system manager drained 5 of 12 without the sibling (7 lost the race)
+and 12 of 12 with it; a `systemctl poweroff` of the container's
+systemd drained 6 of 12 without and 12 of 12 with. systemd 258 fixes the fork (commit
+`698ac172aa`, `FORK_DETACH`); Debian 13 ships 257. So every unit's
+command runs behind `/bin/sh -c 'unset PWD; /usr/bin/sleep 0 || exit
+127; /usr/bin/sleep infinity & exec "$@"'` (`withSibling`,
+systemd_dbus.go): the shell forks one
+sleeping sibling into the cgroup and becomes the app, which is still
+PID 1 of its namespace with its own pid, argv and exit status, and the
+manager has something to wait for, so it holds `TimeoutStopSec=` as
+configured with no hotserve in the path. To the app the sibling is one
+child it did not spawn (the fork survives the exec; under `PrivatePIDs=`
+any extra process is the app's child or is reparented to it): it dies
+at the stop's SIGTERM with the rest of the cgroup, so the app gets one
+SIGCHLD then, as a prefork master does from a worker. It costs one task
+(`tasks_max`'s floor is 2 for it) and about a megabyte, and shows in
+`systemctl --user status` beside the app. `unset PWD` keeps invariant 8
+(dash exports it), and the four names dash resets at its start
+whatever it inherited — `IFS`, `OPTIND`, `PPID`, `PWD` — are refused
+as `env` and `env_file` keys (`shellOwnedEnvKey`), named; measured,
+every other inherited variable passes byte for byte and nothing is
+added. Both tools are Essential on Debian and under /usr,
+which every view binds; Preflight checks them all the same
+(`siblingToolsPresent`), and the script runs `sleep 0` once before the
+fork and exits 127 if it cannot, because a shell whose `sleep … &`
+failed would otherwise exec the app alone, the race open and the unit
+green. The argv the manager reports
+is read back with the shell stripped (`appArgv`), so status,
+`state.json` and a reattach see the operator's command. A stop
+hotserve drives is still the plain stop job, and `Stop` returns nil
+only once the unit is observed gone, as before.
+
 The runner's invariants are written in its doc comment. The ones the
 state machine leans on: a handle is declared dead only on an
 *observed* terminal unit state (a D-Bus outage never becomes a phantom
@@ -805,6 +853,8 @@ severity × occurrence × detection, then the fix's size and risk.
 | `configure` runs `syncCaps` on the reload's own path, so a reload while the user manager has stopped answering waits on each capped app's write and read-back (two `pollTimeout`s, 20 s) before Caddy moves to the next app; the caps apply at the next launch regardless, and the journal names the wait per app. | `configure`, `syncCaps` | 2 | 3 | 1 | 6 | size 2, risk 2 (run the sync from the watchdog's goroutine, which `configure` already wakes) | Rule 2 holds: red and named, and the reload ends correct. Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#345, 2026-10-23). A manager that has stopped answering is the incident already: deploys and the watchdog wait on it the same way. |
 | A unit whose `cgroup.controllers` hotserve can never read (its cgroup path absent from hotserve's view of the tree: a cgroup namespace between the two, or a path the manager reports that does not exist) on a host whose user manager does not delegate a controller reports its caps under `caps`, as the manager holds them, with no `caps_unenforced` and no journal line; the watcher re-reads at each poll and never succeeds. | `setCapsState`, `readControllers` | 3 | 1 | 5 | 15 | size 3 (a third state in status, "enforcement unknown", on the wire) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#345, 2026-10-23). Two host conditions outside the support matrix at once; on Debian 13 the path is readable and every controller is delegated (measured). |
 | The manager's `DefaultTasksMax` is read once, with the dial. A read that fails while the connection stays up leaves it unreadable for the connection's life: every reattach and read-back then takes the manager's resolved default for an operator's cap (`unitCaps`), status shows `tasks_max` at that number for an app with none configured, and each sync re-sends the other caps with the "could not be read" Warn, until a redial. | `get`, `DefaultTasksMax`, `unitCaps` | 2 | 3 | 3 | 18 | size 2, risk 2 (a bounded re-read of the property when the cached value is 0; go-systemd's property get takes no context, so the bound is the dial's) | Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (#345, 2026-10-23). The number shown is the unit's real bound; the kernel is unaffected; a restart of hotserve or a dropped connection reads it again. |
+| An app whose SIGTERM path breaks on a child it did not spawn — a handler that treats any SIGCHLD as a worker's death, or a drain that aborts on a pid it does not know — loses its grace: the sibling (`withSibling`) is the app's child and dies at the stop's SIGTERM, so the app sees one SIGCHLD then. (A drain that reaps until `ECHILD` does not hang: the sibling dies in the same instant as the SIGTERM reaches the app, and is reaped like a worker.) | `withSibling`, systemd_dbus.go | 5 | 2 | 3 | 30 | none that keeps the grace on 257: under `PrivatePIDs=` any extra process in the unit is the app's child or is reparented to it, so no sibling avoids the SIGCHLD; the alternative is the one-process race of #380 on every stop | The app is PID 1 of its namespace already and has to reap what is reparented to it; the common masters (gunicorn, php-fpm, puma, libuv, Go, the JVM) wait on known pids or ignore an unknown one, so the failure needs an app that aborts on one (#380 review, 2026-10-31). The remedy is systemd 258 (`698ac172aa`), where the sibling can go. Stated in the README beside the sibling. |
+| A `daemon-reload` or `daemon-reexec` of the user manager — which Debian's systemd postinst sends every user manager (`SIGRTMIN+25`) on each systemd upgrade — re-reads every running unit's transient file, and two settings do not survive the round trip: `RestrictNamespaces=yes` is written as an empty set and reads back as no restriction, and `TemporaryFileSystem=/dev/shm:…,size=50%` is written `50%%` and read back verbatim. Nothing running changes: an app unit execs once, before the reload. A start whose fork lands after a reload of the same instant runs with the re-read settings, and fails `226/NAMESPACE` on the invalid tmpfs option — red, named by the watchdog or the health gate — before anything runs with the namespace restriction lifted; its next start is a fresh unit. | the manager's transient-unit serialisation (`dbus-execute.c`, v257) | 2 | 2 | 1 | 4 | none in hotserve: both are the manager's. Dropping `size=50%` (tmpfs's own default) would make the round trip clean, and leave a start racing a reload running unrestricted instead of failing red | Under rule 3 the product is under 20 (#380, 2026-10-31): a reload and a start within the same instant. Measured in the dev-systemd lane (257.13): the properties before and after a reload, the transient file's lines, and under continuous reloads 6 of 40 starts not reaching ready with the namespace probe never succeeding. The option stays for this reason too (DESIGN-sandbox.md, "Sibling IPC closed"). |
 
 **Owed** (over the bar, not yet fixed):
 

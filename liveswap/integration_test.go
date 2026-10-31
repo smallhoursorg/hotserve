@@ -1029,7 +1029,7 @@ func leftIn(t *testing.T, dir string) []string {
 // pre-flight, once, on the real runner: the watchdog's restart of a
 // crashed instance whose executable became one for another machine,
 // and then a reload's recovery of the same release. No unit is started
-// to die 203/EXEC, nothing loops, status names the architecture, and a
+// to die at its exec, nothing loops, status names the architecture, and a
 // deploy of a release that can run brings the app back.
 func TestIntegrationRelaunchRefusedAtPreflight(t *testing.T) {
 	var other uint16 // a machine that is not this box's
