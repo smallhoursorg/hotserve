@@ -451,7 +451,12 @@ v257), on every stop path: a deploy's, a sweep's, an operator's
 Measured 2026-10-31 in the dev-systemd lane (257.13): 22 of 36 stops
 of a one-process app lost that race, and each of those lost its SIGTERM
 handler; with a `sleep` child in the cgroup 11 of 12 lost the race and
-none lost the handler (#380). systemd 258 fixes the fork (commit
+none lost the handler (#380). The manager's own shutdown, which is what
+a reboot does to the user's units, measured the same day in the same
+lane with twelve such apps: `systemctl stop user@0.service` from the
+system manager drained 5 of 12 without the sibling (7 lost the race)
+and 12 of 12 with it; a `systemctl poweroff` of the container's
+systemd drained 6 of 12 without and 12 of 12 with. systemd 258 fixes the fork (commit
 `698ac172aa`, `FORK_DETACH`); Debian 13 ships 257. So every unit's
 command runs behind `/bin/sh -c 'unset PWD; /usr/bin/sleep 0 || exit
 127; /usr/bin/sleep infinity & exec "$@"'` (`withSibling`,
