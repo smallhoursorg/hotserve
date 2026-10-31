@@ -673,7 +673,7 @@ func checkUnitLines(spec startSpec) error {
 		}
 		return &preflightError{fmt.Sprintf("the environment of app %s would be a %d-byte line in its unit file (the largest variable, %s, %d bytes of it), over the %d-byte bound: a line past 1 MiB makes the unit unreadable to systemd after a daemon-reload — move large values out of env_file and the Caddyfile, into a file under the app's shared dir", spec.app, n, key, size, unitLineBudget)}
 	}
-	if n := unitLineLength("ExecStart", spec.command); n > unitLineBudget {
+	if n := unitLineLength("ExecStart", withSibling(spec.command)); n > unitLineBudget { // the argv as the unit carries it, behind its sibling shell
 		return &preflightError{fmt.Sprintf("the command of app %s would be a %d-byte line in its unit file, over the %d-byte bound: a line past 1 MiB makes the unit unreadable to systemd after a daemon-reload — shorten its arguments", spec.app, n, unitLineBudget)}
 	}
 	return nil
