@@ -612,6 +612,18 @@ func validateSandboxRoot(root string) error {
 	}
 	supervisor := supervisorPaths()
 	for _, r := range roots {
+		// The root reaches the unit as BindPaths=, WorkingDirectory=
+		// and ExecStart= text, which the manager writes to the unit's
+		// transient file and reads back at every daemon-reload. The
+		// characters that grammar owns — whitespace and control
+		// characters, the ':' between a bind's source and destination,
+		// '\' and both quotes — come back as a different bind list (a
+		// space, a colon), as a unit the manager can no longer load (a
+		// backslash: bad-setting), or not at all (a tab, a quote): the
+		// unit then runs on, unknown to hotserve (#380, measured).
+		if c, ok := unitSyntaxChar(r); ok {
+			return fmt.Errorf("root %q contains %s, which a systemd unit file cannot carry in a path: the apps' bind mounts would not survive a daemon-reload; use a root of plain characters (the default is /var/lib/liveswap)", root, c)
+		}
 		for _, h := range supervisor {
 			if pathWithin(r, h) {
 				return fmt.Errorf("root %q is inside %s, which holds hotserve's own keys, sockets and env files; use a root outside it (the default is /var/lib/liveswap)", root, h)
@@ -638,6 +650,29 @@ func validateSandboxRoot(root string) error {
 		}
 	}
 	return nil
+}
+
+// unitSyntaxChar reports the first character of p that a unit file's
+// path grammar gives meaning to, described for a message. '%' is not
+// one: the manager escapes a specifier on the way out and reads it
+// back; nor is any non-ASCII letter (both measured unchanged across a
+// daemon-reload).
+func unitSyntaxChar(p string) (string, bool) {
+	for _, c := range p {
+		switch {
+		case c == ' ':
+			return "a space", true
+		case c == ':':
+			return "a colon", true
+		case c == '\\':
+			return "a backslash", true
+		case c == '"' || c == '\'':
+			return "a quote", true
+		case c < 0x20 || c == 0x7f:
+			return fmt.Sprintf("a control character (U+%04X)", c), true
+		}
+	}
+	return "", false
 }
 
 // homeOutsideView reports an operator-set HOME that the unit's view
