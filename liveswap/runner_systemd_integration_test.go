@@ -1454,3 +1454,61 @@ func TestIntegrationSystemdPreStartKeepsItsGraceAtDeadline(t *testing.T) {
 	}
 	t.Logf("pre_start ended at its deadline with its grace: handler ran, took %s (%v)", took, err)
 }
+
+// TestIntegrationSystemdUnitOutlivesItsFile: a unit whose transient
+// file the manager cannot read back after a daemon-reload — deleted
+// here; in #380 an Environment= line past 1 MiB, or a root with a
+// backslash — is still a running unit: the watcher keeps following it,
+// Stop ends its process, and a sweep stops it as a stray. Before the
+// fix such a unit read as exited: the watchdog relaunched beside it,
+// Stop was a no-op and the sweep skipped it, the process running on.
+func TestIntegrationSystemdUnitOutlivesItsFile(t *testing.T) {
+	r := integrationRunner(t)
+	body := "trap 'exit 0' TERM\nwhile :; do sleep 0.2; done\n"
+	stopped, swept := scriptApp(t, body), scriptApp(t, body)
+	stopped.version, swept.version = "nofile-stopped", "nofile-swept"
+	hs, err := r.Start(stopped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hw, err := r.Start(swept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	pidsStopped, pidsSwept := unitPIDs(t, hs.state().Unit), unitPIDs(t, hw.state().Unit)
+	for _, h := range []handle{hs, hw} {
+		if err := os.Remove(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "systemd", "transient", h.state().Unit)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(t, "systemctl", "--user", "daemon-reload")
+	time.Sleep(4 * r.poll)
+	for _, h := range []handle{hs, hw} {
+		unit := h.state().Unit
+		t.Logf("%s after the reload: %s", unit, strings.ReplaceAll(strings.TrimSpace(run(t, "systemctl", "--user", "show", unit, "-p", "LoadState,ActiveState")), "\n", " "))
+		if !r.Alive(h) {
+			t.Fatalf("%s was declared exited by the reload; its process runs on", unit)
+		}
+	}
+	if err := r.Stop(hs, stopped.grace); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	waitPIDsGone(t, pidsStopped, 5*time.Second)
+	if r.Alive(hs) {
+		t.Fatal("stopped handle still alive")
+	}
+	// A second runner (a restarted hotserve) sees the other as a stray.
+	r2 := integrationRunner(t)
+	if err := r2.Sweep("itest", nil); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	waitPIDsGone(t, pidsSwept, 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for r.Alive(hw) && time.Now().Before(deadline) {
+		time.Sleep(r.poll)
+	}
+	if r.Alive(hw) {
+		t.Fatal("the swept unit's watcher never saw it go")
+	}
+}

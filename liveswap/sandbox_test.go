@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -944,6 +945,48 @@ func TestValidateRejectsUncleanRoot(t *testing.T) {
 		if err := base(bad).Validate(); err == nil {
 			t.Errorf("unclean root %q accepted", bad)
 		}
+	}
+}
+
+// TestValidateSandboxRootRefusesUnitSyntax: a root with a character a
+// unit file's path grammar owns is refused at config load, named. The
+// manager writes BindPaths= and the rest to the unit's transient file
+// unquoted and reads it back at every daemon-reload; measured (#380),
+// a space split the binds, a colon emptied them, a backslash left the
+// unit bad-setting, a tab or a quote a unit that never ran. '%', ';'
+// and non-ASCII letters came back unchanged, and stay allowed.
+func TestValidateSandboxRootRefusesUnitSyntax(t *testing.T) {
+	for _, bad := range []string{"/srv/live swap", "/srv/live:swap", `/srv/live\swap`, "/srv/live\tswap", `/srv/live"swap`, "/srv/live'swap", "/srv/live\x7fswap"} {
+		err := validateSandboxRoot(bad)
+		if err == nil || !strings.Contains(err.Error(), "cannot carry in a path") {
+			t.Errorf("root %q accepted (%v)", bad, err)
+		}
+	}
+	for _, ok := range []string{"/srv/liveswap", "/srv/live%swap", "/srv/live;swap", "/srv/livéswap", "/srv/live-swap.d_1"} {
+		if err := validateSandboxRoot(ok); err != nil {
+			t.Errorf("root %q refused: %v", ok, err)
+		}
+	}
+	// A root that is a link to such a path: refused naming the target,
+	// which is where the character is.
+	root := filepath.Join(t.TempDir(), "liveswap")
+	target := filepath.Join(t.TempDir(), "live swap")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSandboxRoot(root); err == nil || !strings.Contains(err.Error(), "which resolves to "+strconv.Quote(target)+", contains a space") {
+		t.Errorf("a root linking to a path with a space must be refused naming the target: %v", err)
+	}
+	// And a source resolved at launch, for a root re-pointed since the
+	// config loaded: the same refusal, from the bind-source check.
+	if err := refusedAsBindSource("/run/live swap/blog/shared"); err == nil || !strings.Contains(err.Error(), "contains a space") {
+		t.Errorf("a resolved bind source with a space must be refused: %v", err)
+	}
+	if err := refusedAsBindSource("/run/liveswap/blog/shared"); err != nil {
+		t.Errorf("a plain resolved bind source refused: %v", err)
 	}
 }
 
