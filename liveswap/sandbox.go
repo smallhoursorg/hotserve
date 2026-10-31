@@ -279,6 +279,13 @@ func (s *sandboxSpec) resolveBindSources() error {
 // would then "overlap" it. A unit gets its own /tmp and /home anyway,
 // so nothing of the host's leaks through them.
 func refusedAsBindSource(p string) error {
+	// The root was vetted for these at config load (validateSandboxRoot),
+	// but a source is resolved from the live filesystem at every launch,
+	// and a root re-pointed since then can resolve to a path the unit's
+	// file cannot carry (#380).
+	if c, ok := unitSyntaxChar(p); ok {
+		return fmt.Errorf("%q contains %s, which a systemd unit file cannot carry in a path: the bind would not survive a daemon-reload", p, c)
+	}
 	for _, c := range supervisorPaths() {
 		if overlaps(p, c) {
 			return fmt.Errorf("%q overlaps %s, which holds hotserve's own keys, sockets or config", p, c)
@@ -622,7 +629,11 @@ func validateSandboxRoot(root string) error {
 		// backslash: bad-setting), or not at all (a tab, a quote): the
 		// unit then runs on, unknown to hotserve (#380, measured).
 		if c, ok := unitSyntaxChar(r); ok {
-			return fmt.Errorf("root %q contains %s, which a systemd unit file cannot carry in a path: the apps' bind mounts would not survive a daemon-reload; use a root of plain characters (the default is /var/lib/liveswap)", root, c)
+			where := fmt.Sprintf("root %q", root)
+			if r != root {
+				where = fmt.Sprintf("root %q, which resolves to %q,", root, r)
+			}
+			return fmt.Errorf("%s contains %s, which a systemd unit file cannot carry in a path: the apps' bind mounts would not survive a daemon-reload; use a root of plain characters (the default is /var/lib/liveswap)", where, c)
 		}
 		for _, h := range supervisor {
 			if pathWithin(r, h) {

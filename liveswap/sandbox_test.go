@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -965,6 +966,27 @@ func TestValidateSandboxRootRefusesUnitSyntax(t *testing.T) {
 		if err := validateSandboxRoot(ok); err != nil {
 			t.Errorf("root %q refused: %v", ok, err)
 		}
+	}
+	// A root that is a link to such a path: refused naming the target,
+	// which is where the character is.
+	root := filepath.Join(t.TempDir(), "liveswap")
+	target := filepath.Join(t.TempDir(), "live swap")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSandboxRoot(root); err == nil || !strings.Contains(err.Error(), "which resolves to "+strconv.Quote(target)+", contains a space") {
+		t.Errorf("a root linking to a path with a space must be refused naming the target: %v", err)
+	}
+	// And a source resolved at launch, for a root re-pointed since the
+	// config loaded: the same refusal, from the bind-source check.
+	if err := refusedAsBindSource("/run/live swap/blog/shared"); err == nil || !strings.Contains(err.Error(), "contains a space") {
+		t.Errorf("a resolved bind source with a space must be refused: %v", err)
+	}
+	if err := refusedAsBindSource("/run/liveswap/blog/shared"); err != nil {
+		t.Errorf("a plain resolved bind source refused: %v", err)
 	}
 }
 

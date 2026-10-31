@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1647,6 +1648,28 @@ func TestSystemdRunnerPreflight(t *testing.T) {
 	}
 }
 
+// TestSweepResetsAFailedUnitWhoseFileDidNotLoad: a unit a daemon-reload
+// could not read back (LoadState error) that has since ended failed is
+// a leftover like any other: reset, so it does not sit in the manager
+// as failed for good, and so the sweep says so (#380).
+func TestSweepResetsAFailedUnitWhoseFileDidNotLoad(t *testing.T) {
+	r, conn := newTestSystemdRunner(t)
+	name, err := unitName(startSpec{app: "demo", version: "v9", nonce: "0a1b2c3d0a1b2c3d"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.setStatus(name, unitStatus{LoadState: "error", ActiveState: "failed", Result: "timeout"})
+	if err := r.Sweep("demo", nil); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if resets := conn.resets(); len(resets) != 1 || resets[0] != name {
+		t.Fatalf("resets %v: a failed unit the manager could not read back must be reset like any other", resets)
+	}
+	if _, err := conn.UnitStatus(context.Background(), name); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestUnitLineLength pins the estimate against what the manager was
 // measured to write: plain ASCII one byte, a control or non-ASCII byte
 // four (30,000 bytes of CJK read back as a 120,187-byte line), a quote,
@@ -1667,9 +1690,14 @@ func TestUnitLineLength(t *testing.T) {
 	env := func(total int) []string {
 		var l []string
 		for i := 0; i*100*1024 < total; i++ {
-			l = append(l, "BIG"+strings.Repeat("x", 100*1024))
+			l = append(l, "BIG"+strconv.Itoa(i)+"="+strings.Repeat("x", 100*1024))
 		}
 		return l
+	}
+	// An entry with no = (nothing of hotserve's makes one) is named as
+	// such, never printed: the refusal must not carry a value.
+	if err := checkUnitLines(startSpec{app: "a", env: []string{strings.Repeat("v", unitLineBudget)}, command: []string{"./server"}}); err == nil || !strings.Contains(err.Error(), "an entry with no =") || strings.Contains(err.Error(), "vvvv") {
+		t.Fatalf("an =-less entry must be refused without its value: %v", err)
 	}
 	if err := checkUnitLines(startSpec{app: "a", env: env(480 * 1024), command: []string{"./server"}}); err != nil {
 		t.Fatalf("480 KiB of environment must pass: %v", err)

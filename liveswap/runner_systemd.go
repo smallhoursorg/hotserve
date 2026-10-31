@@ -181,6 +181,13 @@ func (s unitStatus) stopBudget(grace time.Duration) time.Duration {
 
 func (s unitStatus) loaded() bool { return s.LoadState == "loaded" }
 
+// leftover reports a unit the manager still holds with no process to
+// it, which a reset unloads: one that ended with its file loaded, or
+// one that ended failed whatever became of its file — a unit whose
+// file did not read back after a daemon-reload and was then stopped
+// ends failed, and stays until reset like any other (#380).
+func (s unitStatus) leftover() bool { return s.loaded() || s.ActiveState == "failed" }
+
 // running reports whether the unit still has (or may still have) live
 // processes: anything but a terminal state counts, including
 // deactivating — a stop in progress is not yet a stopped unit. The
@@ -660,7 +667,10 @@ func checkUnitLines(spec startSpec) error {
 				largest, size = e, l
 			}
 		}
-		key, _, _ := strings.Cut(largest, "=")
+		key, _, found := strings.Cut(largest, "=")
+		if !found {
+			key = "an entry with no =" // never the value
+		}
 		return &preflightError{fmt.Sprintf("the environment of app %s would be a %d-byte line in its unit file (the largest variable, %s, %d bytes of it), over the %d-byte bound: a line past 1 MiB makes the unit unreadable to systemd after a daemon-reload — move large values out of env_file and the Caddyfile, into a file under the app's shared dir", spec.app, n, key, size, unitLineBudget)}
 	}
 	if n := unitLineLength("ExecStart", spec.command); n > unitLineBudget {
@@ -959,7 +969,7 @@ func (r *systemdRunner) reconcileStart(u unitSpec, cause error) (handle, error) 
 		defer cancel()
 		return r.adopt(ctx, unit, time.Now(), u.StopTimeout, u.Caps), nil
 	case err == nil:
-		if st.loaded() {
+		if st.leftover() {
 			ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
 			_ = r.resetFailed(ctx, unit)
 			cancel()
@@ -1050,7 +1060,7 @@ func (r *systemdRunner) stopUnobserved(ctx context.Context, unit string, cause e
 	if err != nil || st.running() {
 		return &unitUnconfirmedError{unit: unit, err: cause}
 	}
-	if st.loaded() {
+	if st.leftover() {
 		if rerr := r.resetFailed(ctx, unit); rerr != nil {
 			return &unitUnconfirmedError{unit: unit, err: errors.Join(cause, rerr)}
 		}
@@ -1162,11 +1172,13 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 			// An unconfirmed stop is an error, so the caller does not
 			// launch beside a unit that may still be running.
 			msg := "recorded unit is running WITHOUT the sandbox; stopping it — the version relaunches sandboxed"
+			reason := "was running without the sandbox"
 			if !us.loaded() {
 				// A daemon-reload could not read its file back: the
 				// manager holds none of its settings, PrivatePIDs= among
 				// them, and reports what it holds (#380).
 				msg = "recorded unit's file no longer reads back, so the manager holds none of its settings; stopping it — the version relaunches"
+				reason = "was running with a file the manager could not read back (" + us.LoadState + ")"
 			}
 			r.log().Error(msg, zap.String("unit", st.Unit), zap.Int("pid", us.MainPID), zap.String("load_state", us.LoadState))
 			grace := us.StopTimeout
@@ -1175,7 +1187,7 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 			}
 			stopCtx, stopCancel := context.WithTimeout(r.ctx, grace+stopSlack)
 			defer stopCancel()
-			bare := fmt.Errorf("recorded unit %s was running without the sandbox", st.Unit)
+			bare := fmt.Errorf("recorded unit %s %s", st.Unit, reason)
 			if err := r.stopUnobserved(stopCtx, st.Unit, bare); !errors.Is(err, bare) || errors.As(err, new(*unitUnconfirmedError)) {
 				return nil, false, fmt.Errorf("stopping it: %w", err)
 			}
@@ -1250,7 +1262,7 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 		// exit and PID the lines below record are read off the unit,
 		// once per stray or leftover (both rare).
 		if !u.running() {
-			if u.loaded() {
+			if u.leftover() {
 				u = r.unitStatusOf(parent, u)
 				r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
 				ctx, cancel := context.WithTimeout(parent, pollTimeout)
@@ -1271,7 +1283,7 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 			// and would report the whole sweep unconfirmed.
 			u = r.unitStatusOf(parent, u)
 			if !u.running() {
-				if u.loaded() {
+				if u.leftover() {
 					r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
 					ctx, cancel := context.WithTimeout(parent, pollTimeout)
 					defer cancel()
@@ -1420,7 +1432,7 @@ func (r *systemdRunner) reapFailed(ctx context.Context, name string) unitStatus 
 	if err != nil {
 		r.log().Warn("cannot read failed unit", zap.String("unit", name), zap.Error(err))
 	}
-	if st.loaded() {
+	if st.leftover() {
 		_ = r.resetFailed(ctx, name)
 	}
 	return st
