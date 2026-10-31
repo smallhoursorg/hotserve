@@ -1,0 +1,17 @@
+## L10, 2026-10-24: ordering a B2 version listing to the millisecond, on the RC's own lines (RC-lifecycle-day0.out: a hide and its upload in the same second)
+$ grep '^4_z' docs/design/backups/rc-runs/RC-lifecycle-day0.out    # the two listing lines, as backblaze-b2 ls --long --versions -r printed them: by name, newest version first
+4_z5c0ef9874aa50a64a41a0b1a_f4702dd4e2e8d5768_d20261004_m114700_c003_v7007000_t0000_u01791114420872    hide  2026-10-04  11:47:00          0  probe.txt
+4_z5c0ef9874aa50a64a41a0b1a_f4021912b21da582e_d20261004_m114700_c003_v0312045_t0056_u01791114420526  upload  2026-10-04  11:47:00         37  probe.txt
+$ ... | awk -F_ '{print $9}' | cut -c1-15    # field 9 of the id, split on _, is the upload stamp, ms since the epoch
+u01791114420872
+u01791114420526
+$ ... | sort -k3,4    # the RC run's own sort (check 4, by the date and time columns): to the second; the tie broken by the whole line, i.e. the id's _f<hex> — here upload first by chance
+4_z5c0ef9874aa50a64a41a0b1a_f4021912b21da582e_d20261004_m114700_c003_v0312045_t0056_u01791114420526  upload  2026-10-04  11:47:00         37  probe.txt
+4_z5c0ef9874aa50a64a41a0b1a_f4702dd4e2e8d5768_d20261004_m114700_c003_v7007000_t0000_u01791114420872    hide  2026-10-04  11:47:00          0  probe.txt
+$ ... | sort -t_ -k9,9    # by the upload stamp: the upload (…420526) before the hide (…420872), 346 ms apart
+4_z5c0ef9874aa50a64a41a0b1a_f4021912b21da582e_d20261004_m114700_c003_v0312045_t0056_u01791114420526  upload  2026-10-04  11:47:00         37  probe.txt
+4_z5c0ef9874aa50a64a41a0b1a_f4702dd4e2e8d5768_d20261004_m114700_c003_v7007000_t0000_u01791114420872    hide  2026-10-04  11:47:00          0  probe.txt
+$ date -u -d @1791114420.526    # the stamp is UTC, and matches the listing's own column
+Sun Oct  4 11:47:00 UTC 2026
+$ sort --version | head -1
+sort (GNU coreutils) 9.7

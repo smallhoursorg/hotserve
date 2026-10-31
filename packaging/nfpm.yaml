@@ -40,6 +40,23 @@ depends:
   - systemd (>= 257)
   - libpam-systemd
   - dbus
+  # hotserve-backup runs Debian's restic and sqlite3 in units of its own
+  # (backups/README.md). Depends, not Recommends: a provider's image may
+  # leave recommended packages out — Hetzner's Debian 13 sets
+  # APT::Install-Recommends "false" — and on such a box neither program
+  # came, so backups stopped at setup's first line (the owner's box,
+  # 2026-10-05). ca-certificates: restic verifies the storage's
+  # certificate against /etc/ssl/certs, and Debian's restic does not
+  # depend on it; in a bare debian:13 container every request ended
+  # `x509: certificate signed by unknown authority`. hotserve itself
+  # reads the same store — ACME to Let's Encrypt, deploy_trust's OIDC
+  # discovery and JWKS fetches, a pull over https — and never declared
+  # it either; it is the binary's as much as the backups'. The cost: a
+  # box that uses no backups carries restic (23 MB) and sqlite3 too;
+  # taken over a box that does and cannot, found at setup.
+  - restic
+  - sqlite3
+  - ca-certificates
   # The box applier and the box_webhook handler verify each commit's
   # SSH signature with `ssh-keygen -Y verify` (box/DESIGN-box.md, step
   # 12).
@@ -59,6 +76,30 @@ contents:
       mode: 0755
   - src: packaging/hotserve.service
     dst: /lib/systemd/system/hotserve.service
+    file_info:
+      mode: 0644
+  # The backup program and its units: the hourly run and the Sunday
+  # restore drill, enabled by postinstall and running nothing until
+  # `hotserve-backup setup` has written /etc/hotserve-backup/repository.env,
+  # which the package neither ships nor removes (postremove says why).
+  - src: build/hotserve-backup
+    dst: /usr/bin/hotserve-backup
+    file_info:
+      mode: 0755
+  - src: packaging/hotserve-backup.service
+    dst: /lib/systemd/system/hotserve-backup.service
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-backup.timer
+    dst: /lib/systemd/system/hotserve-backup.timer
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-backup-drill.service
+    dst: /lib/systemd/system/hotserve-backup-drill.service
+    file_info:
+      mode: 0644
+  - src: packaging/hotserve-backup-drill.timer
+    dst: /lib/systemd/system/hotserve-backup-drill.timer
     file_info:
       mode: 0644
   # The box applier (box/DESIGN-box.md, "The applier unit"): the path
@@ -120,7 +161,8 @@ scripts:
   postinstall: packaging/postinstall.sh
   preremove: packaging/preremove.sh
   # remove: the manager drops the removed units, the box applier's
-  # path unit is masked; purge: its enable state, the box's config,
-  # the starter's record and the exchange tree go — the script's
-  # header says what is kept, and why.
+  # path unit and the backup timers are masked; purge: their enable
+  # state, the box's config, the starter's record, the exchange tree
+  # and what hotserve-backup keeps of its own go — the script's header
+  # says what is kept, and why.
   postremove: packaging/postremove.sh

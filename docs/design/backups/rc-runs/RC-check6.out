@@ -1,0 +1,63 @@
+### 1. a repository with the writing test key, and one backup
+repository ready: b2:hs-lifecycle-test:rc-readonly (new, id 30abb7df)
+[exit 0]
+[exit 0, 19.781s, 2026-10-04T13:52:46Z]
+
+### 2. the same repository, set up with the READ-ONLY key
+bob@rcbox:~$ sudo hotserve-backup setup b2:hs-lifecycle-test:rc-readonly
+account hotserve-backup: present
+a run would back up demo, under /var/lib/liveswap
+Storage key id (B2_ACCOUNT_ID): <keyID>
+Storage secret key (B2_ACCOUNT_KEY): 
+looking for a repository at b2:hs-lifecycle-test:rc-readonly (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+repository ready: b2:hs-lifecycle-test:rc-readonly (existing, id 30abb7df)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: the first backup runs within the hour and ten minutes (systemctl list-timers hotserve-backup.timer); to run one now, sudo systemctl start hotserve-backup.service; then hotserve-backup status
+[exit 0]
+
+### 3. a run, the drill and status with the read-only key
+bob@rcbox:~$ time sudo systemctl start hotserve-backup.service
+sh: 1: time: not found
+[exit 127, 0.0235488s, 2026-10-04T13:52:50Z]
+demo: ok: snapshot 21011cf9 holds sqlite app.db, files uploads
+demo: restore proven: snapshot 21011cf9 was fetched and checked whole
+hotserve-backup.service: Deactivated successfully.
+Finished hotserve-backup.service - hotserve backup run.
+bob@rcbox:~$ time sudo hotserve-backup drill
+sh: 1: time: not found
+[exit 127, 0.0242677s, 2026-10-04T13:52:50Z]
+bob@rcbox:~$ hotserve-backup status
+last run 2026-10-04 13:52 UTC
+the repository has not been checked yet: the weekly drill checks it
+demo: ok: last complete backup 2026-10-04 13:52 UTC, snapshot 21011cf9 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-04 13:52 UTC, snapshot 21011cf9
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0232668s, 2026-10-04T13:52:50Z]
+### 3 (again). a run, the drill and status with the read-only key
+bob@rcbox:~$ sudo systemctl start hotserve-backup.service
+[0;1;31mJob for hotserve-backup.service failed because the control process exited with error code.[0m
+[0;1;31mSee "systemctl status hotserve-backup.service" and "journalctl -xeu hotserve-backup.service" for details.[0m
+[exit 1, 867.993s, 2026-10-04T14:07:28Z]
+demo: failed: restic failed (exit 1): the storage could not be reached, or refused the key, or something else went wrong; `journalctl -u hotserve_backup_upload_demo_5734cd3ca533.service` has restic's own words
+hotserve-backup: not every app was backed up
+hotserve-backup.service: Main process exited, code=exited, status=1/FAILURE
+hotserve-backup.service: Failed with result 'exit-code'.
+Failed to start hotserve-backup.service - hotserve backup run.
+bob@rcbox:~$ sudo hotserve-backup drill
+demo: restore not proven: snapshot 21011cf9: fetching snapshot 21011cf9: restic could not restore all of it (exit 1): /var/lib/hotserve-backup may be out of room — a fetch needs as much there as the app's data takes — or the storage stopped answering; `journalctl -u hotserve_backup_fetch_demo_ae9523942169.service` has restic's own words (last proven: snapshot 21011cf9, on 2026-10-04 13:52 UTC)
+repository: its structure, and data group 40/52: clean
+hotserve-backup: not every app's restore was proven
+[exit 1, 831.522s, 2026-10-04T14:21:19Z]
+bob@rcbox:~$ hotserve-backup status
+last run 2026-10-04 13:53 UTC
+last drill 2026-10-04 14:07 UTC
+repository last checked 2026-10-04 14:21 UTC: its structure, and data group 40/52: clean
+demo: failed: restic failed (exit 1): the storage could not be reached, or refused the key, or something else went wrong; `journalctl -u hotserve_backup_upload_demo_5734cd3ca533.service` has restic's own words (data at /var/lib/liveswap/demo/shared)
+demo: last complete backup 2026-10-04 13:52 UTC, snapshot 21011cf9
+demo: restore last proven: 2026-10-04 13:52 UTC, snapshot 21011cf9
+demo: restore not proven: fetching snapshot 21011cf9: restic could not restore all of it (exit 1): /var/lib/hotserve-backup may be out of room — a fetch needs as much there as the app's data takes — or the storage stopped answering; `journalctl -u hotserve_backup_fetch_demo_ae9523942169.service` has restic's own words (snapshot 21011cf9, 2026-10-04 14:21 UTC); `sudo hotserve-backup drill` tries again
+no unit of a run, a restore or a drill is running
+hotserve-backup: not every app has a fresh backup and a restore proven lately
+[exit 1, 0.0252242s, 2026-10-04T14:21:20Z]

@@ -1,0 +1,8 @@
+active
+{
+  "version": 2,
+  "id": "cff1d3343a06fdf2b8cd599cc5a79fe984d38b73eba4ae28305a5c509f58cd5c",
+[exit 0, 0.6s] restic cat config --no-lock
+Save(<lock/b8e7993d85>) failed: client.PutObject: Access Denied.
+unable to create lock in backend: client.PutObject: Access Denied.
+[exit 1, 0.6s] restic cat config

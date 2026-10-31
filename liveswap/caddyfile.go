@@ -11,6 +11,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/dustin/go-humanize"
+	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 
 	"github.com/smallhoursorg/hotserve/liveswap/internal/dispenser"
@@ -76,6 +77,10 @@ func parseWebhookDirective(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler,
 //	        max_artifact_size <size>
 //	        max_artifact_entries <n>
 //	        deploy_log_lines  <n>
+//	        backup {
+//	            sqlite <path>...             # relative to the shared dir
+//	            files  <path>...
+//	        }
 //	        memory_max        <size>
 //	        tasks_max         <n>
 //	        cpu_quota         <n>%
@@ -86,6 +91,8 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	if d.NextArg() {
 		return d.ArgErr() // no positional args; everything is in the block
 	}
+	var found []BackupSource
+	rootFile := ""
 	seen := map[string]bool{}
 	for d.NextBlock(0) {
 		if err := dispenser.RefuseRepeat(d, seen, "deploy_trust", "artifact_allowlist", "app"); err != nil {
@@ -93,6 +100,7 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		}
 		switch d.Val() {
 		case "root":
+			rootFile = d.File()
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
@@ -118,7 +126,7 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			name := d.Val()
+			name, appFile := d.Val(), d.File()
 			if a.Apps == nil {
 				a.Apps = make(map[string]*AppConfig)
 			}
@@ -126,10 +134,16 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("duplicate app %q", name)
 			}
 			cfg := new(AppConfig)
-			if err := cfg.unmarshalBlock(d); err != nil {
+			var backupFiles []string
+			if err := cfg.unmarshalBlock(d, &backupFiles); err != nil {
 				return err
 			}
 			a.Apps[name] = cfg
+			if cfg.Backup != nil {
+				for _, f := range append([]string{appFile}, backupFiles...) {
+					found = append(found, BackupSource{App: name, File: f})
+				}
+			}
 			continue // the app block consumed its own trailing tokens
 		default:
 			return d.Errf("unknown subdirective %q", d.Val())
@@ -138,13 +152,20 @@ func (a *App) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			return d.ArgErr() // no simple subdirective takes more args
 		}
 	}
+	if len(found) > 0 && rootFile != "" {
+		found = append([]BackupSource{{File: rootFile}}, found...)
+	}
+	setBackupSources(found)
 	return nil
 }
 
-func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
+// unmarshalBlock parses an app's block; backupFiles gets the file each
+// token of its backup block was read from.
+func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser, backupFiles *[]string) error {
 	seen := map[string]bool{}
 	for d.NextBlock(1) {
-		if err := dispenser.RefuseRepeat(d, seen, "env", "deploy_trust", "artifact_allowlist"); err != nil {
+		// backup refuses its own repeat, in its own words (case "backup").
+		if err := dispenser.RefuseRepeat(d, seen, "env", "deploy_trust", "artifact_allowlist", "backup"); err != nil {
 			return err
 		}
 		switch d.Val() {
@@ -287,6 +308,17 @@ func (cfg *AppConfig) unmarshalBlock(d *caddyfile.Dispenser) error {
 			if err := parseCountArg(d, &cfg.MaxArtifactEntries, 1); err != nil {
 				return err
 			}
+		case "backup":
+			if cfg.Backup != nil {
+				return d.Err("duplicate backup block")
+			}
+			*backupFiles = append(*backupFiles, d.File())
+			b, err := parseBackup(d, backupFiles)
+			if err != nil {
+				return err
+			}
+			cfg.Backup = b
+			continue // the block consumed its own trailing tokens
 		case "memory_max":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -395,6 +427,41 @@ func parseDurationArg(d *caddyfile.Dispenser, out *caddy.Duration, zeroIsSetting
 	}
 	*out = caddy.Duration(dur)
 	return nil
+}
+
+// parseBackup parses an app's `backup` block. Each line names one or
+// more paths and may repeat; what makes a declaration valid is
+// backupdecl's to say (App.Validate), so a block that names nothing
+// parses, and is refused there.
+//
+//	backup {
+//	    sqlite app.db
+//	    files  uploads
+//	}
+func parseBackup(d *caddyfile.Dispenser, files *[]string) (*backupdecl.Config, error) {
+	if d.NextArg() {
+		return nil, d.ArgErr() // no positional args; everything is in the block
+	}
+	b := new(backupdecl.Config)
+	for nesting := d.Nesting(); d.NextBlock(nesting); {
+		kind := d.Val()
+		*files = append(*files, d.File())
+		var into *[]string
+		switch kind {
+		case "sqlite":
+			into = &b.SQLite
+		case "files":
+			into = &b.Files
+		default:
+			return nil, d.Errf("unknown backup subdirective %q", kind)
+		}
+		paths := d.RemainingArgs()
+		if len(paths) == 0 {
+			return nil, d.ArgErr()
+		}
+		*into = append(*into, paths...)
+	}
+	return b, nil
 }
 
 // UnmarshalCaddyfile parses the webhook directive, which takes no

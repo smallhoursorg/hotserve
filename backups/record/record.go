@@ -1,0 +1,262 @@
+// Package record is what a run leaves behind for whoever asks how the
+// backups are doing: one JSON file, written whole and atomically by
+// root, holding no secret. What it holds of an app's choosing — the
+// paths it declared, and what sqlite3 said about its databases — has
+// been through Text.
+package record
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+	"unicode"
+)
+
+// Class is how an app's backup ended, in the words a status report
+// uses.
+type Class string
+
+const (
+	// OK: restic exited 0, this run's own snapshot id was read, and
+	// every declared item was found in that snapshot.
+	OK Class = "ok"
+	// Incomplete: a snapshot exists and something declared is not in
+	// it, or restic said it could not read everything (exit 3).
+	Incomplete Class = "incomplete"
+	// Pending: the app has no data dir and has never been backed up —
+	// declared, not yet deployed.
+	Pending Class = "pending"
+	// DataMissing: the app has no data dir and HAS been backed up
+	// before. Never reported as pending.
+	DataMissing Class = "data missing"
+	// Failed: no snapshot was made.
+	Failed Class = "failed"
+	// NotAttempted: the repository refused an earlier app in this run
+	// for a reason that is the same for every app.
+	NotAttempted Class = "not attempted"
+	// NotRun: the run ended before it reached this app. Nothing is said
+	// about it but when it was last ok.
+	NotRun Class = "not run"
+)
+
+// Item is one declared path.
+type Item struct {
+	Kind   string `json:"kind"` // "sqlite" or "files"
+	Path   string `json:"path"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// Snapshot names a snapshot and when it was made.
+type Snapshot struct {
+	ID   string    `json:"id"`
+	Time time.Time `json:"time"`
+	// Seen is when the repository was last found to hold this snapshot:
+	// by the run that made it, a drill that fetched it, or a run's
+	// listing. One older than Status.Listed — or none, under a Listed —
+	// is of a snapshot a listing since did not hold: it is gone.
+	Seen *time.Time `json:"seen,omitempty"`
+}
+
+// App is one app's last run.
+type App struct {
+	Class  Class  `json:"class"`
+	Detail string `json:"detail,omitempty"`
+	// Looked is the directory that was looked at for the app's data: a
+	// report that says "no data yet" says where.
+	Looked   string    `json:"looked"`
+	Snapshot *Snapshot `json:"snapshot,omitempty"`
+	Items    []Item    `json:"items,omitempty"`
+	// LastOK is the newest run that ended OK, and LastSnapshot the
+	// newest that made a snapshot at all, each carried from record to
+	// record. An app with a LastSnapshot has been backed up: its data
+	// going missing is never "not deployed yet".
+	LastOK       *Snapshot `json:"last_ok,omitempty"`
+	LastSnapshot *Snapshot `json:"last_snapshot,omitempty"`
+	// RestoreProven is the last restore drill that fetched a snapshot,
+	// handed it over and read it whole; RestoreDrill is the last drill
+	// that proved nothing, until one does. Both are carried from record
+	// to record: a backup run does not unprove a restore.
+	RestoreProven *Drill `json:"restore_proven,omitempty"`
+	RestoreDrill  *Drill `json:"restore_drill,omitempty"`
+}
+
+// Drill is one restore drill of one snapshot: when, and — where it
+// proved nothing — why.
+type Drill struct {
+	Snapshot Snapshot  `json:"snapshot"`
+	Time     time.Time `json:"time"`
+	Detail   string    `json:"detail,omitempty"`
+}
+
+// Check is one check of the repository itself: its structure, and one
+// group of its data — a fifty-second, the one after the last read, so
+// that fifty-two checks read every pack once.
+type Check struct {
+	Time time.Time `json:"time"`
+	// Group is which fifty-second of the data was read, "n/52".
+	Group  string     `json:"group"`
+	Class  CheckClass `json:"class"`
+	Detail string     `json:"detail,omitempty"`
+}
+
+// CheckClass is what a check of the repository found, in the words a
+// status report uses. Only CheckClean is a repository known sound.
+type CheckClass string
+
+const (
+	// CheckClean: restic read the structure and the group of data, and
+	// said it found nothing wrong.
+	CheckClean CheckClass = "clean"
+	// CheckDamaged: restic said it found something wrong, and the
+	// repository answered both before and after it: not a check that
+	// lost the storage half way.
+	CheckDamaged CheckClass = "damaged"
+	// CheckUnreachable: the storage did not answer in time, or refused
+	// the key — restic's exit 1, which says no more than that.
+	CheckUnreachable CheckClass = "unreachable"
+	// CheckNoRepository: the storage answered, and holds no repository
+	// there (exit 10).
+	CheckNoRepository CheckClass = "no repository"
+	// CheckWrongPassword: the repository is there, and the password does
+	// not open it (exit 12).
+	CheckWrongPassword CheckClass = "wrong password"
+	// CheckFailed: anything else — a unit that could not be set up, one
+	// ended by a signal, an answer that could not be believed.
+	CheckFailed CheckClass = "failed"
+)
+
+// Status is the whole file.
+type Status struct {
+	Started  time.Time `json:"started"`
+	Finished time.Time `json:"finished"`
+	// Error is why the run ended early; the apps it did not reach are
+	// NotRun.
+	Error string `json:"error,omitempty"`
+	// Warning is something the run got past and a person should know.
+	Warning string          `json:"warning,omitempty"`
+	Root    string          `json:"root,omitempty"`
+	Apps    map[string]*App `json:"apps"`
+	// LastDrill is when a drill last ran, and — where it could not
+	// drill anything — why; each app's own verdict is on the app.
+	LastDrill *Drill `json:"last_drill,omitempty"`
+	// LastCheck is the last check of the repository that came to a
+	// verdict, which the weekly drill makes after its apps. An
+	// interrupted check comes to none, and leaves the one before.
+	LastCheck *Check `json:"last_check,omitempty"`
+	// CheckNext is the group of the data the next check reads: the one
+	// after a clean check's, and after any other verdict the same group
+	// again — damage, until a check of it is clean. None, before a first
+	// check comes to a verdict: that one reads its ISO week's.
+	CheckNext string `json:"check_next,omitempty"`
+	// CheckSince is when the first drill that checks the repository ran
+	// on this record: with no check come to a verdict eight days after,
+	// status is unhealthy, however recent the last drill.
+	CheckSince *time.Time `json:"check_since,omitempty"`
+	// Listed is when a run last listed the repository and was answered.
+	// A listing that failed leaves it, and every Seen, as they were.
+	Listed *time.Time `json:"listed,omitempty"`
+	// Unlisted is since when every listing a run tried has gone
+	// unanswered, or been answered in a way not to be believed; none,
+	// once one is answered.
+	Unlisted *time.Time `json:"unlisted,omitempty"`
+}
+
+// Text makes a string from a unit fit to print and to keep: no control
+// characters (a terminal reads escapes in them), and no longer than a
+// line. A unit's words are the app's words, where the unit handled the
+// app's bytes.
+func Text(s string) string {
+	s = Clean(s)
+	if r := []rune(s); len(r) > 300 {
+		s = strings.TrimSpace(string(r[:300])) + "…"
+	}
+	return s
+}
+
+// Clean is Text without the cut, for what is bounded already — a
+// warning each part of which was cut as it was written, a list of the
+// Caddyfile's own app names — and is lost at its end when cut again.
+func Clean(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s))
+}
+
+// Short is an id — a snapshot's, a repository's — as it is printed: its
+// first eight characters. A record is root's, and still nothing of it
+// reaches a terminal unlooked at.
+func Short(id string) string { return fmt.Sprintf("%.8s", Clean(id)) }
+
+// When is a time as it is printed: to the minute, in UTC — the zone the
+// record and every restic unit keep — whatever zone it was read in.
+func When(t time.Time) string { return t.UTC().Format("2006-01-02 15:04 MST") }
+
+// Read returns the last status, or an empty one when no run has
+// written any.
+func Read(path string) (*Status, error) {
+	raw, err := os.ReadFile(path) //nolint:gosec // a constant path under the state dir, root-owned
+	if errors.Is(err, fs.ErrNotExist) {
+		return &Status{Apps: map[string]*App{}}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	s := new(Status)
+	if err := json.Unmarshal(raw, s); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if s.Apps == nil {
+		s.Apps = map[string]*App{}
+	}
+	return s, nil
+}
+
+// Write replaces the file atomically; it is world-readable, which is
+// why nothing secret goes in it.
+func Write(path string, s *Status) error {
+	raw, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".status-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) //nolint:errcheck // gone already when the rename succeeded
+	if _, err := tmp.Write(append(raw, '\n')); err != nil {
+		tmp.Close() //nolint:errcheck,gosec // the write error is the one reported
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close() //nolint:errcheck,gosec // as above
+		return err
+	}
+	// To the disk before it takes the old one's place, and the rename
+	// after it: a power cut leaves the old record or the new, not an
+	// empty file.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close() //nolint:errcheck,gosec // as above
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close() //nolint:errcheck // read-only
+	return dir.Sync()
+}

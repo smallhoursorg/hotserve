@@ -188,6 +188,10 @@ see during the restart, and how to pick a quiet moment for it.
   step 4) reaches an app only at its next launch; after patching, push
   a commit to each app or reboot
   ([Upgrading](upgrading.md#patching-the-host)).
+- **Backups:** the package ships `hotserve-backup` and its timers;
+  setting them up, checking on them and restoring are
+  [Backups](backups.md), which says first
+  [who runs which](backups.md#who-runs-these).
 - **Everything else:** [liveswap/README.md](../liveswap/README.md) is the
   reference for every option, status code and edge.
 

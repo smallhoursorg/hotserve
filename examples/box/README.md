@@ -35,7 +35,8 @@ file only if:
 - a key the box's own Caddyfile lists signed that commit and every
   commit between it and the one the box runs (`signer` lines);
 - the file is the one in that commit, for this box's host and path;
-- hotserve validates it.
+- hotserve validates it, and so does `hotserve-backup validate` on a
+  box with backups installed.
 
 Then the box swaps the file in and reloads. A reload that fails puts
 the previous file back. The run prints what happened:
@@ -269,6 +270,10 @@ The run prints the box's reason; it changed nothing. The common ones:
   baseline <sha>` as root on the box.
 - **A run says "superseded"**: a later run already brought the box
   past this commit. Nothing is wrong.
+- **`hotserve-backup validate:`**, on a box with backups installed: the
+  file declares something a backup run could not plan from, such as a
+  `root` or a backup path written with a `{$NAME}`, and the reason
+  names it. Change the file and push again.
 
 ## At 3am
 
@@ -431,6 +436,11 @@ Whoever can get a signed commit onto `main` can read these files
 anyway: one site in the Caddyfile serves any file the `hotserve` user
 can read, env files included. A signer's key is the Caddyfile, and the
 Caddyfile is every app's secrets.
+
+The backup repository's credential is not one of these and never rides
+this channel: `hotserve-backup setup` keeps it at
+`/etc/hotserve-backup/repository.env`, root's alone, which the
+`hotserve` user cannot read.
 
 The rest is on hotserve's [Secrets](https://github.com/smallhoursorg/hotserve/blob/main/docs/secrets.md)
 page: who can read a value, adding or removing a person (removing one

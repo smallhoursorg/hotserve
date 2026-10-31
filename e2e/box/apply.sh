@@ -400,6 +400,32 @@ X=$(commit alice "$work/fbad")
 push "$X"
 refused "a config hotserve validate rejects" "hotserve validate:"
 
+# A backup declaration is validated as every line is: one that names a
+# sibling's shared dir is refused at step 6. The refusal quotes Caddy's
+# error line within the 300-byte bound, which ends before the path:
+# Caddy's line leads with each module it was provisioning, in an order
+# that differs from run to run (its servers are a map). So the reason
+# is checked on the file itself.
+sed 's#files  uploads#files  ../../deno-example/shared#' "$work/f2" >"$work/fbackup"
+cmp -s "$work/f2" "$work/fbackup" && fail "the box's file has no \`files  uploads\` line to break"
+# Caddy logs the error as JSON off a terminal, its quotes escaped.
+hotserve validate --adapter caddyfile --config "$work/fbackup" 2>&1 | grep -qE 'backup files \\?"\.\./\.\./deno-example/shared\\?": the path reaches outside' \
+	&& pass "fixture: hotserve validate refuses the file for the backup path" || fail "fixture: hotserve validate does not refuse the file for the backup path"
+BK=$(commit alice "$work/fbackup")
+push "$BK"
+refused "a backup path outside the app's shared dir" "hotserve validate:"
+# A root from the environment is one a backup run, which reads the
+# Caddyfile without hotserve's environment, cannot know: hotserve
+# accepts it, and step 6's hotserve-backup validate refuses it, naming
+# the variable. (Box apply 9b makes the same change to the box's file on
+# a box where hotserve-backup is not installed.)
+# shellcheck disable=SC2016 # the Caddyfile's own {$NAME}, not the shell's
+sed 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' "$work/f2" >"$work/fenvroot"
+grep -qF '{$LIVESWAP_ROOT:' "$work/fenvroot" || fail "the box's file has no root line to make a variable"
+ER=$(commit alice "$work/fenvroot")
+push "$ER"
+refused "a root from the environment, for backups" "hotserve-backup validate: hotserve-backup: the liveswap root or a backup path depends on the environment variable(s) LIVESWAP_ROOT"
+
 # The door: this box's server listens on 8443, and the push arrived
 # there; a file that moves it validates and would load, and is refused
 # by the compare with the loaded server's addresses.
@@ -495,6 +521,36 @@ cmp -s "$LIVE" "$work/live" && pass "the live file is the running config again" 
 settled "rollback"
 
 echo "=== box apply 5: a console edit is reported, and the next push reinstalls the commit ==="
+# A console edit can import what a push cannot. Here the demo app's
+# backup block comes from a snippet defined outside /etc/hotserve, which
+# a backup run's view does not hold, so that app would not be backed up
+# while every run said ok: hotserve reload refuses it, and the running
+# config goes on. A start is never refused for it — every site would
+# be down — and says why.
+mkdir -p /srv/outside
+printf '(bk) {\n\tbackup {\n\t\tsqlite demo.db\n\t\tfiles  uploads\n\t}\n}\n' >/srv/outside/bk.caddy
+chmod 0644 /srv/outside/bk.caddy
+{ echo "import /srv/outside/bk.caddy"; awk '/^			backup \{$/ { print "			import bk"; skip = 1; next } skip && /^			\}$/ { skip = 0; next } !skip' "$work/f1"; } >"$work/foutside"
+grep -q "import bk" "$work/foutside" || fail "the box's file has no backup block to move"
+cat "$work/foutside" >"$LIVE"
+since=$(date +%s)
+systemctl reload hotserve >"$work/out" 2>&1 && fail "systemctl reload took a backup declared outside /etc/hotserve" || pass "a reload of it is refused"
+journalctl -u hotserve --since "@$since" --no-pager -o cat | grep -qF "read from /srv/outside/bk.caddy, outside /etc/hotserve" \
+	&& pass "and the journal says why" || fail "the journal does not say why the reload was refused"
+[ "$(served 8180)" = v1 ] && pass "and the running config goes on serving" || fail "after the refused reload: '$(served 8180)'"
+# (Meanwhile the box's GET / answers 500: its walk refuses the import in
+# the file it runs. So the start is watched on the demo site, and the
+# box is asked again once the file is mended.)
+systemctl restart hotserve
+i=0
+until [ "$(served 8180)" = v1 ] || [ "$i" -ge 60 ]; do i=$((i + 1)); sleep 0.5; done
+[ "$(served 8180)" = v1 ] && pass "a start with it serves all the same" || fail "after a start: '$(served 8180)'"
+journalctl -u hotserve --since "@$since" --no-pager -o cat | grep -q "served all the same" \
+	&& pass "and says why it is wrong, in the journal" || fail "the start said nothing of the backup"
+cat "$work/f1" >"$LIVE"
+systemctl reload hotserve && pass "with the backup back in the file, a reload is taken" || fail "the reload after mending it"
+ready && pass "and the box answers again" || fail "the box does not answer after the mend: $CODE $(resp | head -c 300)"
+rm -rf /srv/outside
 printf '\n# edited at the console\n' >>"$LIVE"
 systemctl reload hotserve
 bundle "$C1" "$C1"
@@ -793,6 +849,28 @@ if runuser -u admin -- hotserve box describe /dev/stdin <"$work/example" >"$work
 else
 	fail "hotserve box describe on the template: $(cat "$work/out")"
 fi
+
+echo "=== box apply 9b: where hotserve-backup is not installed, step 6 does not ask it ==="
+# Box apply 3's root from the environment, which hotserve-backup
+# validate refused: with no hotserve-backup on the box, the same change
+# is applied (access(X_OK)'s "not installed").
+# shellcheck disable=SC2016 # the Caddyfile's own {$NAME}, not the shell's
+sed -i 's#root /var/lib/liveswap#root {$LIVESWAP_ROOT:/var/lib/liveswap}#' "$repo/$FILE"
+grep -qF '{$LIVESWAP_ROOT:' "$repo/$FILE" || fail "the box's file has no root line to make a variable"
+# A root from the environment is refused only where an app declares a
+# backup: with none, this would apply whatever step 6 asked. So the
+# file is first held to what step 6 would ask, with the binary there.
+/usr/bin/hotserve-backup validate "$repo/$FILE" >"$work/out" 2>&1 \
+	&& fail "fixture: hotserve-backup validate takes the file, so 9b would prove nothing" \
+	|| { grep -q 'LIVESWAP_ROOT' "$work/out" && pass "fixture: hotserve-backup validate refuses the file, naming the variable" || fail "fixture: hotserve-backup validate refused the file for another reason: $(cat "$work/out")"; }
+NB=$(commit_index alice "root from the environment, on a box without backups")
+mv /usr/bin/hotserve-backup /usr/bin/hotserve-backup.aside
+template_apply "$NB"
+applied=$?
+mv /usr/bin/hotserve-backup.aside /usr/bin/hotserve-backup
+[ "$applied" = 0 ] && [ "$(baseline)" = "$NB" ] \
+	&& pass "with no hotserve-backup on the box, the push is applied" || fail "push without hotserve-backup: $(cat "$work/tout")"
+settled "no backups"
 
 echo "=== box apply 10: the path unit never spun ==="
 [ "$(systemctl is-active hotserve-box-apply.path)" = active ] \

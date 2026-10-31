@@ -1,0 +1,44 @@
+## bob edits the block in (sudoedit /etc/hotserve/Caddyfile; done here with sed under sudo):
+bob@box1:~$ sudo sed -i "s|^\t\tapp demo {$|&\n\t\t\tbackup {\n\t\t\t\tsqlite app.db\n\t\t\t\tfiles  uploads\n\t\t\t}|" /etc/hotserve/Caddyfile; grep -c "sqlite app.db" /etc/hotserve/Caddyfile
+^@1
+[exit 0, 0.0349131s, 2026-10-05T18:01:41Z]
+bob@box1:~$ hotserve validate --config /etc/hotserve/Caddyfile 2>&1 | tail -2
+{"level":"info","ts":1791223301.895461,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x6821f3c37b80"}
+Valid configuration
+[exit 0, 0.0395691s, 2026-10-05T18:01:41Z]
+bob@box1:~$ hotserve-backup validate /etc/hotserve/Caddyfile
+a run would back up demo, under /var/lib/liveswap
+[exit 0, 0.0390863s, 2026-10-05T18:01:42Z]
+bob@box1:~$ sudo systemctl reload hotserve
+[exit 0, 0.077723s, 2026-10-05T18:01:42Z]
+bob@box1:~$ sudo systemctl start hotserve-backup.service
+[exit 0, 4.59731s, 2026-10-05T18:01:46Z]
+bob@box1:~$ hotserve-backup status
+last run 2026-10-05 18:01 UTC
+the repository has not been checked yet: the weekly drill checks it
+demo: ok: last complete backup 2026-10-05 18:01 UTC, snapshot 4468dd01 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-05 18:01 UTC, snapshot 4468dd01
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0243106s, 2026-10-05T18:01:47Z]
+bob@box1:~$ sudo hotserve-backup restore demo --to /root/demo-restored
+demo: restored from snapshot 4468dd01 of 2026-10-05 18:01 UTC into /root/demo-restored: sqlite app.db, files uploads
+[exit 0, 2.25819s, 2026-10-05T18:01:49Z]
+bob@box1:~$ sudo hotserve-backup restore demo
+demo: restore snapshot 4468dd01, made 2026-10-05 18:01 UTC, into /var/lib/liveswap/demo/shared?
+What is there is backed up first. Its databases are then replaced and its files overwritten; what the snapshot does not hold is left.
+Type the app's name, demo, to go on: demo
+demo: backed up first: snapshot f638fb14 (restore --snapshot f638fb14 puts back what was there)
+demo: restored from snapshot 4468dd01 of 2026-10-05 18:01 UTC into /var/lib/liveswap/demo/shared: sqlite app.db, files uploads
+[exit 0, 3.83043s, 2026-10-05T18:01:53Z]
+bob@box1:~$ sudo hotserve-backup drill
+demo: restore proven: snapshot 4468dd01, on 2026-10-05 18:01 UTC
+repository: its structure, and data group 41/52: clean
+[exit 0, 3.36748s, 2026-10-05T18:01:56Z]
+bob@box1:~$ hotserve-backup status
+last run 2026-10-05 18:01 UTC
+last drill 2026-10-05 18:01 UTC
+repository last checked 2026-10-05 18:01 UTC: its structure, and data group 41/52: clean
+demo: ok: last complete backup 2026-10-05 18:01 UTC, snapshot 4468dd01 (data at /var/lib/liveswap/demo/shared)
+demo: restore last proven: 2026-10-05 18:01 UTC, snapshot 4468dd01
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0242643s, 2026-10-05T18:01:56Z]
