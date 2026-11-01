@@ -1,0 +1,34 @@
+bob@box1:~$ sudo hotserve-backup setup s3:https://s3.docs.test:9000/box1
+account hotserve-backup: present
+no app declares a backup yet: a run would back nothing up
+Storage key id (AWS_ACCESS_KEY_ID): BOXKEYID0000
+Storage secret key (AWS_SECRET_ACCESS_KEY): 
+looking for a repository at s3:https://s3.docs.test:9000/box1 (up to 10s)
+no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made with the password shown next
+Repository password (new): <52 characters>
+Store it off the box now, with the repository URL, s3:https://s3.docs.test:9000/box1, and the storage key: with those three, `restic -r <url>` reads every backup from any machine; without the password nothing can.
+Type stored to go on: stored
+repository ready: s3:https://s3.docs.test:9000/box1 (new, id cff1d334)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: declare a backup in an app's Caddyfile block (liveswap/README.md); the hourly timer backs it up from then on, or sudo systemctl start hotserve-backup.service runs one now
+[exit 0, 13.272s, 2026-10-05T18:01:31Z]
+53
+bob@box1:~$ hotserve-backup status
+no run yet: pending first run
+no unit of a run, a restore or a drill is running
+[exit 0, 0.025157s, 2026-10-05T18:01:31Z]
+bob@box1:~$ sudo systemctl start hotserve-backup.service
+[exit 0, 0.149069s, 2026-10-05T18:01:31Z]
+bob@box1:~$ hotserve-backup status
+last run 2026-10-05 18:01 UTC
+no app declares a backup; nothing is backed up
+the repository has not been checked yet: the weekly drill checks it
+no unit of a run, a restore or a drill is running
+[exit 0, 0.0249331s, 2026-10-05T18:01:31Z]
+bob@box1:~$ journalctl -u hotserve-backup.service --no-pager -o cat | tail -5
+hotserve-backup.service - hotserve backup run skipped, unmet condition check ConditionPathExists=/etc/hotserve-backup/repository.env
+Starting hotserve-backup.service - hotserve backup run...
+no app declares a backup; nothing was backed up
+hotserve-backup.service: Deactivated successfully.
+Finished hotserve-backup.service - hotserve backup run.
+[exit 0, 0.0238495s, 2026-10-05T18:01:31Z]

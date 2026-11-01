@@ -292,6 +292,7 @@ resolved at config load.
 | `deploy_log_lines` | `40` | How many of the app's last journal lines a failed deploy's response carries (see [Webhook API](#webhook-api)); `0` keeps the app's output on the box (no tail, and no health probe body). At most 1000, and 8 KiB whatever the count |
 | `max_artifact_size` | `100MB` | Download cap; decompressed cap is 10× |
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
+| `backup { … }` | — | Declares what under the app's `shared/` is worth backing up: `sqlite` names database files, `files` names files and directories (`.` is all of `shared/`). See [Declaring backups](#declaring-backups) |
 | `memory_max` | none | RAM for every unit of the app, e.g. `512MB` (at least `1MB`); at it the kernel kills the process that asked, the unit fails and the watchdog restarts the app. No swap under it. See [Resource caps](#resource-caps) |
 | `tasks_max` | none (the user manager's own default, 15% of threads-max) | Threads and processes of every unit of the app; past it a fork or thread fails with EAGAIN. The unit's sleeping sibling (below, "worker trees never outlive it") is one of them, so the app itself gets one fewer and the least you can set is 2. Removing it on a reload puts the running unit back on the manager's default, where that default can be read; otherwise the unit keeps the cap until its next launch, and the journal says so |
 | `cpu_quota` | none | CPU time for every unit of the app, in percent of one CPU: `200%` is two CPUs' worth, at most `100000%`; past it the app waits, nothing is killed |
@@ -316,6 +317,86 @@ compressed tarball that has to fit `max_artifact_size`. A million tiny
 files fit the byte budget comfortably; refusing those is the entry
 cap's job.
 
+### Declaring backups
+
+```
+app blog {
+	command ./server
+	backup {
+		sqlite app.db
+		files  uploads
+	}
+}
+```
+
+The block is a declaration: hotserve checks it when the config loads
+— so `hotserve validate` refuses a bad one — and does nothing else
+with it. Nothing in the server reads, copies or schedules anything
+because of it.
+
+Paths are relative to the app's `shared/` and take no placeholders
+(`{shared_dir}/app.db` is written `app.db`). Each line takes one or
+more paths and may repeat. A path is refused when it is empty, is
+absolute, is not clean (`./`, `..`, a doubled or trailing `/`), reaches outside
+`shared/`, holds a control character or is not UTF-8, is longer than
+400 bytes (sqlite3 does not open a path past its own limit as itself),
+or is declared twice. A `sqlite` path names one file,
+never `.`.
+
+A database may sit inside a `files` path — `files .` with `sqlite
+app.db` is "everything, and this one is a database". Two `files`
+paths may not contain one another, nothing may be declared under a
+database's path, and a database's own `-wal`, `-shm` and `-journal`
+are part of it: neither they nor anything under their names is
+declared.
+
+An app that declares a backup needs a literal `root`: with `root
+{env.X}` the config is refused, naming the app. Without a `backup`
+block, a placeholder `root` loads.
+
+The Caddyfile's own `{$VAR}` is not caught: it is substituted in the
+text wherever the file is adapted, before hotserve is given the
+config, so the result depends on the environment of whoever adapts
+it. Do not write `root` or a backup path with one in a config that
+declares a backup.
+
+Where a backup is declared matters as much as what. A backup run
+(`hotserve-backup`) reads the Caddyfile inside a view that holds the
+Caddyfile's own directory and nothing else, as an account that owns
+nothing there: an app whose `app` line, `backup` block or `root` it
+cannot read there is not in its plan, and is not backed up. So once
+any app declares a backup, `hotserve validate` and `hotserve reload`
+refuse a Caddyfile in which one of those was read from a file outside
+its directory — an import, or the file a snippet is defined in — or
+from a file others may not read, or under a directory others may not
+enter — a link is followed to where it leads. A refused reload leaves
+the running config serving. `hotserve run` is never refused for it — a
+start that refused would take every site down — and logs the same
+error instead. `hotserve validate` of any file but
+`/etc/hotserve/Caddyfile` does not ask that file for its own mode or
+the directories on its way: a candidate is not the file a run reads
+(the box applier's step 6 validates a copy it staged `0600` in a
+directory of its own), and the reload asks them of the file installed.
+What a candidate imports is asked, and so is every directory from the
+candidate's own down to it.
+
+hotserve-backup reads one Caddyfile, `/etc/hotserve/Caddyfile`. Where
+it is installed (`/usr/bin/hotserve-backup`), `hotserve reload` of any
+other Caddyfile that declares a backup is refused as well: the server
+would run what no backup run reads, and an app only in it would never
+be backed up. The refusal names `hotserve-backup validate <file>` for a
+look at what a backup run would make of it, and `/etc/hotserve/Caddyfile`
+as where to put it (a signed push does). Where hotserve-backup is not
+installed, it is a warning. `hotserve validate` of a candidate file —
+step 6 validates a staged copy before the applier puts it in place — is
+not asked; `hotserve run` logs it and serves.
+
+The check adapts the Caddyfile in the environment the command was
+started in. It does not load `--envfile` first, as Caddy's own
+`validate` and `run` do: a `{$NAME}` set only there, in an import's
+path, is judged here as unset. The packaged service passes no
+`--envfile`, and `hotserve-backup` refuses an import whose path depends
+on a variable.
 ### Resource caps
 
 `memory_max`, `tasks_max` and `cpu_quota` bound every unit of the app —

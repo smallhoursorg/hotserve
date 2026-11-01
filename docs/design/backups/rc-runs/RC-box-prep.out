@@ -1,0 +1,9 @@
+Setting up restic (0.18.0-1+b4) ...
+Setting up hotserve (0.3.0~rc1) ...
+Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:
+  sudo hotserve-backup setup <repository>
+Setting up sqlite3 (3.46.1-7+deb13u2) ...
+wrote private key /etc/hotserve/deploy.key (0600) and public key /etc/hotserve/deploy.key.pub
+deploy: 200
+a run would back up demo, under /var/lib/liveswap
+box ready: Version: 0.3.0~rc1, restic 0.18.0, hotserve uid 996

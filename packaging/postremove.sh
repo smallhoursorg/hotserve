@@ -6,15 +6,18 @@
 # here: postinstall's `configure` reloads the manager.
 #
 # remove, and the purge that follows one: the manager drops the removed
-# unit files (hotserve.service, hotserve-box-apply.path and .service),
-# and the path unit is masked, as dh_installsystemd has it, so that
-# nothing of it comes back until an install unmasks and enables it
-# (postinstall.sh).
+# unit files (hotserve.service, hotserve-box-apply.path and .service,
+# hotserve-backup's two services and two timers), and the path unit and
+# the backup timers are masked, as dh_installsystemd has it, so that
+# nothing of them comes back until an install unmasks and enables them
+# (postinstall.sh). The persistent timers' stamps go too: with them,
+# and the credential file kept, a reinstall reads a run and a drill as
+# missed and catches up inside the install [M68].
 #
 # purge, on top of that — what the package made and nothing else holds:
 #
-# - the path unit's enable state (deb-systemd-helper purge), then the
-#   mask, in debhelper's order;
+# - the path unit's and the timers' enable state (deb-systemd-helper
+#   purge), then the masks, in debhelper's order;
 # - /etc/hotserve/Caddyfile, when it is a regular file (a symlink is
 #   never followed, and is kept, named), and postinstall's temporaries
 #   beside it; /etc/hotserve itself only once it is empty. The box's
@@ -28,25 +31,45 @@
 #   in/, work/, out/, the transaction record, applied.json): the
 #   package's own, and the Caddyfile it protected is gone by then. Not
 #   where anything is mounted at or under it: an rm there would remove
-#   through the mount, so the tree is kept whole, and named.
+#   through the mount, so the tree is kept whole, and named;
+# - /etc/hotserve-backup/repository.env is KEPT, and said: it holds the
+#   repository password, the one way to read the backups already made
+#   (PLAN D6). Whoever purges the package decides about the backups;
+# - /var/lib/hotserve-backup: the record, the repository id and the
+#   listing's stderr go; staging/ and restore/ are removed with rmdir,
+#   never rm -r — a directory that is not empty holds copies of an
+#   app's data that a killed run left, which root does not delete
+#   (backups/README.md, "Who runs as what": root never reads or removes
+#   app data) — and is named and kept;
+# - /var/cache/hotserve-backup, restic's cache, owned by the account and
+#   holding nothing of an app's, goes;
+# - /run/hotserve-backup: what a killed command left there — its units,
+#   its mounts of an app's data — preremove had the engine sweep at the
+#   remove, while the program was there. On purge the run directory's
+#   own files go (the lock, the list of units), and its directories by
+#   rmdir alone: nothing is removed where anything is mounted at or
+#   under it, or where what is mounted cannot be read — an rm there
+#   would remove an app's files through the mount [measured in #153].
 #
-# Both of those under root's lock, /var/lib/hotserve-box/lock: a run of
-# the applier holds it for its whole run and swaps the Caddyfile under
-# it (box/apply.go, lock), and preremove stops the path unit, not a run
-# under way (box/DESIGN-box.md, "The applier unit"), so a run could
-# otherwise put a Caddyfile back after this script removed it. The lock
-# is taken here before either removal and held through both, waiting
-# up to 30s for a run — one is seconds (validate, swap, reload), so the
-# wait covers many — and where it is still held, both are kept, named.
-# Nothing starts a new run by then: the path unit is stopped and the
-# program is gone. The lock file is opened only where it exists (a tree
-# no run has used has none) and never made here.
+# The Caddyfile and the exchange tree under root's lock,
+# /var/lib/hotserve-box/lock: a run of the applier holds it for its
+# whole run and swaps the Caddyfile under it (box/apply.go, lock), and
+# preremove stops the path unit, not a run under way (box/DESIGN-box.md,
+# "The applier unit"), so a run could otherwise put a Caddyfile back
+# after this script removed it. The lock is taken here before either
+# removal and held through both, waiting up to 30s for a run — one is
+# seconds (validate, swap, reload), so the wait covers many — and where
+# it is still held, both are kept, named. Nothing starts a new run by
+# then: the path unit is stopped and the program is gone. The lock file
+# is opened only where it exists (a tree no run has used has none) and
+# never made here.
 #
 # Never: /var/lib/hotserve (Caddy's state: TLS certificates) and
 # /var/lib/liveswap (the deployed apps' releases and data) — root does
 # not delete what an app or an operator put there; dpkg removes either
 # only when it is empty, as any directory a package shipped. The
-# hotserve account stays: system accounts are never removed.
+# hotserve and hotserve-backup accounts stay: system accounts are never
+# removed.
 #
 # Every step is best-effort: a postrm that exits non-zero leaves dpkg
 # with a package it can neither configure nor remove, so each failure
@@ -56,6 +79,8 @@ unit=hotserve-box-apply.path
 config=/etc/hotserve/Caddyfile
 record_dir=/var/lib/hotserve-package
 box=/var/lib/hotserve-box
+timers="hotserve-backup.timer hotserve-backup-drill.timer"
+run=/run/hotserve-backup
 
 # mounted <dir>: something is mounted at or under it, or the answer
 # cannot be had (then nothing is removed either). The mount table names
@@ -79,27 +104,37 @@ mounted() {
 }
 
 # The removed unit files out of the manager, where systemd is PID 1;
-# in a chroot or an image build there is no manager to reload.
+# in a chroot or an image build there is no manager to reload. And
+# the backup timers' stamps (header).
 case "${1:-}" in
 remove | purge)
 	if [ -d /run/systemd/system ]; then
 		systemctl --system daemon-reload >/dev/null 2>&1 || true
 	fi
+	for u in $timers; do
+		rm -f "/var/lib/systemd/timers/stamp-$u"
+	done
 	;;
 esac
 
 case "${1:-}" in
 remove)
-	# The mask lands only once the unit file is gone, which it is
-	# here; postinstall's unmask takes it off again.
+	# The masks land only once the unit files are gone, which they are
+	# here; postinstall's unmask takes them off again.
 	if [ -x /usr/bin/deb-systemd-helper ]; then
 		deb-systemd-helper mask "$unit" >/dev/null || true
+		# shellcheck disable=SC2086 # two unit names
+		deb-systemd-helper mask $timers >/dev/null || true
 	fi
 	;;
 purge)
 	if [ -x /usr/bin/deb-systemd-helper ]; then
 		deb-systemd-helper purge "$unit" >/dev/null || true
 		deb-systemd-helper unmask "$unit" >/dev/null || true
+		# shellcheck disable=SC2086 # two unit names
+		deb-systemd-helper purge $timers >/dev/null || true
+		# shellcheck disable=SC2086
+		deb-systemd-helper unmask $timers >/dev/null || true
 	fi
 	# Root's lock, where a run could hold it (header). Read-only: flock
 	# needs no write, and the mode and owner of what a run made stay.
@@ -145,6 +180,82 @@ purge)
 			rm -rf --one-file-system "$box" \
 				|| echo "hotserve: could not remove all of $box; what is left is in it, named above" >&2
 		fi
+	fi
+	rm -rf /var/cache/hotserve-backup || echo "hotserve: could not remove /var/cache/hotserve-backup; remove it yourself" >&2
+	state=/var/lib/hotserve-backup
+	if [ -d "$state" ]; then
+		# The record, its asides, the id, the listing's stderr, and the
+		# temp files their writers leave when killed mid-write: the
+		# record's, and setup's of the id.
+		rm -f "$state/status.json" "$state"/status.json.aside-* "$state"/.status-* "$state/repository-id" "$state/repository-id.new" "$state/listing.err" \
+			|| echo "hotserve: could not remove all of what hotserve-backup recorded in $state; remove it yourself" >&2
+		for d in "$state/staging" "$state/restore"; do
+			[ -d "$d" ] || continue
+			# Empty it of empty per-app directories, then itself; whatever
+			# holds a file stays.
+			for a in "$d"/*; do [ -d "$a" ] && rmdir "$a" 2>/dev/null || true; done
+			rmdir "$d" 2>/dev/null \
+				|| echo "hotserve: kept $d: not empty — copies of an app's data a backup run or a restore left there; look, then remove them yourself" >&2
+		done
+		# What is kept is said for what it is: the state directory stays
+		# for staging/ and restore/, said above, or for a file this
+		# package did not make — which is no copy of an app's data, and
+		# is not called one.
+		if ! rmdir "$state" 2>/dev/null; then
+			others=$(ls -A "$state" | grep -v -x -e staging -e restore | tr '\n' ' ' | sed 's/ $//')
+			[ -z "$others" ] || echo "hotserve: kept $state: it holds what this package did not make ($others)" >&2
+		fi
+	fi
+	if [ -d "$run" ]; then
+		# A command from a shell killed after the remove's sweep — which
+		# found it holding the lock, and left it — leaves units no service
+		# ends, an upload among them with the credential, and there is no
+		# program left to sweep. Stopped here by the names it recorded,
+		# and only names the engine writes (engine.go, unitNameRe; a test
+		# holds the two together), where nothing holds the lock now
+		# (Copilot on #155).
+		# One that will not stop is said, by name, and the record of it
+		# is kept (Copilot on #155).
+		stuck=""
+		if [ -f "$run/units" ] && [ -d /run/systemd/system ] && { ! command -v flock >/dev/null 2>&1 || flock -n "$run/lock" true 2>/dev/null; }; then
+			while read -r u; do
+				echo "$u" | grep -Eq '^hotserve_backup_[a-z]+[0-9]*(_[a-z0-9-]{1,63})?_[0-9a-f]{12}\.service$' || continue
+				systemctl stop "$u" 2>/dev/null || true
+				# A unit the manager has none of reads "inactive"
+				# [measured]; nothing at all is a manager that did not
+				# answer, which is no "gone" (Copilot on #155).
+				state=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || state=""
+				case "$state" in
+				inactive | failed) systemctl reset-failed "$u" 2>/dev/null || true ;;
+				"")
+					stuck=yes
+					echo "hotserve: $u, which a backup command left running, could not be asked about: the manager did not answer; if it runs, it holds the repository credential (systemctl stop $u)" >&2
+					;;
+				*)
+					stuck=yes
+					echo "hotserve: $u, which a backup command left running, would not stop (it is $state): it holds the repository credential; stop it yourself (systemctl stop $u)" >&2
+					;;
+				esac
+			done <"$run/units"
+		fi
+		if [ -n "$stuck" ]; then
+			echo "hotserve: kept $run: a unit named in $run/units would not stop, or could not be asked about, and that list is its only record" >&2
+		elif mounted "$run"; then
+			echo "hotserve: kept $run: something is mounted at or under it, or what is mounted cannot be read; nothing under it is removed — it is gone at the next boot, and is not to be rm -r'd before" >&2
+		elif [ -f "$run/lock" ] && command -v flock >/dev/null 2>&1 && ! flock -n "$run/lock" true 2>/dev/null; then
+			# A command that holds the run lock — a restore at its prompt
+			# — keeps what is its: the lock, the list of the units it has
+			# started, an init marker. Removed from under it, no sweep
+			# would ever stop those units.
+			echo "hotserve: kept $run: the run lock is held ($(head -1 "$run/lock" 2>/dev/null)); a backup command is under way, and what it keeps there is its own — it is gone at the next boot" >&2
+		else
+			rm -f "$run/lock" "$run/units" "$run/init-unit" || echo "hotserve: could not remove the run lock and unit list in $run" >&2
+			for d in "$run"/*/; do [ -d "$d" ] && rmdir "$d" 2>/dev/null || true; done
+			rmdir "$run" 2>/dev/null || echo "hotserve: kept $run: not empty ($(ls -A "$run" | tr '\n' ' ' | sed 's/ $//')); it is gone at the next boot" >&2
+		fi
+	fi
+	if [ -e /etc/hotserve-backup/repository.env ]; then
+		echo "hotserve: /etc/hotserve-backup/repository.env is kept: it holds the repository password, the only way to read the backups already made. Remove it yourself once those backups are not needed: rm -r /etc/hotserve-backup" >&2
 	fi
 	;;
 *)

@@ -1,0 +1,12 @@
+### apt-config: APT::Install-Recommends "false";
+### apt install ./hotserve_0.3.0.rc1_arm64.deb
+Recommended packages:
+  restic  sqlite3  dbus-user-session
+Setting up libpam-systemd:arm64 (257.13-1~deb13u1) ...
+Setting up hotserve (0.3.0~rc1) ...
+Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:
+  sudo hotserve-backup setup <repository>
+### restic: none; sqlite3: none
+wrote private key /etc/hotserve/deploy.key (0600) and public key /etc/hotserve/deploy.key.pub
+deploy: 200
+/root/prep1.sh: line 56: adduser: command not found

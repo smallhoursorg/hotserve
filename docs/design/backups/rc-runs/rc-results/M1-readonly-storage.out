@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "id": "cff1d3343a06fdf2b8cd599cc5a79fe984d38b73eba4ae28305a5c509f58cd5c",
+  "chunker_polynomial": "3088e22278da1b"
+}
+[exit 0, 0.6s] restic cat config --no-lock
+Save(<lock/17158b971d>) returned error, retrying after 719.559413ms: client.PutObject: Internal Error
+Save(<lock/17158b971d>) returned error, retrying after 2.384995777s: client.PutObject: Internal Error
+Save(<lock/17158b971d>) returned error, retrying after 5.929992234s: client.PutObject: Internal Error
+Save(<lock/17158b971d>) returned error, retrying after 6.62325731s: client.PutObject: Internal Error
+Save(<lock/17158b971d>) returned error, retrying after 16.894387314s: client.PutObject: Internal Error
+[2Ksignal terminated received, cleaning up
+[exit 124, 45.0s] restic cat config
+Save(<lock/b3f1a4907a>) returned error, retrying after 1.224902867s: client.PutObject: Internal Error
+Save(<lock/b3f1a4907a>) returned error, retrying after 2.749238122s: client.PutObject: Internal Error
+Save(<lock/b3f1a4907a>) returned error, retrying after 3.225856157s: client.PutObject: Internal Error
+Save(<lock/b3f1a4907a>) returned error, retrying after 5.786421835s: client.PutObject: Internal Error
+Save(<lock/b3f1a4907a>) returned error, retrying after 8.025964854s: client.PutObject: Internal Error
+[2Ksignal terminated received, cleaning up
+[exit 124, 45.0s] restic list keys
+Load(<lock/556c868f29>, 0, 0) returned error, retrying after 1.345535529s: unexpected EOF
+Load(<lock/556c868f29>, 0, 0) returned error, retrying after 2.947356524s: unexpected EOF
+Load(<lock/556c868f29>, 0, 0) returned error, retrying after 4.593393805s: unexpected EOF
+Load(<lock/556c868f29>, 0, 0) returned error, retrying after 4.616050832s: unexpected EOF
+Load(<lock/556c868f29>, 0, 0) returned error, retrying after 11.683651385s: unexpected EOF
+[2Ksignal terminated received, cleaning up
+[exit 124, 20.0s] restic snapshots --latest 1

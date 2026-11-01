@@ -6,8 +6,8 @@ COMPOSE ?= docker compose
 # the root module — nested modules are excluded from a parent module's
 # pattern even in workspace mode — so test/vet name each module's tree
 # explicitly.
-MODULES ?= . box liveswap penaltybox
-PKGS = ./... ./box/... ./liveswap/... ./penaltybox/...
+MODULES ?= . backups box liveswap penaltybox
+PKGS = ./... ./backups/... ./box/... ./liveswap/... ./penaltybox/...
 
 # Release version: the tag when present (release.yml passes it in),
 # else a digit-leading dev placeholder that deb version rules accept.
@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan usage usage-check build package clean-debs install-test e2e soak e2e-logs clean
+.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan usage usage-check build package clean-debs install-test e2e e2e-backup soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -39,6 +39,12 @@ endef
 # through them; the box applier asks the real systemctl. -p 1: the
 # modules' caddytest suites all pin admin :2999 / http :9080, so their
 # test binaries must not run in parallel.
+# -count=1: these tests hold what systemd, restic and sqlite3 do, and
+# Go's test cache knows none of them — given the same test binary and
+# flags it replays the last result, a pass included, after the program
+# under it has changed [measured: a restic whose stuck-request default
+# changed, its pin "(cached)" and passing]. A new Debian release is
+# exactly such a change.
 test-integration:
 	$(cgroup2_preflight)
 	$(COMPOSE) up --build -d dev-systemd
@@ -46,7 +52,7 @@ test-integration:
 	$(COMPOSE) exec -T dev-systemd /bin/sh /src/test/systemd/ready.sh || status=1; \
 	if [ $$status -eq 0 ]; then \
 		$(COMPOSE) exec -T -e XDG_RUNTIME_DIR=/run/user/0 dev-systemd \
-			go test -race -tags integration -v -run Integration -p 1 ./liveswap/... ./penaltybox/... ./box/... || status=1; \
+			go test -count=1 -race -tags integration -v -run Integration -p 1 ./backups/... ./box/... ./liveswap/... ./penaltybox/... || status=1; \
 	fi; \
 	if [ $$status -ne 0 ]; then $(COMPOSE) exec -T dev-systemd journalctl --no-pager -n 100 || true; fi; \
 	$(COMPOSE) rm -sf dev-systemd >/dev/null; \
@@ -207,7 +213,12 @@ build:
 		git config --global --add safe.directory /src; \
 		GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(GO_LDFLAGS)" -o build/hotserve-linux-amd64 ./cmd/hotserve & p1=$$!; \
 		GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$(GO_LDFLAGS)" -o build/hotserve-linux-arm64 ./cmd/hotserve & p2=$$!; \
-		wait $$p1 || exit 1; wait $$p2 || exit 1; \
+		(cd backups && GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../build/hotserve-backup-linux-amd64 ./cmd/hotserve-backup) & p3=$$!; \
+		(cd backups && GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../build/hotserve-backup-linux-arm64 ./cmd/hotserve-backup) & p4=$$!; \
+		wait $$p1 || exit 1; wait $$p2 || exit 1; wait $$p3 || exit 1; wait $$p4 || exit 1; \
+		if go version -m build/hotserve-backup-linux-amd64 build/hotserve-backup-linux-arm64 | grep -q -- "-tags=.*e2e"; then \
+			echo "build/hotserve-backup-linux-*: built with -tags e2e, which shortens the setup clock for the e2e box: not a binary to ship"; exit 1; \
+		fi; \
 		chmod -R a+rwX build'
 
 # Builds .deb for both arches into dist/. .deb only, and no .apk
@@ -215,29 +226,39 @@ build:
 # fallback runner, so an Alpine/OpenRC package would install a hotserve
 # that serves but refuses any Caddyfile defining an app — see
 # packaging/nfpm.yaml. The packages carry the systemd unit, the starter
-# config (in /usr/share/hotserve) and the data dirs; postinstall creates
-# the hotserve system user and installs the starter at
-# /etc/hotserve/Caddyfile.
+# config (in /usr/share/hotserve) and the data dirs, and hotserve-backup
+# with its two timers; postinstall creates the hotserve and
+# hotserve-backup system users and installs the starter at
+# /etc/hotserve/Caddyfile. Both arches are staged and packaged inside
+# ONE nfpm container: staged on the host between two containers, a
+# binary replaced in place kept its old size in Docker Desktop's
+# bind-mount attribute cache, and nfpm wrote a tar header of the amd64
+# size over the arm64 content ("missed writing 286720 bytes").
 #
 # clean-debs runs before build, so a run that fails anywhere leaves no
 # .deb behind for install-test to certify in place of this one.
 package: clean-debs build
 	mkdir -p dist
-	for a in amd64 arm64; do \
-		cp build/hotserve-linux-$$a build/hotserve; \
-		for f in deb; do \
-			$(COMPOSE) run --rm -e NFPM_ARCH=$$a -e NFPM_VERSION=$(VERSION) nfpm \
-				package -f packaging/nfpm.yaml -p $$f -t dist/ || exit 1; \
+	$(COMPOSE) run --rm --entrypoint sh -e NFPM_VERSION=$(VERSION) nfpm -c '\
+		set -e; \
+		for a in amd64 arm64; do \
+			rm -f build/hotserve build/hotserve-backup; \
+			cp build/hotserve-linux-$$a build/hotserve; \
+			cp build/hotserve-backup-linux-$$a build/hotserve-backup; \
+			for f in deb; do \
+				NFPM_ARCH=$$a nfpm package -f packaging/nfpm.yaml -p $$f -t dist/; \
+			done; \
 		done; \
-	done; \
-	rm -f build/hotserve
+		rm -f build/hotserve build/hotserve-backup'
 
 clean-debs:
 	rm -f dist/hotserve_*.deb
 
 # Installs the freshly built .deb inside a systemd container (DISTRO
 # picks the base image) and runs the staged smoke test: install, unit
-# boot, a real liveswap deploy under the sandbox, reinstall, remove.
+# boot, a real liveswap deploy under the sandbox, the "Set it up" lines
+# of docs/backups.md as an administrator (the page is mounted: the lines
+# run are the lines written), reinstall, remove, purge.
 # Needs dist/ populated first (make package). --privileged +
 # --cgroupns=host with the cgroup mount is the reliable
 # systemd-in-docker recipe on cgroup-v2 hosts (GitHub runners and
@@ -253,6 +274,8 @@ install-test:
 		-v $(CURDIR)/dist:/dist:ro \
 		-v $(CURDIR)/packaging/test/smoke.sh:/smoke.sh:ro \
 		-v $(CURDIR)/liveswap/testdata/sandbox-view.sh:/sandbox-view.sh:ro \
+		-v $(CURDIR)/e2e/backup/tty.sh:/tty.sh:ro \
+		-v $(CURDIR)/docs/backups.md:/docs-backups.md:ro \
 		hotserve-install-test-$(subst :,-,$(DISTRO))
 	docker exec hotserve-smoke /bin/bash /smoke.sh; status=$$?; \
 	if [ $$status -ne 0 ]; then \
@@ -287,6 +310,63 @@ e2e:
 		$(COMPOSE) exec -T e2e-hotserve journalctl --no-pager -n 300 || true; \
 	fi; \
 	$(COMPOSE) down --remove-orphans; \
+	exit $$status
+
+# The backup suite: a box with systemd, Debian's restic and sqlite3, and
+# an S3 server for the repository. Its own target and its own CI job —
+# it shares nothing with the e2e stack, so run beside it, it costs its
+# own length and not the e2e job's. It takes down only its own two
+# services, so it can run beside `make e2e` on one host.
+#
+# Each suite has a box of its own, and they run at once: each seeds its
+# own apps and writes its own credential file for a repository of its
+# own on the one S3 server, so none depends on another's leftovers.
+# Their output is held and printed a suite at a time, in order, with
+# how long each took. Each suite is ended at SUITE_LIMIT, inside its
+# box, so that a wedged one — nothing in a backup has a time limit —
+# still prints what it got to, and its box's journal, well before the
+# CI job's own limit ends everything with nothing printed.
+#
+# The box's two binaries are built first, in the dev container, for
+# this host's arch: its Go caches are the volumes `make build` uses
+# (in CI, ./.cache under actions/cache), where a build inside the
+# image started cold every time. hotserve-backup is built with -tags
+# e2e, which shortens setup's clock alone (backups/engine/
+# setupclock_e2e.go): the package's binary is never built with it,
+# and `make build` refuses one that was.
+BACKUP_SUITES = setup backup units status restore check
+SUITE_LIMIT ?= 600
+e2e-backup:
+	$(cgroup2_preflight)
+	$(COMPOSE) run --rm -e CGO_ENABLED=0 dev sh -c '\
+		go build -trimpath -o build/e2e-backup/hotserve ./cmd/hotserve & p1=$$!; \
+		(cd backups && go build -trimpath -tags e2e -o ../build/e2e-backup/hotserve-backup ./cmd/hotserve-backup) & p2=$$!; \
+		wait $$p1 || exit 1; wait $$p2 || exit 1; \
+		chmod -R a+rwX build'
+	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null
+	$(COMPOSE) up --build -d --scale e2e-backup-box=$(words $(BACKUP_SUITES)) e2e-s3 e2e-backup-box
+	logs=$$(mktemp -d); i=0; \
+	for s in $(BACKUP_SUITES); do \
+		i=$$((i + 1)); \
+		( t0=$$(date +%s); $(COMPOSE) exec -T --index $$i e2e-backup-box timeout $(SUITE_LIMIT) /bin/sh /suite-$$s.sh >$$logs/$$s.log 2>&1; echo "$$? $$(($$(date +%s) - t0))" >$$logs/$$s.rc ) & \
+	done; \
+	wait; \
+	status=0; i=0; \
+	for s in $(BACKUP_SUITES); do \
+		i=$$((i + 1)); \
+		rc=; took=; read rc took <$$logs/$$s.rc || rc=unknown; \
+		echo "════ $$s suite (box $$i, $${took:-?}s) ════"; \
+		cat $$logs/$$s.log; \
+		if [ "$$rc" = 124 ]; then echo "════ $$s suite ended at SUITE_LIMIT ($(SUITE_LIMIT)s) ════"; fi; \
+		if [ "$$rc" != 0 ]; then \
+			status=1; \
+			echo "════ $$s suite failed: box $$i's journal ════"; \
+			$(COMPOSE) exec -T --index $$i e2e-backup-box journalctl --no-pager -n 200 || true; \
+		fi; \
+	done; \
+	if [ $$status -ne 0 ]; then $(COMPOSE) logs --tail 300 e2e-s3; fi; \
+	rm -rf $$logs; \
+	$(COMPOSE) rm -sf e2e-backup-box e2e-s3 >/dev/null; \
 	exit $$status
 
 # Leak-hunting soak against the product binary: deploy/reload/traffic

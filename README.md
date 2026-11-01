@@ -50,13 +50,19 @@ The package also depends on `libpam-systemd`, `dbus` and
 your apps as systemd units under the `hotserve` user's own service
 manager, which needs `pam_systemd` to start and `loginctl` to stay
 alive without a login, and the box checks each config commit's SSH
-signature with `ssh-keygen`.
+signature with `ssh-keygen`. And on `restic` (23 MB), `sqlite3` and
+`ca-certificates`, for [backups](backups/README.md): a box that uses
+none carries the two programs too, so that one whose image installs no
+recommended package (Hetzner's Debian 13) gets them; the CA store is
+what hotserve and restic verify every certificate against.
 
 <details>
 <summary><b>Without the package</b> — the raw binary, for other systemd hosts</summary>
 
 The `hotserve_<version>_linux_<arch>.tar.gz` archives on the same page
-hold the **raw binary** (plus LICENSE and a README), for other systemd
+hold the **raw binary** (plus LICENSE and a README; and
+`hotserve-backup` with its unit files, for [backups](backups/README.md)),
+for other systemd
 hosts you wire up yourself — a NixOS-style distro, say. Prefer the
 packages where you can: going this way you take on what the package
 does for you, all of it in [packaging/](packaging/) (`nfpm.yaml` and
@@ -137,6 +143,10 @@ builds and deploys on every change, so what they say works:
 Both apps serve on the socket hotserve hands them, answer `/health`,
 migrate before each version starts, stop cleanly, and deploy from
 GitHub Actions with no stored secret.
+
+[Backups](docs/backups.md) copies each app's databases and files into a
+bucket off the box every hour, proves weekly that a restore would
+work, and puts an app back.
 
 
 ## What hotserve is (and isn't)

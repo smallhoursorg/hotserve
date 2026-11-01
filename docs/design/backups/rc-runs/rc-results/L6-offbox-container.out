@@ -1,0 +1,49 @@
+## a debian:13 container as the off-box machine: restic alone
+$ apt-get update && apt-get install -y restic
+restic 0.18.0 compiled with go1.24.4 on linux/arm64
+files in /etc/ssl/certs: 0
+dpkg-query: package 'ca-certificates' is not installed and no information is available
+$ restic -r rest:https://example.com/ cat config   (any https storage; stopped after 20 s of its retrying)
+SFatal: unable to open config file: Head "https://:***@example.com/config": tls: failed to verify certificate: x509: certificate signed by unknown authority
+Is there a repository at the following location?
+rest:https://example.com/
+[exit 0]
+$ apt-get install -y restic ca-certificates
+Status: install ok installed
+Fatal: repository does not exist: unable to open config file: <config/> does not exist
+Is there a repository at the following location?
+rest:https://example.com/
+[exit 0]
+## backblaze-b2 and rclone, Debian 13
+b2 command line tool, version 3.19.1
+rclone v1.60.1-DEV
+no b2 on PATH: the program is backblaze-b2
+backblaze-b2 create-key [-h] [--bucket BUCKET] [--name-prefix NAME_PREFIX]
+                        [--duration DURATION] [--all-capabilities]
+                        keyName [capabilities]
+
+backblaze-b2 authorize-account [-h] [applicationKeyId] [applicationKey]
+
+Prompts for Backblaze applicationKeyId and applicationKey (unless they are given
+on the command line).
+
+backblaze-b2 ls [-h] [--long] [--json] [--replication] [--versions] [-r]
+                [--with-wildcard] [--include FILTERS] [--exclude FILTERS]
+                [bucketName] [folderName]
+
+backblaze-b2 delete-key [-h] applicationKeyId
+
+Deletes the specified application key by its ID.
+backblaze-b2 clear-account [-h]
+
+Erases everything in local cache.
+[--replication] [--versions] [-r]
+                [--with-wildcard] [--include FILTERS] [--exclude FILTERS]
+                [bucketName] [folderName]
+
+backblaze-b2 delete-key [-h] applicationKeyId
+
+Deletes the specified application key by its ID.
+backblaze-b2 clear-account [-h]
+
+Erases everything in local cache.

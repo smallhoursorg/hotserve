@@ -33,6 +33,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/dustin/go-humanize"
+	"github.com/smallhoursorg/hotserve/liveswap/backupdecl"
 	"github.com/smallhoursorg/hotserve/liveswap/deploytrust"
 	"go.uber.org/zap"
 )
@@ -253,6 +254,11 @@ type AppConfig struct {
 	// at 75% of it. Default 100000; a CI-built artifact is thousands.
 	MaxArtifactEntries int `json:"max_artifact_entries,omitempty"`
 
+	// Backup declares which paths under the app's shared dir are worth
+	// backing up, and which of them are SQLite databases. It is a
+	// declaration only: hotserve validates it and does nothing else
+	// with it. Its paths take no placeholders. Optional.
+	Backup *backupdecl.Config `json:"backup,omitempty"`
 	// MemoryMax bounds the RAM every unit of the app may use (the
 	// instance and the pre_start alike), in bytes; the Caddyfile
 	// accepts 512MB. At it the kernel kills the process that asked, the
@@ -288,6 +294,11 @@ func (App) CaddyModule() caddy.ModuleInfo {
 // managedApp in the pool.
 func (a *App) Provision(ctx caddy.Context) error {
 	a.logger = ctx.Logger()
+	// Before the root's placeholders are resolved in place, below: the
+	// check is about how the root is written.
+	if err := backupNeedsLiteralRoot(a.Root, a.Apps); err != nil {
+		return err
+	}
 	repl := caddy.NewReplacer()
 
 	// ReplaceKnown resolves {env.*} now but leaves the deploy-time
@@ -472,6 +483,30 @@ func (cfg *AppConfig) applyDefaults(repl *caddy.Replacer) {
 	}
 }
 
+// backupNeedsLiteralRoot refuses a root written with a placeholder
+// when an app declares a backup. A declaration is written for a reader
+// that is not this process, so it has to mean something from the
+// Caddyfile alone: this process's environment is the only thing that
+// resolves {env.*}, it may hold the ACME tokens, and it is not handed
+// to anything else. Only the combination is refused; with no backup
+// block, a placeholder root loads.
+//
+// The Caddyfile's own {$VAR} is out of reach here: the adapter
+// substitutes it in the text before this module is given a root, so a
+// root or a backup path written with one arrives as a literal and
+// passes.
+func backupNeedsLiteralRoot(root string, apps map[string]*AppConfig) error {
+	if !strings.ContainsAny(root, "{}") {
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(apps)) {
+		if cfg := apps[name]; cfg != nil && cfg.Backup != nil {
+			return fmt.Errorf("app %s declares a backup, but root %q is written with a placeholder ({ or }), which only hotserve's own environment can resolve and a backup does not have; write the root as a literal path", name, root)
+		}
+	}
+	return nil
+}
+
 func (a *App) buildSpec(name string, cfg *AppConfig) (*appSpec, error) {
 	healthPath := cfg.HealthPath
 	if healthPath == "off" {
@@ -630,6 +665,11 @@ func (a *App) Validate() error {
 		}
 		if cfg.MaxArtifactEntries < 1 {
 			return fmt.Errorf("app %s: max_artifact_entries must be positive, got %d", name, cfg.MaxArtifactEntries)
+		}
+		if cfg.Backup != nil {
+			if err := cfg.Backup.Validate(); err != nil {
+				return fmt.Errorf("app %s: backup %w", name, err)
+			}
 		}
 		// The Caddyfile refuses these at parse; a JSON config reaches
 		// here directly. 0 is unset for all three; the bounds are the

@@ -1,0 +1,245 @@
+// Package status says, from the record a run leaves and from what the
+// manager says is running, whether the backups are fresh and whether a
+// restore would work. It reads nothing itself and needs no privilege:
+// the record holds no secret, and is for everyone to read.
+package status
+
+import (
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/smallhoursorg/hotserve/backups/record"
+)
+
+const (
+	// StaleAfter is how old an app's last complete backup may be: two
+	// hourly runs missed, and some grace.
+	StaleAfter = 3 * time.Hour
+	// ProvenOldAfter is how old a proven restore may be: the weekly
+	// drill's period and a day.
+	ProvenOldAfter = 8 * 24 * time.Hour
+	// CheckOldAfter is how old the last clean check of the repository
+	// may be, and how long a box set up may go without one: the weekly
+	// drill's period and a day.
+	CheckOldAfter = ProvenOldAfter
+)
+
+// Running is one unit of a run, a restore or a drill that the manager
+// holds right now.
+type Running struct {
+	// Role is what the unit does (upload, fetch, …) and App whose data
+	// it does it to; a unit of the whole run has no App.
+	Role, App string
+	// State is the manager's ActiveState. A oneshot is "activating" for
+	// as long as its command runs.
+	State string
+	Since time.Time
+}
+
+// Input is what Report is told.
+type Input struct {
+	Record *record.Status
+	Now    time.Time
+	// SetUp is when backups were set up, where that is known.
+	SetUp time.Time
+	// Running are the units of a run, a restore or a drill that the
+	// manager holds; Unrecognised the names of those it holds whose
+	// name says nothing here; RunningErr why it could not be asked.
+	Running      []Running
+	Unrecognised []string
+	RunningErr   error
+}
+
+// Report is what status prints, and whether the last run is recent and
+// every app that has anything to back up has a fresh complete backup
+// and a restore proven lately.
+//
+// Freshness is the last complete backup's, whatever is in progress and
+// whatever a later, incomplete snapshot holds; and a snapshot that a
+// listing of the repository since did not hold is not a backup.
+func Report(in Input) (lines []string, healthy bool) {
+	st, now, running, runningErr := in.Record, in.Now, in.Running, in.RunningErr
+	healthy = true
+	say := func(format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) }
+	bad := func(format string, a ...any) { healthy = false; say(format, a...) }
+	when, short := record.When, record.Short
+
+	// The run itself is aged, not only each backup: a record whose apps
+	// are all pending, or that has none, would otherwise read "nothing
+	// to back up yet" for as long as no run replaces it — a timer that
+	// died weeks ago included.
+	switch {
+	case st.Started.IsZero() && !in.SetUp.IsZero() && now.Sub(in.SetUp) > StaleAfter:
+		bad("no run yet, and backups were set up %s, more than %d hours ago", when(in.SetUp), int(StaleAfter.Hours()))
+	case st.Started.IsZero():
+		say("no run yet: pending first run")
+	default:
+		say("last run %s", when(st.Started))
+		if len(st.Apps) == 0 && st.Error == "" {
+			say("no app declares a backup; nothing is backed up")
+		}
+		if last := st.Finished; now.Sub(last) > StaleAfter {
+			bad("no run has finished since %s, more than %d hours ago: what follows is as of then", when(last), int(StaleAfter.Hours()))
+		}
+	}
+	if d := st.LastDrill; d != nil && d.Detail != "" {
+		bad("the last drill, %s, could not begin: %s", when(d.Time), record.Text(d.Detail))
+	} else if d != nil {
+		say("last drill %s", when(d.Time))
+	}
+	// The repository itself, as the weekly drill last checked it. None
+	// yet is said, and is unhealthy a week and a day after the first
+	// drill that checks — or, before there has been one, after setup with
+	// no drill either: a new box is not failing, nor one set up before the
+	// check was, whose next drill checks.
+	old := int(CheckOldAfter.Hours() / 24)
+	switch c := st.LastCheck; {
+	case c == nil && st.CheckSince != nil && now.Sub(*st.CheckSince) > CheckOldAfter:
+		// Drills that check have run, and none came to a verdict — each
+		// stopped, week on week — however recent the last of them.
+		bad("no check of the repository has come to a verdict since %s, more than %d days ago; `hotserve-backup drill`, as root, checks it", when(*st.CheckSince), old)
+	case c == nil && st.CheckSince == nil && !in.SetUp.IsZero() && now.Sub(in.SetUp) > CheckOldAfter && (st.LastDrill == nil || now.Sub(st.LastDrill.Time) > CheckOldAfter):
+		bad("the repository has not been checked since backups were set up, %s, more than %d days ago; `hotserve-backup drill`, as root, checks it", when(in.SetUp), old)
+	case c == nil && !st.Started.IsZero():
+		say("the repository has not been checked yet: the weekly drill checks it")
+	case c == nil:
+	case c.Class == record.CheckClean && now.Sub(c.Time) > CheckOldAfter:
+		bad("repository last checked %s: its structure, and data group %s: clean: old, more than %d days ago; `hotserve-backup drill`, as root, checks it", when(c.Time), record.Text(c.Group), old)
+	case c.Class == record.CheckClean:
+		say("repository last checked %s: its structure, and data group %s: clean", when(c.Time), record.Text(c.Group))
+	default:
+		bad("the repository check of %s (data group %s): %s: %s", when(c.Time), record.Text(c.Group), record.Text(string(c.Class)), record.Text(c.Detail))
+	}
+	// One listing unanswered is the run's warning, below. Unanswered for
+	// longer than a backup may be old, it is what would keep a snapshot
+	// pruned off the box looking like the last good backup.
+	if u := st.Unlisted; u != nil && now.Sub(*u) > StaleAfter {
+		bad("the repository has not been listed since %s, more than %d hours ago: whether it still holds the snapshots below is not known", when(*u), int(StaleAfter.Hours()))
+	} else if u != nil {
+		say("the repository has not been listed since %s", when(*u))
+	}
+	if st.Error != "" {
+		bad("the last run ended early: %s", record.Text(st.Error))
+	}
+	if st.Warning != "" {
+		say("warning: %s", record.Clean(st.Warning))
+	}
+
+	// gone: a listing was answered after the snapshot was last seen.
+	gone := func(s *record.Snapshot) bool {
+		return st.Listed != nil && (s.Seen == nil || s.Seen.Before(*st.Listed))
+	}
+	lastSeen := func(s *record.Snapshot) string {
+		if s.Seen == nil {
+			return "no listing has held it"
+		}
+		return "last seen there " + when(*s.Seen)
+	}
+
+	names := make([]string, 0, len(st.Apps))
+	for n := range st.Apps {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		app, n := st.Apps[name], record.Text(name)
+		if app == nil {
+			// Never written by a run, but a record that reads: no result
+			// is nothing to be healthy about.
+			bad("%s: no result on record, until the next run writes the record again", n)
+			continue
+		}
+		at := record.Text(app.Looked)
+		if app.Class == record.Pending {
+			say("%s: pending first run: no data at %s yet", n, at)
+			continue
+		}
+		switch {
+		case app.Class == record.OK && app.LastOK != nil:
+			say("%s: ok: last complete backup %s, snapshot %s (data at %s)", n, when(app.LastOK.Time), short(app.LastOK.ID), at)
+		case app.Class == record.OK && app.Snapshot != nil:
+			// A restore backs up what it is about to restore over, and that
+			// is never the last complete backup.
+			say("%s: ok: snapshot %s, made by a restore of what it then restored over (data at %s)", n, short(app.Snapshot.ID), at)
+		case app.Class == record.NotRun:
+			say("%s: not run: %s (data at %s)", n, record.Text(app.Detail), at)
+		case app.Class == record.DataMissing:
+			bad("%s: data missing: %s; `hotserve-backup restore %s`, as root, puts its last snapshot back", n, record.Text(app.Detail), n)
+		default:
+			// The last run did not back this app up, however fresh the
+			// run before it.
+			bad("%s: %s: %s (data at %s)", n, record.Text(string(app.Class)), record.Text(app.Detail), at)
+		}
+		switch {
+		case app.LastOK == nil:
+			bad("%s: no complete backup yet", n)
+		case gone(app.LastOK):
+			bad("%s: snapshot %s is no longer in the repository (%s): it was the last complete backup, made %s", n, short(app.LastOK.ID), lastSeen(app.LastOK), when(app.LastOK.Time))
+		case now.Sub(app.LastOK.Time) > StaleAfter:
+			bad("%s: stale: the last complete backup is from %s, more than %d hours ago, snapshot %s", n, when(app.LastOK.Time), int(StaleAfter.Hours()), short(app.LastOK.ID))
+		case app.Class != record.OK:
+			say("%s: last complete backup %s, snapshot %s", n, when(app.LastOK.Time), short(app.LastOK.ID))
+		}
+		if app.LastSnapshot == nil {
+			continue // nothing in the repository to prove a restore of
+		}
+		if p := app.RestoreProven; p != nil {
+			line := fmt.Sprintf("%s: restore last proven: %s, snapshot %s", n, when(p.Time), short(p.Snapshot.ID))
+			if now.Sub(p.Time) > ProvenOldAfter {
+				bad("%s: old, more than %d days ago; `hotserve-backup drill`, as root, proves one now", line, int(ProvenOldAfter.Hours()/24))
+			} else {
+				say("%s", line)
+			}
+			// Pruned since, off the box: what was proven was proven.
+			if gone(&p.Snapshot) {
+				say("%s: snapshot %s is no longer in the repository (%s); the restore proven was of it", n, short(p.Snapshot.ID), lastSeen(&p.Snapshot))
+			}
+		}
+		// The newest snapshot is the one a restore reaches for: a drill of
+		// it that proved nothing is not made good by an older proof.
+		switch d := app.RestoreDrill; {
+		case d != nil:
+			of := ""
+			if d.Snapshot.ID != "" { // one it could not ask the repository for has none
+				of = "snapshot " + short(d.Snapshot.ID) + ", "
+			}
+			bad("%s: restore not proven: %s (%s%s); `hotserve-backup drill`, as root, tries again", n, record.Text(d.Detail), of, when(d.Time))
+		case app.RestoreProven == nil:
+			bad("%s: restore not proven: no drill of it has run; `hotserve-backup drill`, as root, proves it", n)
+		}
+	}
+
+	// Only `hotserve_backup_*` units are looked for: a run's, a restore's,
+	// a drill's, a setup's. The command that starts them is not one, so
+	// whenever it is at work itself — between two units, for the whole of
+	// a restore's question — no unit is running, though it holds the run
+	// lock and a second run, drill or restore is refused.
+	switch {
+	case runningErr != nil:
+		say("could not ask systemd what is running: %s", record.Text(runningErr.Error()))
+	case len(running) == 0 && len(in.Unrecognised) == 0:
+		say("no backup unit running now")
+	}
+	for _, r := range running {
+		what := record.Text(r.Role)
+		if r.App != "" {
+			what += " of " + record.Text(r.App)
+		}
+		// A oneshot is "activating" for as long as its command runs; any
+		// other state is said as the manager says it.
+		if r.State != "activating" {
+			what += " (" + record.Text(r.State) + ")"
+		}
+		// No time: the unit ended while the manager was being asked.
+		if r.Since.IsZero() {
+			say("running: %s", what)
+		} else {
+			say("running: %s, since %s", what, when(r.Since))
+		}
+	}
+	for _, name := range in.Unrecognised {
+		say("running: %s", record.Text(name))
+	}
+	return lines, healthy
+}

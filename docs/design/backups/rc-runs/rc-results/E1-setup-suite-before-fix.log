@@ -1,0 +1,441 @@
+docker compose run --rm -e CGO_ENABLED=0 dev sh -c '\
+		go build -trimpath -o build/e2e-backup/hotserve ./cmd/hotserve & p1=$!; \
+		(cd backups && go build -trimpath -tags e2e -o ../build/e2e-backup/hotserve-backup ./cmd/hotserve-backup) & p2=$!; \
+		wait $p1 || exit 1; wait $p2 || exit 1; \
+		chmod -R a+rwX build'
+ Container hotserve-backups-v2-dev-run-3aaa6b0b3949 Creating 
+ Container hotserve-backups-v2-dev-run-3aaa6b0b3949 Created 
+docker compose rm -sf e2e-backup-box e2e-s3 >/dev/null
+No stopped containers
+docker compose up --build -d --scale e2e-backup-box=1 e2e-s3 e2e-backup-box
+ Image hotserve-backups-v2-e2e-s3 Building 
+ Image hotserve-e2e-backup Building 
+#1 [internal] load local bake definitions
+#1 reading from stdin 1.25kB done
+#1 DONE 0.0s
+
+#2 [e2e-backup-box internal] load build definition from Dockerfile
+#2 transferring dockerfile: 2.62kB done
+#2 DONE 0.0s
+
+#3 [e2e-s3 internal] load build definition from s3.Dockerfile
+#3 transferring dockerfile: 1.08kB done
+#3 DONE 0.1s
+
+#4 [e2e-backup-box internal] load metadata for docker.io/library/debian:trixie-slim
+#4 DONE 0.0s
+
+#5 [e2e-s3 internal] load metadata for docker.io/rclone/rclone:1.71@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51
+#5 DONE 0.0s
+
+#6 [e2e-backup-box context bin] load .dockerignore
+#6 transferring bin: 2B done
+#6 DONE 0.0s
+
+#7 [e2e-backup-box internal] load .dockerignore
+#7 transferring context: 509B 0.0s done
+#7 DONE 0.0s
+
+#8 [e2e-s3 rclone 1/1] FROM docker.io/rclone/rclone:1.71@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51
+#8 DONE 0.0s
+
+#9 [e2e-s3 stage-1 1/1] COPY --from=rclone /usr/local/bin/rclone /rclone
+#9 CACHED
+
+#10 [e2e-backup-box stage-0 1/8] FROM docker.io/library/debian:trixie-slim
+#10 DONE 0.0s
+
+#11 [e2e-s3] exporting to image
+#11 exporting layers done
+#11 writing image sha256:353dc7a54ae1358dcaf5acc7a3932c2039e4568451fcbf425f529d4a060eb5ab done
+#11 naming to docker.io/library/hotserve-backups-v2-e2e-s3 done
+#11 DONE 0.0s
+
+#12 [e2e-backup-box internal] load build context
+#12 transferring context: 18.32kB 0.0s done
+#12 DONE 0.1s
+
+#13 [e2e-backup-box context bin] load from client
+#13 ...
+
+#14 [e2e-s3] resolving provenance for metadata file
+#14 DONE 0.0s
+
+#13 [e2e-backup-box context bin] load from client
+#13 transferring bin: 85.08MB 1.4s done
+#13 DONE 1.4s
+
+#15 [e2e-backup-box stage-0 2/8] RUN apt-get update 	&& apt-get install -y --no-install-recommends 		systemd systemd-sysv dbus libpam-systemd procps ca-certificates restic sqlite3 curl 	&& rm -rf /var/lib/apt/lists/*
+#15 CACHED
+
+#16 [e2e-backup-box stage-0 5/8] COPY packaging/hotserve-backup.service packaging/hotserve-backup.timer 	packaging/hotserve-backup-drill.service packaging/hotserve-backup-drill.timer /lib/systemd/system/
+#16 CACHED
+
+#17 [e2e-backup-box stage-0 3/8] RUN systemctl mask 	systemd-udevd.service 	systemd-udevd-kernel.socket 	systemd-udevd-control.socket 	systemd-modules-load.service 	getty.target 	console-getty.service 	|| true
+#17 CACHED
+
+#18 [e2e-backup-box stage-0 4/8] COPY --from=bin hotserve hotserve-backup /usr/bin/
+#18 CACHED
+
+#19 [e2e-backup-box stage-0 6/8] COPY packaging/postinstall.sh /tmp/postinstall.sh
+#19 CACHED
+
+#20 [e2e-backup-box stage-0 7/8] RUN mkdir -p /var/lib/hotserve /var/lib/liveswap /etc/hotserve 	&& chmod 750 /var/lib/hotserve /var/lib/liveswap 	&& sh /tmp/postinstall.sh && rm /tmp/postinstall.sh 	&& userdel hotserve-backup 	&& rm -f /etc/systemd/system/timers.target.wants/hotserve-backup.timer /etc/systemd/system/timers.target.wants/hotserve-backup-drill.timer 	&& rm -rf /var/lib/systemd/deb-systemd-helper-enabled
+#20 CACHED
+
+#21 [e2e-backup-box stage-0 8/8] COPY e2e/backup/Caddyfile /etc/hotserve/Caddyfile
+#21 CACHED
+
+#22 [e2e-backup-box] exporting to image
+#22 exporting layers done
+#22 writing image sha256:2638748d994d071f70a87942559bca1e39d46350452d1fa465c1b4ec01b268ce done
+#22 naming to docker.io/library/hotserve-e2e-backup done
+#22 DONE 0.0s
+
+#23 [e2e-backup-box] resolving provenance for metadata file
+#23 DONE 0.0s
+ Image hotserve-backups-v2-e2e-s3 Built 
+ Image hotserve-e2e-backup Built 
+ Container hotserve-backups-v2-e2e-s3-1 Creating 
+ Container hotserve-backups-v2-e2e-s3-1 Created 
+ Container hotserve-backups-v2-e2e-backup-box-1 Creating 
+ Container hotserve-backups-v2-e2e-backup-box-1 Created 
+ Container hotserve-backups-v2-e2e-s3-1 Starting 
+ Container hotserve-backups-v2-e2e-s3-1 Started 
+ Container hotserve-backups-v2-e2e-backup-box-1 Starting 
+ Container hotserve-backups-v2-e2e-backup-box-1 Started 
+logs=$(mktemp -d); i=0; \
+	for s in setup; do \
+		i=$((i + 1)); \
+		( t0=$(date +%s); docker compose exec -T --index $i e2e-backup-box timeout 600 /bin/sh /suite-$s.sh >$logs/$s.log 2>&1; echo "$? $(($(date +%s) - t0))" >$logs/$s.rc ) & \
+	done; \
+	wait; \
+	status=0; i=0; \
+	for s in setup; do \
+		i=$((i + 1)); \
+		rc=; took=; read rc took <$logs/$s.rc || rc=unknown; \
+		echo "════ $s suite (box $i, ${took:-?}s) ════"; \
+		cat $logs/$s.log; \
+		if [ "$rc" = 124 ]; then echo "════ $s suite ended at SUITE_LIMIT (600s) ════"; fi; \
+		if [ "$rc" != 0 ]; then \
+			status=1; \
+			echo "════ $s suite failed: box $i's journal ════"; \
+			docker compose exec -T --index $i e2e-backup-box journalctl --no-pager -n 200 || true; \
+		fi; \
+	done; \
+	if [ $status -ne 0 ]; then docker compose logs --tail 300 e2e-s3; fi; \
+	rm -rf $logs; \
+	docker compose rm -sf e2e-backup-box e2e-s3 >/dev/null; \
+	exit $status
+════ setup suite (box 1, 600s) ════
+=== setup 0: the usage text ===
+PASS: setup with no repository is the usage text
+PASS: and so is setup with two
+=== setup 1: not root, no terminal: refused before anything is touched ===
+PASS: setup as nobody says to repeat the command under sudo, and renders none of it
+PASS: setup with no terminal says so, and where to go
+PASS: and nothing was made under /etc
+PASS: and no unit was started
+=== setup 2: what is knowable is refused before any prompt, and before the account is made ===
+PASS: fixture: no hotserve-backup account before setup
+PASS: without restic, setup names the package
+PASS: and asked nothing
+PASS: and made no account
+PASS: an account hotserve did not make is refused, naming the remedy
+PASS: and asked nothing
+PASS: and the account was left as it was
+PASS: hotserve-backup account says the same, as nobody
+PASS: and nothing was made under /etc
+PASS: refused before any prompt: sftp:user@host:/srv/backups — hotserve-backup: sftp: is not supported: ssh takes its key and known_hosts from a home dir
+PASS: refused before any prompt: /srv/backups — hotserve-backup: a path on this box is not a repository: a backup must survive losing the 
+PASS: refused before any prompt: local:/srv/backups — hotserve-backup: a path on this box is not a repository: a backup must survive losing the 
+PASS: refused before any prompt: rclone:remote:bucket — hotserve-backup: rclone: is not supported: rclone takes its remotes from a config file, wh
+PASS: refused before any prompt: azure:container:path — hotserve-backup: azure: is not a backend Debian's restic has
+PASS: refused before any prompt: gs:bucket:path — hotserve-backup: rest:, gs: and swift: are not set up by this command: write /etc/hotserve
+PASS: refused before any prompt: swift:container:/path — hotserve-backup: rest:, gs: and swift: are not set up by this command: write /etc/hotserve
+PASS: refused before any prompt: rest:https://host:8000/ — hotserve-backup: rest:, gs: and swift: are not set up by this command: write /etc/hotserve
+PASS: refused before any prompt: s3:http://user:pass@e2e-s3:9000/box — hotserve-backup: credentials in the repository URL are on the command line and in the shel
+PASS: refused before any prompt: s3:user:pass@e2e-s3:9000/box — hotserve-backup: credentials in the repository URL are on the command line and in the shel
+PASS: refused before any prompt: s3://user:pass@e2e-s3:9000/box — hotserve-backup: credentials in the repository URL are on the command line and in the shel
+PASS: refused before any prompt: ftp://host/x — hotserve-backup: "ftp:" is not a repository restic knows (s3: or b2:)
+PASS: refused before any prompt: s3: — hotserve-backup: s3: names no bucket
+PASS: nothing was made at the refused path
+PASS: and nothing under /etc
+=== setup 3: a fresh setup at a terminal ===
+PASS: setup made the repository (14s)
+PASS: the key id showed as it was typed; the secret did not
+PASS: a password was shown
+PASS: and had to be confirmed stored, with what to store beside it
+PASS: the account was made: no home, no shell
+PASS: and hotserve-backup account accepts it
+PASS: the directory is root's and open to look into; the file is root's alone
+PASS: the file holds the four settings, the password among them, and nothing else
+PASS: nothing was left beside it
+PASS: no unit is left
+PASS: the repository answers the credential the file holds
+PASS: the plan was read first, and said
+PASS: the repository was looked for before a password was made
+PASS: and what to do next, from the timer being inactive here
+PASS: no credential is in the journal
+PASS: status: pending first run, exit 0
+PASS: a run works with what setup wrote
+PASS: after setup: blog is 'ok'
+PASS: after setup: shop is 'ok'
+=== setup 4: a Caddyfile a run could not plan from is refused before any prompt ===
+PASS: fixture: hotserve accepts the file
+PASS: refused with the adapter's reason, naming the variable, before any prompt
+PASS: the working file is as it was
+=== setup 5: a file at the old path is named, and not read ===
+PASS: a run names the new path, and says what to do with the old one
+PASS: and started nothing
+PASS: status exits 3 and says the same
+PASS: a setup with the old file still there says to remove it, and does not itself
+=== setup 6: mistakes over a working setup leave it as it was ===
+PASS: a wrong storage key is refused by the storage (31s), and said
+PASS: and not called 'no repository'
+PASS: the key was asked for again, twice, the one password standing
+PASS: one password was shown, and said to be kept at the end: init ran with it
+PASS: the silent look was explained
+PASS: the working file is byte-identical, no copy of a credential is left, no unit is running
+PASS: a host that does not resolve is said at once after the look (10s)
+PASS: and left the working setup as it was
+PASS: a wrong password for the repository that exists is refused, and said
+PASS: and asked for again, twice, before giving up
+PASS: no password was made for a repository that exists
+PASS: the working file is byte-identical, no copy of a credential is left, no unit is running
+FAIL: a read-only key, refused plainly: exit 0 after 1s: account hotserve-backup: present
+a run would back up blog, notyet, shop, under /var/lib/liveswap
+Storage key id (AWS_ACCESS_KEY_ID): AKIDE2EFIXTURE
+Storage secret key (AWS_SECRET_ACCESS_KEY): 
+looking for a repository at s3:http://127.0.0.1:9100/setuprepo (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+repository ready: s3:http://127.0.0.1:9100/setuprepo (existing, id 64711220)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status
+FAIL: setup said the repository was ready
+FAIL: after a read-only key: same=NO, temps=0, units=0
+FAIL: a read-only key, retried: exit 0 after 1s: account hotserve-backup: present
+a run would back up blog, notyet, shop, under /var/lib/liveswap
+Storage key id (AWS_ACCESS_KEY_ID): AKIDE2EFIXTURE
+Storage secret key (AWS_SECRET_ACCESS_KEY): 
+looking for a repository at s3:http://127.0.0.1:9100/setuprepo (up to 10s)
+the repository exists; its password is needed
+Repository password: 
+repository ready: s3:http://127.0.0.1:9100/setuprepo (existing, id 64711220)
+credentials: /etc/hotserve-backup/repository.env (root, 0600)
+next: nothing runs it on a schedule: sudo systemctl enable --now hotserve-backup.timer, or run sudo hotserve-backup run hourly from a timer or cron entry of your own; then hotserve-backup status
+FAIL: after the clock: same=NO, temps=0, units=0
+════ setup suite ended at SUITE_LIMIT (600s) ════
+════ setup suite failed: box 1's journal ════
+Oct 05 18:25:34 95c04638b565 systemd[1]: Finished hotserve_backup_history_notyet_439e2ae501db.service - hotserve backup: ask the repository about notyet.
+Oct 05 18:25:34 95c04638b565 systemd[1]: Starting hotserve_backup_clean_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies...
+Oct 05 18:25:34 95c04638b565 systemd[1]: hotserve_backup_clean_shop_439e2ae501db.service: Supervising process 985 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:25:34 95c04638b565 systemd[1]: hotserve_backup_clean_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:34 95c04638b565 systemd[1]: Finished hotserve_backup_clean_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies.
+Oct 05 18:25:34 95c04638b565 systemd[1]: Starting hotserve_backup_dump_shop_439e2ae501db.service - hotserve backup: copy shop's databases...
+Oct 05 18:25:34 95c04638b565 systemd[1]: hotserve_backup_dump_shop_439e2ae501db.service: Supervising process 997 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:25:34 95c04638b565 systemd[1]: hotserve_backup_dump_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:34 95c04638b565 systemd[1]: Finished hotserve_backup_dump_shop_439e2ae501db.service - hotserve backup: copy shop's databases.
+Oct 05 18:25:34 95c04638b565 systemd[1]: Starting hotserve_backup_upload_shop_439e2ae501db.service - hotserve backup: upload shop...
+Oct 05 18:25:35 95c04638b565 systemd[1]: hotserve_backup_upload_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:35 95c04638b565 systemd[1]: Finished hotserve_backup_upload_shop_439e2ae501db.service - hotserve backup: upload shop.
+Oct 05 18:25:35 95c04638b565 systemd[1]: Starting hotserve_backup_verify_shop_439e2ae501db.service - hotserve backup: check shop's snapshot...
+Oct 05 18:25:36 95c04638b565 systemd[1]: hotserve_backup_verify_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:36 95c04638b565 systemd[1]: Finished hotserve_backup_verify_shop_439e2ae501db.service - hotserve backup: check shop's snapshot.
+Oct 05 18:25:36 95c04638b565 systemd[1]: run-hotserve\x2dbackup-439e2ae501db-mount\x2d4.mount: Deactivated successfully.
+Oct 05 18:25:36 95c04638b565 systemd[1]: run-hotserve\x2dbackup-439e2ae501db-mount\x2d3.mount: Deactivated successfully.
+Oct 05 18:25:36 95c04638b565 systemd[1]: Starting hotserve_backup_clean_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies...
+Oct 05 18:25:36 95c04638b565 systemd[1]: hotserve_backup_clean_shop_439e2ae501db.service: Supervising process 1044 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:25:36 95c04638b565 systemd[1]: hotserve_backup_clean_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:36 95c04638b565 systemd[1]: Finished hotserve_backup_clean_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies.
+Oct 05 18:25:36 95c04638b565 systemd[1]: Starting hotserve_backup_vouch_shop_439e2ae501db.service - hotserve backup: record in the repository that shop's backup ended ok...
+Oct 05 18:25:36 95c04638b565 systemd[1]: hotserve_backup_vouch_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:36 95c04638b565 systemd[1]: Finished hotserve_backup_vouch_shop_439e2ae501db.service - hotserve backup: record in the repository that shop's backup ended ok.
+Oct 05 18:25:36 95c04638b565 systemd[1]: Starting hotserve_backup_size_shop_439e2ae501db.service - hotserve backup: ask how large a snapshot of shop is...
+Oct 05 18:25:37 95c04638b565 systemd[1]: hotserve_backup_size_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:37 95c04638b565 systemd[1]: Finished hotserve_backup_size_shop_439e2ae501db.service - hotserve backup: ask how large a snapshot of shop is.
+Oct 05 18:25:37 95c04638b565 systemd[1]: Starting hotserve_backup_unstage_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies...
+Oct 05 18:25:37 95c04638b565 systemd[1]: hotserve_backup_unstage_shop_439e2ae501db.service: Supervising process 1088 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:25:37 95c04638b565 systemd[1]: hotserve_backup_unstage_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:37 95c04638b565 systemd[1]: Finished hotserve_backup_unstage_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies.
+Oct 05 18:25:37 95c04638b565 systemd[1]: Starting hotserve_backup_fetch_shop_439e2ae501db.service - hotserve backup: fetch a snapshot of shop...
+Oct 05 18:25:38 95c04638b565 systemd[1]: hotserve_backup_fetch_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Finished hotserve_backup_fetch_shop_439e2ae501db.service - hotserve backup: fetch a snapshot of shop.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Starting hotserve_backup_handover_shop_439e2ae501db.service - hotserve backup: hand what was fetched of shop to the hotserve user...
+Oct 05 18:25:38 95c04638b565 systemd[1]: hotserve_backup_handover_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Finished hotserve_backup_handover_shop_439e2ae501db.service - hotserve backup: hand what was fetched of shop to the hotserve user.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Starting hotserve_backup_check_shop_439e2ae501db.service - hotserve backup: check a snapshot of shop...
+Oct 05 18:25:38 95c04638b565 systemd[1]: hotserve_backup_check_shop_439e2ae501db.service: Supervising process 1119 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:25:38 95c04638b565 systemd[1]: hotserve_backup_check_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Finished hotserve_backup_check_shop_439e2ae501db.service - hotserve backup: check a snapshot of shop.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Starting hotserve_backup_handover_shop_439e2ae501db.service - hotserve backup: hand what was fetched of shop to the hotserve user...
+Oct 05 18:25:38 95c04638b565 systemd[1]: hotserve_backup_handover_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Finished hotserve_backup_handover_shop_439e2ae501db.service - hotserve backup: hand what was fetched of shop to the hotserve user.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Starting hotserve_backup_unstage_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies...
+Oct 05 18:25:38 95c04638b565 systemd[1]: hotserve_backup_unstage_shop_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Finished hotserve_backup_unstage_shop_439e2ae501db.service - hotserve backup: remove shop's plaintext copies.
+Oct 05 18:25:38 95c04638b565 systemd[1]: Starting hotserve_backup_listing_439e2ae501db.service - hotserve backup: ask the repository about every app...
+Oct 05 18:25:39 95c04638b565 systemd[1]: hotserve_backup_listing_439e2ae501db.service: Deactivated successfully.
+Oct 05 18:25:39 95c04638b565 systemd[1]: Finished hotserve_backup_listing_439e2ae501db.service - hotserve backup: ask the repository about every app.
+Oct 05 18:25:39 95c04638b565 systemd[1]: Starting hotserve_backup_plan_17c975454126.service - hotserve backup: read what each app declares...
+Oct 05 18:25:39 95c04638b565 systemd[1]: hotserve_backup_plan_17c975454126.service: Supervising process 1200 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:25:39 95c04638b565 systemd[1]: hotserve_backup_plan_17c975454126.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:25:39 95c04638b565 systemd[1]: hotserve_backup_plan_17c975454126.service: Failed with result 'exit-code'.
+Oct 05 18:25:39 95c04638b565 systemd[1]: Failed to start hotserve_backup_plan_17c975454126.service - hotserve backup: read what each app declares.
+Oct 05 18:25:39 95c04638b565 systemd[1]: Starting hotserve_backup_plan_3f593437cb02.service - hotserve backup: read what each app declares...
+Oct 05 18:25:39 95c04638b565 systemd[1]: hotserve_backup_plan_3f593437cb02.service: Supervising process 1283 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:25:39 95c04638b565 systemd[1]: hotserve_backup_plan_3f593437cb02.service: Deactivated successfully.
+Oct 05 18:25:39 95c04638b565 systemd[1]: Finished hotserve_backup_plan_3f593437cb02.service - hotserve backup: read what each app declares.
+Oct 05 18:25:39 95c04638b565 systemd[1]: Starting hotserve_backup_probe_3f593437cb02.service - hotserve backup: probe the repository...
+Oct 05 18:25:40 95c04638b565 systemd[1]: hotserve_backup_probe_3f593437cb02.service: Main process exited, code=exited, status=12/n/a
+Oct 05 18:25:40 95c04638b565 systemd[1]: hotserve_backup_probe_3f593437cb02.service: Failed with result 'exit-code'.
+Oct 05 18:25:40 95c04638b565 systemd[1]: Failed to start hotserve_backup_probe_3f593437cb02.service - hotserve backup: probe the repository.
+Oct 05 18:25:40 95c04638b565 systemd[1]: Starting hotserve_backup_open_3f593437cb02.service - hotserve backup: open the repository...
+Oct 05 18:25:40 95c04638b565 systemd[1]: hotserve_backup_open_3f593437cb02.service: Deactivated successfully.
+Oct 05 18:25:40 95c04638b565 systemd[1]: Finished hotserve_backup_open_3f593437cb02.service - hotserve backup: open the repository.
+Oct 05 18:25:40 95c04638b565 systemd[1]: Starting hotserve_backup_plan_e996392ea4a0.service - hotserve backup: read what each app declares...
+Oct 05 18:25:40 95c04638b565 systemd[1]: hotserve_backup_plan_e996392ea4a0.service: Deactivated successfully.
+Oct 05 18:25:40 95c04638b565 systemd[1]: Finished hotserve_backup_plan_e996392ea4a0.service - hotserve backup: read what each app declares.
+Oct 05 18:25:40 95c04638b565 systemd[1]: Starting hotserve_backup_probe_e996392ea4a0.service - hotserve backup: probe the repository...
+Oct 05 18:25:50 95c04638b565 systemd[1]: hotserve_backup_probe_e996392ea4a0.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:25:50 95c04638b565 systemd[1]: hotserve_backup_probe_e996392ea4a0.service: Failed with result 'exit-code'.
+Oct 05 18:25:50 95c04638b565 systemd[1]: Stopped hotserve_backup_probe_e996392ea4a0.service - hotserve backup: probe the repository.
+Oct 05 18:25:51 95c04638b565 systemd[1]: Starting hotserve_backup_init_e996392ea4a0.service - hotserve backup: init the repository...
+Oct 05 18:25:51 95c04638b565 systemd[1]: hotserve_backup_init_e996392ea4a0.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:25:51 95c04638b565 systemd[1]: hotserve_backup_init_e996392ea4a0.service: Failed with result 'exit-code'.
+Oct 05 18:25:51 95c04638b565 systemd[1]: Failed to start hotserve_backup_init_e996392ea4a0.service - hotserve backup: init the repository.
+Oct 05 18:25:51 95c04638b565 systemd[1]: Starting hotserve_backup_probe_e996392ea4a0.service - hotserve backup: probe the repository...
+Oct 05 18:26:01 95c04638b565 systemd[1]: hotserve_backup_probe_e996392ea4a0.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:26:01 95c04638b565 systemd[1]: hotserve_backup_probe_e996392ea4a0.service: Failed with result 'exit-code'.
+Oct 05 18:26:01 95c04638b565 systemd[1]: Stopped hotserve_backup_probe_e996392ea4a0.service - hotserve backup: probe the repository.
+Oct 05 18:26:01 95c04638b565 systemd[1]: Starting hotserve_backup_init_e996392ea4a0.service - hotserve backup: init the repository...
+Oct 05 18:26:01 95c04638b565 systemd[1]: hotserve_backup_init_e996392ea4a0.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:26:01 95c04638b565 systemd[1]: hotserve_backup_init_e996392ea4a0.service: Failed with result 'exit-code'.
+Oct 05 18:26:01 95c04638b565 systemd[1]: Failed to start hotserve_backup_init_e996392ea4a0.service - hotserve backup: init the repository.
+Oct 05 18:26:01 95c04638b565 systemd[1]: Starting hotserve_backup_probe_e996392ea4a0.service - hotserve backup: probe the repository...
+Oct 05 18:26:11 95c04638b565 systemd[1]: hotserve_backup_probe_e996392ea4a0.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:26:11 95c04638b565 systemd[1]: hotserve_backup_probe_e996392ea4a0.service: Failed with result 'exit-code'.
+Oct 05 18:26:11 95c04638b565 systemd[1]: Stopped hotserve_backup_probe_e996392ea4a0.service - hotserve backup: probe the repository.
+Oct 05 18:26:11 95c04638b565 systemd[1]: Starting hotserve_backup_init_e996392ea4a0.service - hotserve backup: init the repository...
+Oct 05 18:26:11 95c04638b565 systemd[1]: hotserve_backup_init_e996392ea4a0.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:26:11 95c04638b565 systemd[1]: hotserve_backup_init_e996392ea4a0.service: Failed with result 'exit-code'.
+Oct 05 18:26:11 95c04638b565 systemd[1]: Failed to start hotserve_backup_init_e996392ea4a0.service - hotserve backup: init the repository.
+Oct 05 18:26:11 95c04638b565 systemd[1]: Starting hotserve_backup_plan_a61849b636a2.service - hotserve backup: read what each app declares...
+Oct 05 18:26:11 95c04638b565 systemd[1]: hotserve_backup_plan_a61849b636a2.service: Supervising process 1924 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:26:11 95c04638b565 systemd[1]: hotserve_backup_plan_a61849b636a2.service: Deactivated successfully.
+Oct 05 18:26:11 95c04638b565 systemd[1]: Finished hotserve_backup_plan_a61849b636a2.service - hotserve backup: read what each app declares.
+Oct 05 18:26:11 95c04638b565 systemd[1]: Starting hotserve_backup_probe_a61849b636a2.service - hotserve backup: probe the repository...
+Oct 05 18:26:21 95c04638b565 systemd[1]: hotserve_backup_probe_a61849b636a2.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:26:21 95c04638b565 systemd[1]: hotserve_backup_probe_a61849b636a2.service: Failed with result 'exit-code'.
+Oct 05 18:26:21 95c04638b565 systemd[1]: Stopped hotserve_backup_probe_a61849b636a2.service - hotserve backup: probe the repository.
+Oct 05 18:26:21 95c04638b565 systemd[1]: Starting hotserve_backup_init_a61849b636a2.service - hotserve backup: init the repository...
+Oct 05 18:26:21 95c04638b565 systemd[1]: hotserve_backup_init_a61849b636a2.service: Main process exited, code=exited, status=1/FAILURE
+Oct 05 18:26:21 95c04638b565 systemd[1]: hotserve_backup_init_a61849b636a2.service: Failed with result 'exit-code'.
+Oct 05 18:26:21 95c04638b565 systemd[1]: Failed to start hotserve_backup_init_a61849b636a2.service - hotserve backup: init the repository.
+Oct 05 18:26:21 95c04638b565 systemd[1]: Starting hotserve_backup_plan_775529222fad.service - hotserve backup: read what each app declares...
+Oct 05 18:26:22 95c04638b565 systemd[1]: hotserve_backup_plan_775529222fad.service: Deactivated successfully.
+Oct 05 18:26:22 95c04638b565 systemd[1]: Finished hotserve_backup_plan_775529222fad.service - hotserve backup: read what each app declares.
+Oct 05 18:26:22 95c04638b565 systemd[1]: Starting hotserve_backup_probe_775529222fad.service - hotserve backup: probe the repository...
+Oct 05 18:26:22 95c04638b565 systemd[1]: hotserve_backup_probe_775529222fad.service: Main process exited, code=exited, status=12/n/a
+Oct 05 18:26:22 95c04638b565 systemd[1]: hotserve_backup_probe_775529222fad.service: Failed with result 'exit-code'.
+Oct 05 18:26:22 95c04638b565 systemd[1]: Failed to start hotserve_backup_probe_775529222fad.service - hotserve backup: probe the repository.
+Oct 05 18:26:22 95c04638b565 systemd[1]: Starting hotserve_backup_open_775529222fad.service - hotserve backup: open the repository...
+Oct 05 18:26:23 95c04638b565 systemd[1]: hotserve_backup_open_775529222fad.service: Main process exited, code=exited, status=12/n/a
+Oct 05 18:26:23 95c04638b565 systemd[1]: hotserve_backup_open_775529222fad.service: Failed with result 'exit-code'.
+Oct 05 18:26:23 95c04638b565 systemd[1]: Failed to start hotserve_backup_open_775529222fad.service - hotserve backup: open the repository.
+Oct 05 18:26:23 95c04638b565 systemd[1]: Starting hotserve_backup_open_775529222fad.service - hotserve backup: open the repository...
+Oct 05 18:26:23 95c04638b565 systemd[1]: hotserve_backup_open_775529222fad.service: Main process exited, code=exited, status=12/n/a
+Oct 05 18:26:23 95c04638b565 systemd[1]: hotserve_backup_open_775529222fad.service: Failed with result 'exit-code'.
+Oct 05 18:26:23 95c04638b565 systemd[1]: Failed to start hotserve_backup_open_775529222fad.service - hotserve backup: open the repository.
+Oct 05 18:26:23 95c04638b565 systemd[1]: Starting hotserve_backup_open_775529222fad.service - hotserve backup: open the repository...
+Oct 05 18:26:24 95c04638b565 systemd[1]: hotserve_backup_open_775529222fad.service: Main process exited, code=exited, status=12/n/a
+Oct 05 18:26:24 95c04638b565 systemd[1]: hotserve_backup_open_775529222fad.service: Failed with result 'exit-code'.
+Oct 05 18:26:24 95c04638b565 systemd[1]: Failed to start hotserve_backup_open_775529222fad.service - hotserve backup: open the repository.
+Oct 05 18:26:24 95c04638b565 systemd[1]: Started readonly-storage.service - [systemd-run] /usr/bin/hotserve run --config /root/readonly.Caddyfile --adapter caddyfile.
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"warn","ts":1791224784.5061498,"msg":"unable to determine directory for user configuration; falling back to current directory","error":"neither $XDG_CONFIG_HOME nor $HOME are defined"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5070064,"msg":"using config from file","file":"/root/readonly.Caddyfile"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5075324,"msg":"adapted config to JSON","adapter":"caddyfile"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5088677,"msg":"maxprocs: Leaving GOMAXPROCS=6: CPU quota undefined"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.508883,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":7488025804,"previous":9223372036854775807}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5088913,"msg":"using config from file","file":"/root/readonly.Caddyfile"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.508895,"msg":"adapted config to JSON","adapter":"caddyfile"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"warn","ts":1791224784.508898,"logger":"admin","msg":"admin endpoint disabled"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5095751,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv0"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5095603,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x1220a091dc00"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"warn","ts":1791224784.518352,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":":9100"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"warn","ts":1791224784.518389,"logger":"http","msg":"HTTP/3 skipped because it requires TLS","network":"tcp","addr":":9100"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5183926,"logger":"http.log","msg":"server running","name":"srv0","protocols":["h1","h2","h3"]}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.518917,"msg":"autosaved config (load with --resume flag)","file":"caddy/autosave.json"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5189278,"msg":"serving initial configuration"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"warn","ts":1791224784.5189302,"msg":"$HOME environment variable is empty - please fix; some assets might be stored in ./caddy"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5201797,"logger":"tls","msg":"cleaning storage unit","storage":"FileStorage:./caddy"}
+Oct 05 18:26:24 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224784.5214252,"logger":"tls","msg":"finished cleaning storage units"}
+Oct 05 18:26:24 95c04638b565 systemd[1]: Starting hotserve_backup_plan_c104b5ba0222.service - hotserve backup: read what each app declares...
+Oct 05 18:26:24 95c04638b565 systemd[1]: hotserve_backup_plan_c104b5ba0222.service: Supervising process 2378 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:26:24 95c04638b565 systemd[1]: hotserve_backup_plan_c104b5ba0222.service: Deactivated successfully.
+Oct 05 18:26:24 95c04638b565 systemd[1]: Finished hotserve_backup_plan_c104b5ba0222.service - hotserve backup: read what each app declares.
+Oct 05 18:26:24 95c04638b565 systemd[1]: Starting hotserve_backup_probe_c104b5ba0222.service - hotserve backup: probe the repository...
+Oct 05 18:26:25 95c04638b565 systemd[1]: hotserve_backup_probe_c104b5ba0222.service: Main process exited, code=exited, status=12/n/a
+Oct 05 18:26:25 95c04638b565 systemd[1]: hotserve_backup_probe_c104b5ba0222.service: Failed with result 'exit-code'.
+Oct 05 18:26:25 95c04638b565 systemd[1]: Failed to start hotserve_backup_probe_c104b5ba0222.service - hotserve backup: probe the repository.
+Oct 05 18:26:25 95c04638b565 systemd[1]: Starting hotserve_backup_open_c104b5ba0222.service - hotserve backup: open the repository...
+Oct 05 18:26:25 95c04638b565 systemd[1]: hotserve_backup_open_c104b5ba0222.service: Deactivated successfully.
+Oct 05 18:26:25 95c04638b565 systemd[1]: Finished hotserve_backup_open_c104b5ba0222.service - hotserve backup: open the repository.
+Oct 05 18:26:25 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224785.8697524,"msg":"shutting down apps, then terminating","signal":"SIGTERM"}
+Oct 05 18:26:25 95c04638b565 hotserve[2345]: {"level":"warn","ts":1791224785.8698003,"msg":"exiting; byeee!! 👋","signal":"SIGTERM"}
+Oct 05 18:26:25 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224785.8698142,"logger":"http","msg":"servers shutting down with eternal grace period"}
+Oct 05 18:26:25 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224785.8700147,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x1220a091dc00"}
+Oct 05 18:26:25 95c04638b565 systemd[1]: Stopping readonly-storage.service - [systemd-run] /usr/bin/hotserve run --config /root/readonly.Caddyfile --adapter caddyfile...
+Oct 05 18:26:25 95c04638b565 hotserve[2345]: {"level":"info","ts":1791224785.8707087,"msg":"shutdown complete","signal":"SIGTERM","exit_code":0}
+Oct 05 18:26:25 95c04638b565 systemd[1]: readonly-storage.service: Deactivated successfully.
+Oct 05 18:26:25 95c04638b565 systemd[1]: Stopped readonly-storage.service - [systemd-run] /usr/bin/hotserve run --config /root/readonly.Caddyfile --adapter caddyfile.
+Oct 05 18:26:25 95c04638b565 systemd[1]: Started readonly-storage.service - [systemd-run] /usr/bin/hotserve run --config /root/readonly.Caddyfile --adapter caddyfile.
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"warn","ts":1791224785.9120483,"msg":"unable to determine directory for user configuration; falling back to current directory","error":"neither $XDG_CONFIG_HOME nor $HOME are defined"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.913696,"msg":"using config from file","file":"/root/readonly.Caddyfile"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9142704,"msg":"adapted config to JSON","adapter":"caddyfile"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9152195,"msg":"maxprocs: Leaving GOMAXPROCS=6: CPU quota undefined"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9152286,"msg":"GOMEMLIMIT is updated","GOMEMLIMIT":7488025804,"previous":9223372036854775807}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9152308,"msg":"using config from file","file":"/root/readonly.Caddyfile"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9152322,"msg":"adapted config to JSON","adapter":"caddyfile"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"warn","ts":1791224785.9152346,"logger":"admin","msg":"admin endpoint disabled"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9153056,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv0"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.915384,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x69ad92205580"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"warn","ts":1791224785.9178555,"logger":"http","msg":"HTTP/2 skipped because it requires TLS","network":"tcp","addr":":9100"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"warn","ts":1791224785.9178708,"logger":"http","msg":"HTTP/3 skipped because it requires TLS","network":"tcp","addr":":9100"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.917873,"logger":"http.log","msg":"server running","name":"srv0","protocols":["h1","h2","h3"]}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9180043,"msg":"autosaved config (load with --resume flag)","file":"caddy/autosave.json"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9180098,"msg":"serving initial configuration"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"warn","ts":1791224785.9180129,"msg":"$HOME environment variable is empty - please fix; some assets might be stored in ./caddy"}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9193754,"logger":"tls","msg":"storage cleaning happened too recently; skipping for now","storage":"FileStorage:./caddy","instance":"ecc389b9-86eb-4c3a-bc08-397c1aba01c5","try_again":1791311185.9193718,"try_again_in":86399.99999975}
+Oct 05 18:26:25 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224785.9194148,"logger":"tls","msg":"finished cleaning storage units"}
+Oct 05 18:26:26 95c04638b565 systemd[1]: Starting hotserve_backup_plan_92af28df3699.service - hotserve backup: read what each app declares...
+Oct 05 18:26:26 95c04638b565 systemd[1]: hotserve_backup_plan_92af28df3699.service: Supervising process 2495 which is not our child. We'll most likely not notice when it exits.
+Oct 05 18:26:26 95c04638b565 systemd[1]: hotserve_backup_plan_92af28df3699.service: Deactivated successfully.
+Oct 05 18:26:26 95c04638b565 systemd[1]: Finished hotserve_backup_plan_92af28df3699.service - hotserve backup: read what each app declares.
+Oct 05 18:26:26 95c04638b565 systemd[1]: Starting hotserve_backup_probe_92af28df3699.service - hotserve backup: probe the repository...
+Oct 05 18:26:26 95c04638b565 systemd[1]: hotserve_backup_probe_92af28df3699.service: Main process exited, code=exited, status=12/n/a
+Oct 05 18:26:26 95c04638b565 systemd[1]: hotserve_backup_probe_92af28df3699.service: Failed with result 'exit-code'.
+Oct 05 18:26:26 95c04638b565 systemd[1]: Failed to start hotserve_backup_probe_92af28df3699.service - hotserve backup: probe the repository.
+Oct 05 18:26:26 95c04638b565 systemd[1]: Starting hotserve_backup_open_92af28df3699.service - hotserve backup: open the repository...
+Oct 05 18:26:27 95c04638b565 systemd[1]: hotserve_backup_open_92af28df3699.service: Deactivated successfully.
+Oct 05 18:26:27 95c04638b565 systemd[1]: Finished hotserve_backup_open_92af28df3699.service - hotserve backup: open the repository.
+Oct 05 18:26:27 95c04638b565 systemd[1]: Stopping readonly-storage.service - [systemd-run] /usr/bin/hotserve run --config /root/readonly.Caddyfile --adapter caddyfile...
+Oct 05 18:26:27 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224787.3399498,"msg":"shutting down apps, then terminating","signal":"SIGTERM"}
+Oct 05 18:26:27 95c04638b565 hotserve[2462]: {"level":"warn","ts":1791224787.3400633,"msg":"exiting; byeee!! 👋","signal":"SIGTERM"}
+Oct 05 18:26:27 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224787.3400745,"logger":"http","msg":"servers shutting down with eternal grace period"}
+Oct 05 18:26:27 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224787.340227,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x69ad92205580"}
+Oct 05 18:26:27 95c04638b565 hotserve[2462]: {"level":"info","ts":1791224787.3402636,"msg":"shutdown complete","signal":"SIGTERM","exit_code":0}
+Oct 05 18:26:27 95c04638b565 systemd[1]: readonly-storage.service: Deactivated successfully.
+Oct 05 18:26:27 95c04638b565 systemd[1]: Stopped readonly-storage.service - [systemd-run] /usr/bin/hotserve run --config /root/readonly.Caddyfile --adapter caddyfile.
+e2e-s3-1  | 2026/10/05 18:25:13 NOTICE: Config file "/.config/rclone/rclone.conf" not found - using defaults
+e2e-s3-1  | 2026/10/05 18:25:13 NOTICE: Local file system at /data: Starting s3 server on [http://[::]:9000/]
+ Container hotserve-backups-v2-e2e-backup-box-1 Stopping 
+ Container hotserve-backups-v2-e2e-backup-box-1 Stopped 
+ Container hotserve-backups-v2-e2e-s3-1 Stopping 
+ Container hotserve-backups-v2-e2e-s3-1 Stopped 
+ Container hotserve-backups-v2-e2e-s3-1 Removing 
+ Container hotserve-backups-v2-e2e-backup-box-1 Removing 
+ Container hotserve-backups-v2-e2e-s3-1 Removed 
+ Container hotserve-backups-v2-e2e-backup-box-1 Removed 
+make: *** [e2e-backup] Error 1
