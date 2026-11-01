@@ -1081,8 +1081,8 @@ only public material:
   `sub` and is not read): any ref of the pinned identity — any branch a
   collaborator can push, with its workflow edited to deploy — would
   otherwise do.
-- **Local key (non-CI / fallback):** the box trusts a public key
-  (`deploy_trust local`); the operator mints tokens with the private
+- **Local key (no OIDC: a laptop, or a runner without it):** the box
+  trusts a public key (`deploy_trust local`); the operator mints tokens with the private
   half (`hotserve deploy-token`). The signing key never touches the
   box. The block's `audience` names the box a token is for; without
   one — warned about at load — a token minted for any box that trusts
@@ -1103,7 +1103,10 @@ the model:
   tokens.
 - **T2 is bounded:** a stolen token is short-lived and claim-scoped, not
   a permanent deploy-anything key. The compromise surface is "the CI
-  identity that mints tokens", not "a secret on the box".
+  identity that mints tokens", not "a secret on the box". A `local`
+  key held in a runner's secret store is the exception: for an app,
+  whoever steals it deploys until its public half is removed from the
+  box. For the box's config, signatures still bound what it can land.
 - **T4 has no online guessing:** forging a token needs the issuer's or
   operator's private key; there is nothing to brute-force. The
   per-address failure throttle bounds the log-amplification vector.

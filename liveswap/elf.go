@@ -13,8 +13,10 @@ import (
 )
 
 // A tarball built on the wrong runner — an x86-64 Node single
-// executable pushed to an arm64 box — used to fail as the app's exit
-// (status 203, "exec format error") a phase later. The ELF header says
+// executable pushed to an arm64 box — used to fail as the app's exit a
+// phase later (status 203, "exec format error", from the manager;
+// behind the sibling shell, dash runs such a file as a script and
+// exits 2 on its first line). The ELF header says
 // what machine a file is for in its first twenty bytes, so the deploy
 // asks before any unit exists, and the refusal names the fix.
 //

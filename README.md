@@ -95,7 +95,8 @@ without the feature it exists for.
 
 (A hosted APT repository with automatic updates is on the roadmap.)
 
-**Installing needs root; administering does not.** Checking a config
+**Installing and upgrading need root; everyday administering does
+not.** Checking a config
 (`hotserve validate`) needs no privilege, and reading the journal —
 hotserve's and every app's — needs the `adm` group. The config changes
 only by a signed push from the box's repository

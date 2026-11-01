@@ -264,6 +264,9 @@ box holds the token against: the key, the audience, the subject and
 claims the block pins. Outside GitHub Actions it cannot print the
 values the token carries, which are the issuer's, or whatever
 `deploy-token` was given, so hold those against the block yourself.
+`HOTSERVE_AUDIENCE` changes none of this: it names the audience only
+for the token the script mints in GitHub Actions, and here the token
+already has one, from `--audience` or a GitLab job's `aud:`.
 With an issuer's token there is a third cause, and a key's token never
 meets it: the box could not consult the token's issuer (an outage
 there), or had fetched its keys in the minute before the issuer
@@ -307,6 +310,13 @@ job mints:
 ```sh
 HOTSERVE_TOKEN=$(hotserve deploy-token --key "$BOX_KEY" --audience hotserve --ttl 1h --claims sha=$(git rev-parse HEAD)) bin/apply
 ```
+
+The audience here is not one box's name, as an app's is in
+[section 2](#2-a-key-end-to-end): `bin/apply` sends its one token to
+every box in the repository, and `deploy-token` writes one audience,
+so the `box` blocks of those boxes share one name. A token for one
+box is then accepted by the others that trust the key, which is what
+the run is for.
 
 hotserve's own end-to-end suite runs `bin/apply`, unchanged, this
 way: a `deploy_trust local` block on the box, a token naming the

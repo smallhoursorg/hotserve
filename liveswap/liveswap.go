@@ -269,8 +269,10 @@ type AppConfig struct {
 
 	// TasksMax bounds the threads and processes of every unit of the
 	// app; past it a fork or thread fails with EAGAIN, which a `sh -c`
-	// wrapped command dies on. Default none: the user manager's own,
-	// 15% of the kernel's threads-max.
+	// wrapped command dies on. The unit's sleeping sibling (#380) is
+	// one of them, so the app itself gets one fewer, and the floor is
+	// 2. Default none: the user manager's own, 15% of the kernel's
+	// threads-max.
 	TasksMax int `json:"tasks_max,omitempty"`
 
 	// CPUQuota bounds the CPU time of every unit of the app, in percent
@@ -578,6 +580,9 @@ func (a *App) Validate() error {
 			if !validEnvKey(k) {
 				return fmt.Errorf("app %s: env key %q is not a valid environment variable name (must match %s)", name, k, envKeyRe)
 			}
+			if shellOwnedEnvKey(k) {
+				return fmt.Errorf("app %s: env key %q %s", name, k, shellOwnedEnvKeyMsg)
+			}
 		}
 		if len(cfg.Command) == 0 {
 			return fmt.Errorf("app %s: command is required", name)
@@ -671,6 +676,12 @@ func (a *App) Validate() error {
 		// parser's (minMemoryMax, maxCPUQuota).
 		if cfg.TasksMax < 0 || cfg.CPUQuota < 0 {
 			return fmt.Errorf("app %s: tasks_max and cpu_quota must not be negative, got %d and %d", name, cfg.TasksMax, cfg.CPUQuota)
+		}
+		if cfg.TasksMax == 1 {
+			// The sleeping sibling every unit carries (#380) is one of
+			// the tasks: a cap of 1 refuses its fork and the shell dies
+			// before the app runs.
+			return fmt.Errorf("app %s: tasks_max must be at least 2, got 1; leave it out for the default", name)
 		}
 		if cfg.MemoryMax > 0 && cfg.MemoryMax < minMemoryMax {
 			return fmt.Errorf("app %s: memory_max must be at least %s, got %d bytes", name, humanize.Bytes(minMemoryMax), cfg.MemoryMax)

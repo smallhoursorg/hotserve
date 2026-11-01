@@ -674,7 +674,7 @@ code=$(curl -s -o /tmp/deploy-body -w '%{http_code}' --max-time 90 \
 	echo "deploy response: $(cat /tmp/deploy-body)"
 	echo "--- app journal (hotserve-demo):"
 	journalctl --no-pager -t hotserve-demo 2>/dev/null | tail -40
-	die "deploy under systemd sandbox failed with HTTP $code — a deny-by-default view fails with ENOENT (or 203/EXEC for the command itself), not a permission error, so if the journal shows a missing path suspect the unit's base view rather than file modes"
+	die "deploy under systemd sandbox failed with HTTP $code — a deny-by-default view fails with ENOENT (or the sibling shell's 'exec: … not found', exit status 127, for the command itself), not a permission error, so if the journal shows a missing path suspect the unit's base view rather than file modes"
 }
 curl -fsS --max-time 5 "$PROXY/" | grep -q "hello smoke" \
 	|| die "proxy does not serve the deployed app"

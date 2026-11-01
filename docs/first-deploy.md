@@ -284,8 +284,8 @@ the above:
    f=deno-$(uname -m)-unknown-linux-gnu.zip
    curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f"
    curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f.sha256sum"
-   sha256sum -c "$f.sha256sum"
-   apt install -y unzip && unzip -o "$f" deno -d /usr/local/bin
+   sha256sum -c "$f.sha256sum" &&
+     apt install -y unzip && unzip -o "$f" deno -d /usr/local/bin
    ```
 
 2. In the `app example` block, replace the four lines from the Node
@@ -478,7 +478,12 @@ why — a token the box would not accept, a URL outside the allowlist, a
 health check that never passed. A 401 means the box's `deploy_trust`
 for this app does not accept the run: most often the `claim
 repository` or `claim ref` names another repository or branch, or the
-audience differs. It also means an app the box does not know — a
+audience differs: the job asks for `hotserve`, so a block with another
+`audience` needs the same name as `HOTSERVE_AUDIENCE` in the job's
+`env:`, beside `HOTSERVE_URL`, so the rollback step gets it too (a
+repository variable alone does not reach the script). A `box` block's
+goes in the `env:` at the top of `apply.yml`.
+It also means an app the box does not know — a
 typo in `HOTSERVE_URL` — since an unknown app answers the same 401
 unless a global `deploy_trust` accepts the token. The step prints the
 values the run minted its token with, so you can hold them against

@@ -307,16 +307,20 @@ boxes, and any CI that gives it what the Actions job does can run it:
   that one token with every request, polls included, so it must
   outlive the run.
   - From a CI's OIDC: on GitLab, an `id_tokens:` entry with
-    `aud: hotserve`, and a box block trusting
-    `deploy_trust gitlab { audience hotserve; claim project_path your-org/boxes; claim ref_path refs/heads/main }`.
+    `aud: hotserve`, and a box block with a `deploy_trust gitlab` holding
+    `audience hotserve`, `claim project_path your-org/boxes` and
+    `claim ref_path refs/heads/main`, a line each.
     Not tested.
-  - From a runner without OIDC: a key the box block trusts as
-    `deploy_trust local { public_key …; audience hotserve }`
+  - From a runner without OIDC: a key the box block trusts with a
+    `deploy_trust local` holding `public_key …` and `audience hotserve`,
+    a line each
     (`hotserve deploy-keygen` makes the pair), and a token minted each
-    run with `hotserve deploy-token --key … --audience hotserve --claims sha=<commit>`.
+    run with `hotserve deploy-token --key … --audience hotserve --ttl 1h --claims sha=<commit>`.
     hotserve's own end-to-end tests run `bin/apply` this way. The
     private key is then a stored secret, which OIDC avoids; the
-    signatures still bound what it can push.
+    signatures still bound what it can push. `hotserve` is one name
+    the boxes' blocks share, not a box's own: the one token goes to
+    every box in the repository.
 
 The rules above hold on any host: a merge button that squashes,
 rebases or writes its own merge commit lands a commit no listed key

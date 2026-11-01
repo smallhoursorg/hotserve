@@ -176,7 +176,10 @@ are unset after everything else, because they name the user manager's
 own runtime directory and bus — the sockets a sandboxed app must not
 hold. Setting either has no effect rather than an error. Keys must be valid
 variable names (`[A-Za-z_][A-Za-z0-9_]*`) — systemd rejects anything
-else, so config load does too. Anything more an app needs must be
+else, so config load does too. Four names are the shell's: `IFS`,
+`OPTIND`, `PPID` and `PWD` are reset by the `/bin/sh` every unit runs
+behind (below, "worker trees never outlive it"), so `env` and
+`env_file` refuse them rather than pass a value that would not arrive. Anything more an app needs must be
 passed explicitly via `env` or `env_file`. Apps get the user manager's
 resource limits; each unit sets its open-files limit (soft and hard)
 to the manager's ceiling, which the package raises to match
@@ -267,7 +270,7 @@ resolved at config load.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `root` | `/var/lib/liveswap` | Releases, shared data, state per app |
+| `root` | `/var/lib/liveswap` | Releases, shared data, state per app. Plain characters: a space, a colon, a backslash, a quote or a control character in the path is refused, since a systemd unit file cannot carry one in a bind mount |
 | `deploy_trust <preset> { … }` | — (required) | Who may deploy; global default or per app (see [Deploy authentication](#deploy-authentication-deploy_trust)) |
 | `allow_insecure_http` | off | Permit plain-http artifact URLs |
 | `artifact_allowlist` | — (required) | Where artifacts may be fetched from. Entries are a host (`artifacts.corp`) or a host + path prefix (`github.com/your-org/`). An entry admits only the scheme's default port unless it declares one (`minio.corp:9000`) — no wildcards; the port picks which service on the host answers, so it belongs to the operator, not the payload. Pin the path on multi-tenant hosts — a bare `github.com` admits anyone's artifacts. Query strings are refused unless the entry declares the parameter names it vouches for: `gitlab.com/api/v4/projects/42/?job` allows `?job=build`, `bucket.s3.corp/releases/?X-Amz-*` allows the presigned-URL family (a trailing `*` declares a prefix; values are never re-encoded — signed queries pass through byte-identical — but every query byte must be a legal RFC 3986 query character, so percent-encode anything exotic). Closed by default because on some servers a query *name* can override path routing entirely (WordPress-style `?p=2`), which would defeat the path pin. A refused URL fails the deploy with a 422 naming the offending parameter. First hop only, by design (GitHub asset URLs redirect to S3); every hop must still be https unless `allow_insecure_http`. Apps may override |
@@ -291,7 +294,7 @@ resolved at config load.
 | `max_artifact_entries` | `100000` | Cap on the files, directories and links one artifact creates (implied parent directories included). The byte cap does not bound what extraction *consumes* — every object costs an inode and most a disk block — so this is what keeps one hostile artifact from filling the disk for everything else on the box. A CI-built artifact is thousands; a Next.js standalone output is ~5–20k |
 | `backup { … }` | — | Declares what under the app's `shared/` is worth backing up: `sqlite` names database files, `files` names files and directories (`.` is all of `shared/`). See [Declaring backups](#declaring-backups) |
 | `memory_max` | none | RAM for every unit of the app, e.g. `512MB` (at least `1MB`); at it the kernel kills the process that asked, the unit fails and the watchdog restarts the app. No swap under it. See [Resource caps](#resource-caps) |
-| `tasks_max` | none (the user manager's own default, 15% of threads-max) | Threads and processes of every unit of the app; past it a fork or thread fails with EAGAIN. Removing it on a reload puts the running unit back on the manager's default, where that default can be read; otherwise the unit keeps the cap until its next launch, and the journal says so |
+| `tasks_max` | none (the user manager's own default, 15% of threads-max) | Threads and processes of every unit of the app; past it a fork or thread fails with EAGAIN. The unit's sleeping sibling (below, "worker trees never outlive it") is one of them, so the app itself gets one fewer and the least you can set is 2. Removing it on a reload puts the running unit back on the manager's default, where that default can be read; otherwise the unit keeps the cap until its next launch, and the journal says so |
 | `cpu_quota` | none | CPU time for every unit of the app, in percent of one CPU: `200%` is two CPUs' worth, at most `100000%`; past it the app waits, nothing is killed |
 
 Every duration, count and size above must be more than `0`, except `soak`
@@ -405,7 +408,7 @@ you set it. What each one does when it is hit:
 | Cap hit | What happens | What you see |
 |---|---|---|
 | `memory_max` | The kernel kills the process that asked for the memory — under a `sh -c` or `npm start` command that is a child — and the manager then stops the unit (`Result=oom-kill`); the watchdog restarts the app, on its budget. A `pre_start` that hits it fails the deploy | `journalctl -k` shows the kill — the kernel's line names the unit's cgroup and the process; the app's own journal (`journalctl -t hotserve-<app>`) shows nothing, a killed process prints no last line; the deploy's response or `watchdog.last_restart_cause` says `crash`, and the exit the runner records ends `; the kernel's OOM killer took a process of the unit (its memory_max, or the box's memory), and the unit was stopped for it` |
-| `tasks_max` | A `fork` or thread creation fails with `EAGAIN`. A runtime limps on; a `sh -c` wrapped `command` dies on the first refused fork (dash exits 2), which the watchdog reads as a crash | the app's own error, in its journal |
+| `tasks_max` | A `fork` or thread creation fails with `EAGAIN`. A runtime limps on; a `sh -c` wrapped `command` dies on the first refused fork (dash exits 2), which the watchdog reads as a crash. Every unit starts as such a shell (the sibling), which is why a cap of 1 is refused at config time | the app's own error, in its journal |
 | `cpu_quota` | The unit waits for the next 100 ms period. Nothing is killed | latency; `cpu.stat`'s `nr_throttled` in the unit's cgroup |
 
 Sizing, measured 2026-10-22: an idle Node server has 7 threads (11 under
@@ -499,8 +502,9 @@ follow redirects: a 3xx answer is simply "not 2xx".
 A relaunch runs the deploy's pre-flight first, and a release it
 refuses is not retried: one built for another machine (a backup
 restored onto a box of the other architecture), or whose command is
-no longer there or outside the sandbox view, would only die as
-`203/EXEC` on every attempt. The watchdog then drops the instance —
+no longer there or outside the sandbox view, would only die at exec
+on every attempt (`exit status 127`, the shell's `not found` in the
+journal). The watchdog then drops the instance —
 nothing current, the proxy answers 5xx — logs the refusal once, parks
 in `idle`, and status names it in `last_failure`; boot recovery
 refuses such a release the same way, in the same field. A deploy of
@@ -608,7 +612,8 @@ surfaces, and it has a fallback there: the health gate fails the new
 version while the old one keeps serving. A command that is not in the
 view is refused before the unit is even created — at the deploy's
 pre-flight, as a 422 — with a message that says where the runtime has
-to live, rather than failing as a bare `203/EXEC`. The same pre-flight
+to live, rather than failing at exec with the shell's `not found`
+(`exit status 127`) in the journal. The same pre-flight
 refuses an executable built for another machine (an x86-64 tarball
 pushed to an arm64 box) naming the `runs-on` to build on, and a 32-bit
 executable, which a unit cannot run: units allow the box's native
@@ -895,8 +900,8 @@ Presets:
 - `deploy_trust oidc { issuer <url>; audience <a>; … }` — any OIDC
   provider (CircleCI, Buildkite, k8s, …).
 - `deploy_trust local { public_key <path>; audience <a> }` — a key you
-  control, for non-CI deploys. Generate it with `hotserve
-  deploy-keygen`, mint tokens with `hotserve deploy-token`.
+  control, for a laptop or a runner with no OIDC. Generate it with
+  `hotserve deploy-keygen`, mint tokens with `hotserve deploy-token`.
 
 [docs/outside-github.md](../docs/outside-github.md) walks through the
 `gitlab`, `oidc` and `local` presets end to end: a key's two halves,
@@ -961,10 +966,12 @@ it from access logs automatically.
 `deploy_trust` is repeatable, and a request is authorized if **any**
 block accepts it. That is how a team combines CI with per-developer
 break-glass keys — think of the `local` blocks as an `authorized_keys`
-list:
+list. This is the global options' `liveswap` block, not a whole file:
 
 ```caddyfile
 liveswap {
+	artifact_allowlist api.github.com/repos/your-org/
+
 	# Everyday path: CI deploys on merge, no secret anywhere.
 	deploy_trust github {
 		audience blog
@@ -976,18 +983,36 @@ liveswap {
 	# block; no shared secret, no effect on the others. The audience
 	# names this box (its deploy hostname), so a token minted for
 	# another box that trusts the same key is refused here; mint with
-	# `--audience blog.example.com`.
-	deploy_trust local { public_key /etc/hotserve/alice.pub  audience blog.example.com  subject alice }
-	deploy_trust local { public_key /etc/hotserve/bob.pub    audience blog.example.com  subject bob }
+	# `--audience blog.example.com --subject alice`.
+	deploy_trust local {
+		public_key /etc/hotserve/alice.pub
+		audience blog.example.com
+		subject alice
+	}
+	deploy_trust local {
+		public_key /etc/hotserve/bob.pub
+		audience blog.example.com
+		subject bob
+	}
 
-	app blog { command node server.js }
+	app blog {
+		command node server.js
+	}
 }
 ```
 
+A `github` block's `audience` is what the job must ask GitHub for. The
+templates' `scripts/deploy.sh` asks for `hotserve`, so `audience blog`
+above needs `HOTSERVE_AUDIENCE: blog` in the job's `env:`, beside
+`HOTSERVE_URL`, so the rollback step gets it too, or the box answers
+401.
+
 Each dev runs `hotserve deploy-keygen` once and hands you the `.pub`
-(public — safe to share); you add a block and reload. Use OIDC in CI,
-never a `local` key in CI (that would store a long-lived private key in
-CI secrets — the thing OIDC exists to avoid).
+(public — safe to share); you add a block and reload. Use OIDC in CI
+wherever the runner has it: a `local` key there stores a long-lived
+private key in CI secrets — the thing OIDC exists to avoid. A runner
+with no OIDC is what a key in CI is for
+([docs/outside-github.md](../docs/outside-github.md)).
 
 Every authorized deploy records **who authorized it**: the label of the
 source that accepted the token, then what the token says about where
@@ -1685,7 +1710,16 @@ its socket (see [Sandbox](#sandbox)).
   explicitly, as root:
   `runuser -u hotserve -- env XDG_RUNTIME_DIR=/run/user/$(id -u hotserve) systemctl --user stop 'hotserve-*'`. Units are created with `Restart=no` — the
   watchdog is the only restarter of apps — and stopping a version kills its
-  whole cgroup, so worker trees never outlive it.
+  whole cgroup, so worker trees never outlive it. Each unit shows a
+  `sleep infinity` beside the app in `systemctl --user status`: hotserve
+  starts every app behind a shell that forks that sibling and becomes
+  the app, because systemd 257 waits an app's `grace` on a stop only
+  when its process is not alone in the cgroup (#380). To the app it is
+  one child it did not spawn: it sleeps for the app's whole life, dies
+  at the stop's SIGTERM with everything else in the cgroup, and the app
+  gets one SIGCHLD then, as a prefork master does from a worker. It
+  costs one task (`tasks_max` counts it) and about a megabyte, and adds
+  nothing to the app's environment.
 - **Changed app definitions apply at the app's next launch** — a
   deploy, a rollback, or a relaunch after a crash, a sustained health failure, or a reboot — never by
   restarting a running app mid-reload. To give an app one now, roll

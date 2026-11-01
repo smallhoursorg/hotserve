@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -56,7 +57,8 @@ func propValues(u unitSpec, name string) []any {
 
 // Promise: a unit has one Exec*= command, its ExecStartEx — no
 // ExecStopPost= or other — so the manager spawns one process per unit
-// (the app's own children join its namespaces as ever): on a user
+// (the app's own children join its namespaces as ever, the sibling the
+// shell forks before it execs the app among them, #380): on a user
 // manager a second process the manager spawns cannot join the IPC
 // namespace the first made (#311). The instance's socket is hotserve's
 // to remove, with the run dir (socketRef.retire), so a unit names no
@@ -946,6 +948,48 @@ func TestValidateRejectsUncleanRoot(t *testing.T) {
 	}
 }
 
+// TestValidateSandboxRootRefusesUnitSyntax: a root with a character a
+// unit file's path grammar owns is refused at config load, named. The
+// manager writes BindPaths= and the rest to the unit's transient file
+// unquoted and reads it back at every daemon-reload; measured (#380),
+// a space split the binds, a colon emptied them, a backslash left the
+// unit bad-setting, a tab or a quote a unit that never ran. '%', ';'
+// and non-ASCII letters came back unchanged, and stay allowed.
+func TestValidateSandboxRootRefusesUnitSyntax(t *testing.T) {
+	for _, bad := range []string{"/srv/live swap", "/srv/live:swap", `/srv/live\swap`, "/srv/live\tswap", `/srv/live"swap`, "/srv/live'swap", "/srv/live\x7fswap"} {
+		err := validateSandboxRoot(bad)
+		if err == nil || !strings.Contains(err.Error(), "cannot carry in a path") {
+			t.Errorf("root %q accepted (%v)", bad, err)
+		}
+	}
+	for _, ok := range []string{"/srv/liveswap", "/srv/live%swap", "/srv/live;swap", "/srv/livéswap", "/srv/live-swap.d_1"} {
+		if err := validateSandboxRoot(ok); err != nil {
+			t.Errorf("root %q refused: %v", ok, err)
+		}
+	}
+	// A root that is a link to such a path: refused naming the target,
+	// which is where the character is.
+	root := filepath.Join(t.TempDir(), "liveswap")
+	target := filepath.Join(t.TempDir(), "live swap")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSandboxRoot(root); err == nil || !strings.Contains(err.Error(), "which resolves to "+strconv.Quote(target)+", contains a space") {
+		t.Errorf("a root linking to a path with a space must be refused naming the target: %v", err)
+	}
+	// And a source resolved at launch, for a root re-pointed since the
+	// config loaded: the same refusal, from the bind-source check.
+	if err := refusedAsBindSource("/run/live swap/blog/shared"); err == nil || !strings.Contains(err.Error(), "contains a space") {
+		t.Errorf("a resolved bind source with a space must be refused: %v", err)
+	}
+	if err := refusedAsBindSource("/run/liveswap/blog/shared"); err != nil {
+		t.Errorf("a plain resolved bind source refused: %v", err)
+	}
+}
+
 // TestResolveBindSourcesRefusesPlantedSymlink: `shared` and the
 // release dirs live under the shared hotserve UID and
 // appDirs.ensure's MkdirAll succeeds on a symlink, so a link planted
@@ -1269,8 +1313,9 @@ func TestAppDirAliasToSiblingRefused(t *testing.T) {
 // supervisor's view of the filesystem, which under a deny-by-default
 // sandbox is not the unit's. A runtime installed outside /usr —
 // /opt/node/bin/node, an nvm shim under a home directory — resolves
-// here and then does not exist in there, and systemd reports that as a
-// bare status=203/EXEC after the unit has already been created.
+// here and then does not exist in there, and the sibling shell reports
+// that as `exec: …: not found`, exit status 127, after the unit has
+// already been created.
 func TestUnitForRefusesCommandOutsideTheView(t *testing.T) {
 	r, _ := newTestSystemdRunner(t)
 	root := t.TempDir()
@@ -1443,7 +1488,7 @@ func TestSymlinkedRootUnderPrivateTmpLaunches(t *testing.T) {
 // follow symlinks, so a shim under a bound directory pointing at an
 // unbound one (the vendored-runtime layout /usr/local/bin/node ->
 // /opt/node/bin/node) would pass an unresolved check and then die as
-// the bare 203/EXEC the check exists to replace.
+// the shell's `not found`, exit 127, the check exists to replace.
 func TestUnitForResolvesTheCommandBeforeTestingTheView(t *testing.T) {
 	r, _ := newTestSystemdRunner(t)
 	root := t.TempDir()
