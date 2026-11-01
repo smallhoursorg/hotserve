@@ -46,8 +46,8 @@ v=v$(cat .deno-version)               # from a checkout; on the box, type what t
 f=deno-$(uname -m)-unknown-linux-gnu.zip
 curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f"
 curl -fsSLO "https://github.com/denoland/deno/releases/download/$v/$f.sha256sum"
-sha256sum -c "$f.sha256sum"
-apt install -y unzip && unzip -o "$f" deno -d /usr/local/bin
+sha256sum -c "$f.sha256sum" &&
+  apt install -y unzip && unzip -o "$f" deno -d /usr/local/bin
 ```
 
 **2. Add the app to the box's Caddyfile**, with the lines from
@@ -117,7 +117,10 @@ The deploy step prints the app's status when the new version is live,
 or why it was refused; a refused deploy leaves the old version
 serving. A 401 means the box's `deploy_trust` for this app does not
 accept the run — most often `claim repository` or `claim ref` names
-another repository or branch — or that `HOTSERVE_URL` names an app
+another repository or branch, or its `audience` is not what the job
+asks for (`hotserve`, unless the job's `env:` sets `HOTSERVE_AUDIENCE`
+beside `HOTSERVE_URL`, where the rollback step gets it too) — or that
+`HOTSERVE_URL` names an app
 the box does not know, which answers the same 401. The step prints
 the values this run minted its token with; the box's journal
 (`journalctl -u hotserve`) names the app asked for and the check that
@@ -141,7 +144,9 @@ What a first deploy that worked looks like, from the laptop:
   (schema v1)`; the 503 from before the deploy is gone.
 - `ssh alice@box.example.com journalctl -t hotserve-example` shows the
   app's own output — the migration's line, then whatever `main.ts`
-  prints. The `adm` group the box README grants is what reads it.
+  prints. `alice` is the administrator from
+  [Hardening](https://github.com/smallhoursorg/hotserve/blob/main/docs/hardening.md#3-an-administrator-if-you-want-one),
+  whose `adm` group is what reads it; root reads it too.
 
 A re-run of the same workflow run rebuilds the tarball, and the box
 refuses it with a 422: versions are immutable on the box, that
@@ -186,13 +191,14 @@ in the request body, so a laptop build needs no release. The token
 comes from `hotserve deploy-token`, and hotserve's release binaries
 are Linux only, so this is a path for a Linux machine that is not the
 box (the signing key must stay off the box). With a `deploy_trust local` block
-on the box (see
+on the box whose `audience` is the box's deploy host,
+`deploy.example.com` here (see
 [Deploy authentication](https://github.com/smallhoursorg/hotserve/blob/main/liveswap/README.md#deploy-authentication-deploy_trust)):
 
 ```sh
 deno task bundle
 HOTSERVE_URL=https://deploy.example.com/example \
-HOTSERVE_TOKEN=$(hotserve deploy-token --key deploy.key --audience hotserve) \
+HOTSERVE_TOKEN=$(hotserve deploy-token --key deploy.key --audience deploy.example.com) \
 deno task deploy
 ```
 

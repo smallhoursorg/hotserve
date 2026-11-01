@@ -1086,11 +1086,13 @@ func run(t *testing.T, name string, args ...string) string {
 // connection) never reaches them. A future round tempted to reinstate
 // it should fail here first.
 //
-// A missing interpreter rather than broken namespaces: 203/EXEC and
-// 226/NAMESPACE both come from the same forked child after the same
-// "done", and this one needs no host surgery to provoke. unitFor's own
-// in-view check passes — the script is executable and inside the
-// sandbox view — so the failure genuinely happens in the child.
+// A missing interpreter rather than broken namespaces: a failed exec
+// (the sibling shell's, exit status 127 with "not found" in the
+// journal) and 226/NAMESPACE both come from the same forked child
+// after the same "done", and this one needs no host surgery to
+// provoke. unitFor's own in-view check passes — the script is
+// executable and inside the sandbox view — so the failure genuinely
+// happens in the child.
 func TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds(t *testing.T) {
 	r := integrationRunner(t)
 	root, release, shared := sandboxRoot(t)
@@ -1126,8 +1128,8 @@ func TestIntegrationSystemdSandboxedUnitFailsAfterItsStartJobSucceeds(t *testing
 	if exit == nil {
 		t.Fatal("no exit recorded for a unit observed dead")
 	}
-	if exit.ExecMainStatus != 203 {
-		t.Fatalf("ExecMainStatus = %d (%s), want 203/EXEC — the child died in exec, after the start job said done",
+	if exit.ExecMainStatus != 127 {
+		t.Fatalf("ExecMainStatus = %d (%s), want 127 — the sibling shell's exec of the script failed (its interpreter not found), after the start job said done",
 			exit.ExecMainStatus, exit.exitString())
 	}
 }
@@ -1275,5 +1277,238 @@ func TestIntegrationSystemdCapsHoldAndChangeLive(t *testing.T) {
 	}
 	if got := h.state().Caps; got.any() {
 		t.Errorf("handle reports %+v after lifting, want none", got)
+	}
+}
+
+// oneProcessApp is the shape #380 found: an app that is one process —
+// no worker, no shell child — which traps TERM, takes a few hundred
+// milliseconds of shell builtins to "drain", writes a marker and exits.
+// It stays one process by blocking on a FIFO open, not on a sleep.
+func oneProcessApp(t *testing.T, version string, grace time.Duration) (spec startSpec, shared string) {
+	t.Helper()
+	root, release, shared := sandboxRoot(t)
+	if err := unix.Mkfifo(filepath.Join(shared, "fifo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := "trap 'i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done; : > \"$SHARED/drained.txt\"; exit 0' TERM\n" +
+		": > \"$SHARED/ready.txt\"\n" +
+		"while :; do read x < \"$SHARED/fifo\"; done\n"
+	if err := os.WriteFile(filepath.Join(release, "server"), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return startSpec{
+		app: "itest", version: version, nonce: "0a1b2c3d0a1b2c3d", command: []string{"./server"}, dir: release,
+		env: []string{"PATH=" + os.Getenv("PATH"), "SHARED=" + shared}, grace: grace,
+		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
+	}, shared
+}
+
+// waitForFile polls for path, up to within.
+func waitForFile(t *testing.T, path string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not appear within %s", path, within)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// lostMainPIDRace reports whether the manager marked the unit's main
+// pid as not its child — the race #380 describes, logged by the manager
+// at the unit's start. A journal that cannot be read fails the test: a
+// count of zero must mean no lost race, not no journal.
+func lostMainPIDRace(t *testing.T, unit string) bool {
+	t.Helper()
+	out, err := exec.Command("journalctl", "-q", "-o", "cat", "--no-pager", "USER_UNIT="+unit).CombinedOutput()
+	if err != nil {
+		t.Fatalf("journalctl for %s: %v\n%s", unit, err, out)
+	}
+	return strings.Contains(string(out), "not our child")
+}
+
+// TestIntegrationSystemdOneProcessAppKeepsItsGrace: a one-process app
+// gets its grace on every stop path. On systemd 257 the manager marks
+// such a unit's main pid alien on half or more of its starts (the pid
+// namespace's intermediate exits after sending the pid, and the manager
+// may read the parent first), and then follows SIGTERM with SIGKILL at
+// once when nothing else is in the cgroup; the sibling every unit
+// carries (withSibling) is that something else (#380). Half the stops
+// are hotserve's (Stop), half the manager's alone (`systemctl --user
+// stop`: an operator's, or the shape of a reboot), which no code of
+// hotserve's could reach. Before the sibling, 22 of 36 such stops lost
+// their handler, every one of them a lost race; the run logs how many
+// starts lost it, so the lane shows the race was exercised.
+func TestIntegrationSystemdOneProcessAppKeepsItsGrace(t *testing.T) {
+	r := integrationRunner(t)
+	const n = 12
+	lost := 0
+	for i := 0; i < n; i++ {
+		spec, shared := oneProcessApp(t, "oneproc"+strconv.Itoa(i), 10*time.Second)
+		h, err := r.Start(spec)
+		if err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		waitForFile(t, filepath.Join(shared, "ready.txt"), 5*time.Second)
+		unit := h.state().Unit
+		started := time.Now()
+		how := "Stop"
+		if i%2 == 1 {
+			how = "systemctl --user stop"
+			run(t, "systemctl", "--user", "stop", unit)
+			waitDone(t, r, h)
+		} else if err := r.Stop(h, spec.grace); err != nil {
+			t.Fatalf("stop %d: %v", i, err)
+		}
+		took := time.Since(started)
+		raced := lostMainPIDRace(t, unit)
+		if raced {
+			lost++
+		}
+		if _, err := os.Stat(filepath.Join(shared, "drained.txt")); err != nil {
+			t.Fatalf("instance %d, %s (main pid marked alien: %v): its SIGTERM handler did not finish — SIGKILL came with no grace (stop took %s)", i, how, raced, took)
+		}
+		if took >= spec.grace {
+			t.Fatalf("instance %d, %s: took %s, the whole grace", i, how, took)
+		}
+	}
+	t.Logf("%d of %d starts had the manager mark the main pid alien (\"not our child\"); every handler finished", lost, n)
+}
+
+// TestIntegrationSystemdUnitEnvironmentIsTheBuiltEnv: the sibling
+// shell adds nothing to the app's environment. dash exports PWD, which
+// the script unsets before the exec; invariant 8 of the runner says a
+// unit's environment is exactly the one the caller built on the
+// manager's defaults, and this is the one place a shell is in the way.
+// The command is /usr/bin/env itself, not a script: a `#!/bin/sh` app
+// would export PWD on its own account, which is its business.
+func TestIntegrationSystemdUnitEnvironmentIsTheBuiltEnv(t *testing.T) {
+	r := integrationRunner(t)
+	root, release, shared := sandboxRoot(t)
+	spec := startSpec{
+		app: "itest", version: "envexact", nonce: "0a1b2c3d0a1b2c3d", command: []string{"/usr/bin/env"}, dir: release,
+		env: []string{"PATH=" + os.Getenv("PATH"), "SHARED=" + shared}, grace: 5 * time.Second,
+		sandbox: &sandboxSpec{root: root, appDir: filepath.Join(root, "itest"), appName: "itest",
+			writable: []bindPath{{dest: release, source: release}, {dest: shared, source: shared}}},
+	}
+	unit, err := unitName(spec, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := r.RunOnce(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	// The app's stdout is its journal, which may be a moment behind.
+	// _SYSTEMD_USER_UNIT is the field on the process's own lines; the
+	// manager's lines about the unit carry USER_UNIT instead.
+	var out string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, err := exec.Command("journalctl", "-q", "-o", "cat", "--no-pager", "_SYSTEMD_USER_UNIT="+unit).CombinedOutput()
+		if err != nil {
+			t.Fatalf("journalctl for %s: %v\n%s", unit, err, b)
+		}
+		out = string(b)
+		if strings.Contains(out, "SHARED="+shared) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(out, "SHARED="+shared) {
+		t.Fatalf("the built env did not reach the app (or its journal):\n%s", out)
+	}
+	for _, kv := range strings.Split(out, "\n") {
+		switch k, _, _ := strings.Cut(kv, "="); k {
+		case "PWD", "OLDPWD", "SHLVL", "_":
+			t.Errorf("the sibling shell left %q in the app's environment", kv)
+		}
+	}
+}
+
+// TestIntegrationSystemdPreStartKeepsItsGraceAtDeadline: a pre_start
+// that runs past the unit's own TimeoutStartSec= is stopped by the
+// manager with its grace, the sibling in its cgroup too. Before it, a
+// one-process migration at its deadline was SIGKILLed at once.
+func TestIntegrationSystemdPreStartKeepsItsGraceAtDeadline(t *testing.T) {
+	r := integrationRunner(t)
+	spec, shared := oneProcessApp(t, "predeadline", 5*time.Second)
+	spec.startTimeout = 700 * time.Millisecond
+	started := time.Now()
+	err := r.RunOnce(context.Background(), spec)
+	took := time.Since(started)
+	if err == nil {
+		t.Fatal("a pre_start past its deadline must fail")
+	}
+	if _, serr := os.Stat(filepath.Join(shared, "drained.txt")); serr != nil {
+		t.Fatalf("the pre_start's SIGTERM handler did not finish: SIGKILL came with no grace (took %s, %v): %v", took, err, serr)
+	}
+	if took >= spec.startTimeout+spec.grace {
+		t.Fatalf("took %s: the whole grace", took)
+	}
+	t.Logf("pre_start ended at its deadline with its grace: handler ran, took %s (%v)", took, err)
+}
+
+// TestIntegrationSystemdUnitOutlivesItsFile: a unit whose transient
+// file the manager cannot read back after a daemon-reload — deleted
+// here; in #380 an Environment= line past 1 MiB, or a root with a
+// backslash — is still a running unit: the watcher keeps following it,
+// Stop ends its process, and a sweep stops it as a stray. Before the
+// fix such a unit read as exited: the watchdog relaunched beside it,
+// Stop was a no-op and the sweep skipped it, the process running on.
+func TestIntegrationSystemdUnitOutlivesItsFile(t *testing.T) {
+	r := integrationRunner(t)
+	body := "trap 'exit 0' TERM\nwhile :; do sleep 0.2; done\n"
+	stopped, swept := scriptApp(t, body), scriptApp(t, body)
+	stopped.version, swept.version = "nofile-stopped", "nofile-swept"
+	hs, err := r.Start(stopped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hw, err := r.Start(swept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	pidsStopped, pidsSwept := unitPIDs(t, hs.state().Unit), unitPIDs(t, hw.state().Unit)
+	for _, h := range []handle{hs, hw} {
+		if err := os.Remove(filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "systemd", "transient", h.state().Unit)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(t, "systemctl", "--user", "daemon-reload")
+	time.Sleep(4 * r.poll)
+	for _, h := range []handle{hs, hw} {
+		unit := h.state().Unit
+		t.Logf("%s after the reload: %s", unit, strings.ReplaceAll(strings.TrimSpace(run(t, "systemctl", "--user", "show", unit, "-p", "LoadState,ActiveState")), "\n", " "))
+		if !r.Alive(h) {
+			t.Fatalf("%s was declared exited by the reload; its process runs on", unit)
+		}
+	}
+	if err := r.Stop(hs, stopped.grace); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	waitPIDsGone(t, pidsStopped, 5*time.Second)
+	if r.Alive(hs) {
+		t.Fatal("stopped handle still alive")
+	}
+	// A second runner (a restarted hotserve) sees the other as a stray.
+	r2 := integrationRunner(t)
+	if err := r2.Sweep("itest", nil); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	waitPIDsGone(t, pidsSwept, 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for r.Alive(hw) && time.Now().Before(deadline) {
+		time.Sleep(r.poll)
+	}
+	if r.Alive(hw) {
+		t.Fatal("the swept unit's watcher never saw it go")
 	}
 }

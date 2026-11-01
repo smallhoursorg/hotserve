@@ -177,7 +177,7 @@ func TestCaddyfileRefusesZeroWhereItWouldReadAsUnset(t *testing.T) {
 		{"max_artifact_size 0MB", "max_artifact_size must be at least 1 byte, got 0MB"},
 		{"memory_max 0", "memory_max must be at least 1.0 MB, got 0"},
 		{"memory_max 999999", "memory_max must be at least 1.0 MB, got 999999"},
-		{"tasks_max 0", "tasks_max must be at least 1, got 0"},
+		{"tasks_max 1", "tasks_max must be at least 2, got 1"},
 		{"cpu_quota 0%", "cpu_quota must be at least 1%, got 0%"},
 		{"cpu_quota 100001%", "cpu_quota must be at most 100000% (a thousand CPUs' worth), got 100001%"},
 		{"drain -1s", "drain must be more than 0, got -1s"},
@@ -258,6 +258,7 @@ func TestCaddyfileUnmarshalErrors(t *testing.T) {
 		{"command missing args", "liveswap {\n\tapp a {\n\t\tcommand\n\t}\n}", "wrong argument count"},
 		{"env missing value", "liveswap {\n\tapp a {\n\t\tenv K\n\t}\n}", "wrong argument count"},
 		{"invalid env key", "liveswap {\n\tapp a {\n\t\tenv my-var 1\n\t}\n}", `env key "my-var" is not a valid environment variable name`},
+		{"shell-owned env key", "liveswap {\n\tapp a {\n\t\tenv IFS x\n\t}\n}", `env key "IFS" is set by the shell`},
 		// Caddy strips "@id" keys before decoding, so only the parser can refuse this one.
 		{"env key Caddy strips", "liveswap {\n\tapp a {\n\t\tenv \"@id\" 1\n\t}\n}", `env key "@id" is not a valid environment variable name`},
 		{"root missing arg", "liveswap {\n\troot\n}", "wrong argument count"},

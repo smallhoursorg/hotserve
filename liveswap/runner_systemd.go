@@ -181,15 +181,25 @@ func (s unitStatus) stopBudget(grace time.Duration) time.Duration {
 
 func (s unitStatus) loaded() bool { return s.LoadState == "loaded" }
 
+// leftover reports a unit the manager still holds with no process to
+// it, which a reset unloads: one that ended with its file loaded, or
+// one that ended failed whatever became of its file — a unit whose
+// file did not read back after a daemon-reload and was then stopped
+// ends failed, and stays until reset like any other (#380).
+func (s unitStatus) leftover() bool { return s.loaded() || s.ActiveState == "failed" }
+
 // running reports whether the unit still has (or may still have) live
 // processes: anything but a terminal state counts, including
-// deactivating — a stop in progress is not yet a stopped unit.
+// deactivating — a stop in progress is not yet a stopped unit. The
+// active state alone decides. A unit whose file the manager could not
+// read back at a daemon-reload (LoadState error or bad-setting: an
+// Environment= past the 1 MiB a unit-file line may hold, a root with a
+// character BindPaths= gives meaning to), or whose file is gone
+// (not-found), still runs its process; a unit the manager does not
+// know at all reads back with no active state (UnitStatus) (#380).
 func (s unitStatus) running() bool {
-	if !s.loaded() {
-		return false
-	}
 	switch s.ActiveState {
-	case "inactive", "failed":
+	case "", "inactive", "failed":
 		return false
 	}
 	return true
@@ -513,7 +523,8 @@ func unitNonce(name string) (string, bool) {
 // working directory, so "./server" must become "<release>/server".
 // exec.LookPath also checks the file is executable, which turns a
 // missing or non-executable binary into a clear Start error instead of
-// a unit that fails a moment later with status 203.
+// a unit that fails a moment later at the sibling shell's exec (exit
+// status 127, "not found" in the journal).
 func resolveCommand(cmd, dir string) (string, error) {
 	if strings.Contains(cmd, "/") && !filepath.IsAbs(cmd) {
 		cmd = filepath.Join(dir, cmd)
@@ -550,14 +561,15 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 	// which under a deny-by-default sandbox is not the unit's: a
 	// runtime installed outside /usr — /opt/node/bin/node, an asdf
 	// or nvm shim under a home directory — resolves here and then
-	// does not exist in there. systemd would report that as a bare
-	// status=203/EXEC after the unit has already been created, so
-	// say it now, in the language the operator can act on.
+	// does not exist in there. The sibling shell would report that as
+	// `exec: …: not found`, exit status 127, after the unit has
+	// already been created, so say it now, in the language the
+	// operator can act on.
 	// Resolved, because LookPath does not follow symlinks: a shim at
 	// /usr/local/bin/node -> /opt/node/bin/node is under the /usr
-	// base entry and would pass unresolved, then die as the very
-	// 203/EXEC this check exists to replace — the symlink is inside
-	// the view, its target is not.
+	// base entry and would pass unresolved, then die at the very
+	// exec this check exists to replace — the symlink is inside the
+	// view, its target is not.
 	target = argv0
 	if t, err := filepath.EvalSymlinks(argv0); err == nil {
 		target = t
@@ -569,18 +581,102 @@ func resolveInView(spec startSpec) (argv0, target string, err error) {
 		}
 		return "", "", &preflightError{fmt.Sprintf("%s is not inside the sandbox view of app %s%s: an app sees its release dir, its shared dir and the OS runtime (/usr and a named handful of /etc), and nothing else on this host — ship the runtime inside the release, or install it under /usr", target, spec.app, via)}
 	}
+	if err := siblingToolsPresent(siblingShell, siblingSleep); err != nil {
+		return "", "", err
+	}
 	return argv0, target, nil
+}
+
+// siblingToolsPresent: the shell and the sleep every unit's command
+// runs behind (withSibling) exist and execute on this host. Both are
+// Essential on Debian and under /usr, in every view, so this is a
+// host that is not the supported one. The script itself exits 127 if
+// its `sleep 0` cannot run (red, the watchdog's crash); this check
+// says so before a unit exists, in the language the operator can act
+// on.
+func siblingToolsPresent(shell, sleep string) error {
+	for _, p := range []string{shell, sleep} {
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Mode().Perm()&0o111 == 0 {
+			return &preflightError{fmt.Sprintf("%s is missing or not executable on this host: every app unit runs its command behind `%s -c '%s'`, so the manager waits the app's grace on systemd 257 (#380); the supported host is Debian 13, where both are Essential", p, shell, siblingScript)}
+		}
+	}
+	return nil
 }
 
 // Preflight is a launch's early word, a deploy's and a relaunch's: the
 // command resolves inside the view, and the file it names was built
 // for this machine.
 func (r *systemdRunner) Preflight(spec startSpec) error {
+	if err := checkUnitLines(spec); err != nil {
+		return err
+	}
 	_, target, err := resolveInView(spec)
 	if err != nil {
 		return err
 	}
 	return checkMachine(target)
+}
+
+// unitLineMax is the longest line a unit file may hold (systemd's
+// LONG_LINE_MAX, 1 MiB). unitLineBudget is the room hotserve allows a
+// unit's Environment= and ExecStart=, each written as one line of the
+// transient unit's file: half the limit, since unitLineLength is an
+// estimate of the manager's escaping and not its letter.
+const (
+	unitLineMax    = 1 << 20
+	unitLineBudget = unitLineMax / 2
+)
+
+// unitLineLength estimates the line the manager writes for a list
+// setting: each entry quoted and C-escaped — a control or non-ASCII
+// byte becomes four (measured: 30,000 bytes of CJK became a line of
+// 120,187), a quote, a backslash or a specifier's % two.
+func unitLineLength(key string, entries []string) int {
+	n := len(key) + 1
+	for _, e := range entries {
+		n += 3 // the quotes and the separator
+		for i := 0; i < len(e); i++ {
+			switch c := e[i]; {
+			case c < 0x20 || c >= 0x7f:
+				n += 4
+			case c == '\\' || c == '"' || c == '\'' || c == '%':
+				n += 2
+			default:
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// checkUnitLines refuses an environment or a command the manager could
+// start but not read back. A transient unit's file holds the whole
+// Environment= on one line and the whole ExecStart= on another, and a
+// line past unitLineMax makes the unit's next daemon-reload — which
+// every systemd upgrade performs on the user manager — read it back as
+// LoadState=error: its stop timeout the manager's default, its sandbox
+// settings unknown to the manager, a reattach refusing it (#380,
+// measured with 1.2 MiB of environment). Named here, at the pre-flight,
+// with the largest variable, rather than months later.
+func checkUnitLines(spec startSpec) error {
+	if n := unitLineLength("Environment", spec.env); n > unitLineBudget {
+		largest, size := "", 0
+		for _, e := range spec.env {
+			if l := unitLineLength("", []string{e}); l > size {
+				largest, size = e, l
+			}
+		}
+		key, _, found := strings.Cut(largest, "=")
+		if !found {
+			key = "an entry with no =" // never the value
+		}
+		return &preflightError{fmt.Sprintf("the environment of app %s would be a %d-byte line in its unit file (the largest variable, %s, %d bytes of it), over the %d-byte bound: a line past 1 MiB makes the unit unreadable to systemd after a daemon-reload — move large values out of env_file and the Caddyfile, into a file under the app's shared dir", spec.app, n, key, size, unitLineBudget)}
+	}
+	if n := unitLineLength("ExecStart", withSibling(spec.command)); n > unitLineBudget { // the argv as the unit carries it, behind its sibling shell
+		return &preflightError{fmt.Sprintf("the command of app %s would be a %d-byte line in its unit file, over the %d-byte bound: a line past 1 MiB makes the unit unreadable to systemd after a daemon-reload — shorten its arguments", spec.app, n, unitLineBudget)}
+	}
+	return nil
 }
 
 func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) {
@@ -599,6 +695,9 @@ func (r *systemdRunner) unitFor(spec startSpec, oneshot bool) (unitSpec, error) 
 	}
 	argv0, _, err := resolveInView(spec)
 	if err != nil {
+		return unitSpec{}, err
+	}
+	if err := checkUnitLines(spec); err != nil {
 		return unitSpec{}, err
 	}
 	// HOME is a default buildEnv applies before env_file and inline
@@ -870,7 +969,7 @@ func (r *systemdRunner) reconcileStart(u unitSpec, cause error) (handle, error) 
 		defer cancel()
 		return r.adopt(ctx, unit, time.Now(), u.StopTimeout, u.Caps), nil
 	case err == nil:
-		if st.loaded() {
+		if st.leftover() {
 			ctx, cancel := context.WithTimeout(r.ctx, pollTimeout)
 			_ = r.resetFailed(ctx, unit)
 			cancel()
@@ -961,7 +1060,7 @@ func (r *systemdRunner) stopUnobserved(ctx context.Context, unit string, cause e
 	if err != nil || st.running() {
 		return &unitUnconfirmedError{unit: unit, err: cause}
 	}
-	if st.loaded() {
+	if st.leftover() {
 		if rerr := r.resetFailed(ctx, unit); rerr != nil {
 			return &unitUnconfirmedError{unit: unit, err: errors.Join(cause, rerr)}
 		}
@@ -1072,15 +1171,23 @@ func (r *systemdRunner) Reattach(st handleState) (handle, bool, error) {
 			// would keep this unit serving bare across every retry.
 			// An unconfirmed stop is an error, so the caller does not
 			// launch beside a unit that may still be running.
-			r.log().Error("recorded unit is running WITHOUT the sandbox; stopping it — the version relaunches sandboxed",
-				zap.String("unit", st.Unit), zap.Int("pid", us.MainPID))
+			msg := "recorded unit is running WITHOUT the sandbox; stopping it — the version relaunches sandboxed"
+			reason := "was running without the sandbox"
+			if !us.loaded() {
+				// A daemon-reload could not read its file back: the
+				// manager holds none of its settings, PrivatePIDs= among
+				// them, and reports what it holds (#380).
+				msg = "recorded unit's file no longer reads back, so the manager holds none of its settings; stopping it — the version relaunches"
+				reason = "was running with a file the manager could not read back (" + us.LoadState + ")"
+			}
+			r.log().Error(msg, zap.String("unit", st.Unit), zap.Int("pid", us.MainPID), zap.String("load_state", us.LoadState))
 			grace := us.StopTimeout
 			if grace <= 0 {
 				grace = defaultStopTimeout
 			}
 			stopCtx, stopCancel := context.WithTimeout(r.ctx, grace+stopSlack)
 			defer stopCancel()
-			bare := fmt.Errorf("recorded unit %s was running without the sandbox", st.Unit)
+			bare := fmt.Errorf("recorded unit %s %s", st.Unit, reason)
 			if err := r.stopUnobserved(stopCtx, st.Unit, bare); !errors.Is(err, bare) || errors.As(err, new(*unitUnconfirmedError)) {
 				return nil, false, fmt.Errorf("stopping it: %w", err)
 			}
@@ -1155,7 +1262,7 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 		// exit and PID the lines below record are read off the unit,
 		// once per stray or leftover (both rare).
 		if !u.running() {
-			if u.loaded() {
+			if u.leftover() {
 				u = r.unitStatusOf(parent, u)
 				r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
 				ctx, cancel := context.WithTimeout(parent, pollTimeout)
@@ -1176,7 +1283,7 @@ func (r *systemdRunner) sweep(parent context.Context, app string, keep handle, s
 			// and would report the whole sweep unconfirmed.
 			u = r.unitStatusOf(parent, u)
 			if !u.running() {
-				if u.loaded() {
+				if u.leftover() {
 					r.log().Warn("resetting leftover unit", zap.String("unit", u.Name), zap.String("active_state", u.ActiveState), zap.String("exit", u.exitString()))
 					ctx, cancel := context.WithTimeout(parent, pollTimeout)
 					defer cancel()
@@ -1325,7 +1432,7 @@ func (r *systemdRunner) reapFailed(ctx context.Context, name string) unitStatus 
 	if err != nil {
 		r.log().Warn("cannot read failed unit", zap.String("unit", name), zap.Error(err))
 	}
-	if st.loaded() {
+	if st.leftover() {
 		_ = r.resetFailed(ctx, name)
 	}
 	return st

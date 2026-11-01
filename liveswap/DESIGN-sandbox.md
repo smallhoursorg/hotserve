@@ -209,8 +209,9 @@ below as a contract the sandbox path must keep.
   inside the trust domain already.
 - A command that resolves outside the view MUST be refused at launch
   with a message that says where a runtime has to live (ship it in
-  the release, or install it under `/usr`), not left to fail as a bare
-  `203/EXEC`: `exec.LookPath` runs in the supervisor's view, so a
+  the release, or install it under `/usr`), not left to fail at exec
+  (exit status 127, the sibling shell's `not found` in the journal):
+  `exec.LookPath` runs in the supervisor's view, so a
   runtime installed outside `/usr` (`/opt/node/bin/node`, an nvm or
   asdf shim under a home directory) resolves for the supervisor and
   then does not exist inside the unit
@@ -402,7 +403,11 @@ below as a contract the sandbox path must keep.
   (`TimeoutStopSec=`), then SIGKILL — with PID-namespace teardown as
   the backstop (killing the in-namespace init kills everything in the
   namespace; no survivor is possible). The existing escalation tests
-  define the contract.
+  define the contract. On systemd 257 the manager holds the grace only
+  for a unit with more than its main process in the cgroup (#380), so
+  every unit's command runs behind a shell that forks one sleeping
+  sibling and execs the app in its place (`withSibling`,
+  DESIGN-liveswap.md); the app stays PID 1 of its namespace.
 - The view a unit gets is fixed at its start. Nothing changes the view
   today, and this is not a security asymmetry: a secret declared after
   a unit started is absent from every view, old units included,
@@ -631,7 +636,8 @@ testing that `/etc/ssl/private` stays out of the view.
 - Mind the failure *signature*: under a deny-by-default view a
   runtime that probes a path nobody named gets **ENOENT** ("no such
   file or directory"), not EACCES or EROFS. It is why a missing
-  runtime surfaces as `203/EXEC` rather than a permission complaint.
+  runtime surfaces as the sibling shell's `not found` (exit status
+  127) rather than a permission complaint.
   Any journal grep in packaging/test/smoke.sh that scans for denial
   strings must be scoped to the stage it guards: sandboxed runtimes
   legitimately probe absent paths at startup, and the isolation
@@ -760,7 +766,14 @@ Dated one-liners; the full text of each is in git.
   mount `size=10%,nr_inodes=400k` unless the unit's options say
   otherwise (`NESTED_TMPFS_LIMITS`, namespace.c; measured: 1.2 GiB on
   a 12 GiB host), and 50% is the kernel's own default for the host's
-  `/dev/shm`, so each app keeps the room the shared one gave it
+  `/dev/shm`, so each app keeps the room the shared one gave it. A
+  `daemon-reload` of the user manager rewrites it `50%%` in the
+  unit's record (systemd escapes the `%` on the way out and does not
+  unescape it on the way back), which touches nothing running and
+  fails, red, a start whose fork lands after a reload of the same
+  instant — the same reload lifts `RestrictNamespaces=` in the record,
+  so the failure is what keeps such a start from running unrestricted
+  (#380; DESIGN-liveswap.md, "Accepted residuals")
   (headless Chromium's known trap is Docker's 64 MiB; 10% of a 2 GiB
   box is 204 MiB). cgroup v2 charges tmpfs pages to the cgroup that
   wrote them (`memory.stat`'s `shmem`, Documentation/admin-guide/
