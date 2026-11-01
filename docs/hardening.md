@@ -186,7 +186,7 @@ Check that the loader reads it, and that none of the seven is loaded
 already — a loaded module stays until reboot:
 
 ```sh
-modprobe -n -v sctp    # prints: install /bin/false
+modprobe -n -v sctp    # last line: install /bin/false (-n loads nothing)
 lsmod | grep -Ew 'sctp|l2tp_ip|l2tp_ip6|smc|dccp|tipc|rds'    # prints nothing
 ```
 
