@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"sort"
 	"strings"
@@ -79,7 +80,9 @@ func Decode(raw []byte) (*Plan, error) {
 	if err := dec.Decode(p); err != nil {
 		return nil, fmt.Errorf("reading the plan: %w", err)
 	}
-	if dec.More() {
+	// Nothing but whitespace may follow: More() is no test of that at
+	// the top level, where it is false before a stray ] or }.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return nil, errors.New("reading the plan: something follows it")
 	}
 	if err := p.Validate(); err != nil {

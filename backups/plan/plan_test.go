@@ -75,6 +75,8 @@ func TestDecodeIsStrict(t *testing.T) {
 		"an unknown field":           {`{"root":"/var/lib/liveswap","apps":{},"exec":"/bin/sh"}`, "unknown field"},
 		"an unknown field in an app": {`{"root":"/var/lib/liveswap","apps":{"blog":{"sqlite":["a.db"],"user":"root"}}}`, "unknown field"},
 		"something after the plan":   {good + `{"root":"/"}`, "something follows"},
+		"a ] after the plan":         {good + `]`, "something follows"},
+		"a } after the plan":         {good + ` }`, "something follows"},
 		"no root, with an app":       {`{"apps":{"blog":{"sqlite":["a.db"]}}}`, "not an absolute path"},
 		"a bare object":              {`{}`, "not an absolute path"}, // no apps key at all: the plan unit always prints one
 		"a null declaration":         {`{"root":"/var/lib/liveswap","apps":{"blog":null}}`, "is null"},

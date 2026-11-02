@@ -361,6 +361,17 @@ func TestNothingIsAskedBeforeThePreflightPasses(t *testing.T) {
 	}
 }
 
+// What restic reads as a URL, or as a host and bucket, is not refused
+// for its scheme's case: only a scheme that is not "http…" in lower case
+// at its start, which restic takes for a host.
+func TestASchemeResticReadsIsNotRefusedForItsCase(t *testing.T) {
+	for _, repo := range []string{"s3:https://s3.example.com/b", "s3:httpS://s3.example.com/b", "s3:http://e2e-s3:9000/box", "s3:s3.example.com/b", "s3://s3.example.com/b"} {
+		if _, err := backendOf(repo, "/etc/hotserve-backup/repository.env"); err != nil {
+			t.Errorf("%s: %v", repo, err)
+		}
+	}
+}
+
 func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 	for _, tc := range []struct{ repo, want string }{
 		{"sftp:user@host:/srv/backups", "sftp: is not supported"},
@@ -383,7 +394,7 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 		{"s3://AKID:secret@s3.example.com/bucket/x://y", "the repository URL holds an @, which is refused"},
 		{"s3:https://AKID:secret@s3.example.com/bucket/x://y", "the repository URL holds an @, which is refused"},
 		// restic url.Parses whatever begins s3:http, whose scheme is read
-		// in any case.
+		// in any case; an @ is refused before the scheme's case is.
 		{"s3:httpS://AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
 		{"s3:hTTp://AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
 		{"s3:https+x://AKID:secret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
@@ -392,6 +403,10 @@ func TestARepositoryTheBoxCannotUseIsRefusedBeforeAnyPrompt(t *testing.T) {
 		{"s3:https://AKID:se?cret@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
 		{"s3:https://AKIAEXAMPLE:wJalrXUtn/K7MDENG@s3.amazonaws.com/bucket", "the repository URL holds an @, which is refused"},
 		{"s3:AKID:wJal/K7@s3.example.com/bucket", "the repository URL holds an @, which is refused"},
+		// restic reads a scheme only in lower case: another is a host.
+		{"s3:HTTPS://s3.eu-central-003.backblazeb2.com/bucket", "restic reads the scheme HTTPS: only in lower case, and otherwise takes it for a host: give the URL as s3:https://…"},
+		{"s3:Http://e2e-s3:9000/box", "give the URL as s3:http://…"},
+		{"s3:hTTp://e2e-s3:9000/box", "give the URL as s3:http://…"},
 		// No bucket name holds an @; a path that does is refused with them.
 		{"s3:https://s3.example.com/bucket/a@b", "no bucket name holds an @, so a path with one is not supported"},
 		// B2's S3-compatible endpoint takes HTTPS alone.

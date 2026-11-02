@@ -912,7 +912,10 @@ It needs no privilege.
   history are no place for a secret); no bucket name holds an `@`, so
   what this costs is a path with one, which the refusal says — B2's
   S3-compatible endpoint given as `s3:http://` (B2 takes HTTPS alone),
-  and a scheme restic does not
+  an `s3:` URL whose `http`/`https` scheme does not begin in lower case
+  (`s3:HTTPS://…`: restic reads it as a host named `HTTPS:` and no
+  bucket, and retries without end, `Bucket name cannot be empty`
+  [measured, restic 0.18.0]), and a scheme restic does not
   know; restic, sqlite3 or hotserve not installed (a run, a restore and
   a drill refuse the same, in the same words, before any unit); a
   systemd older than 257; a `hotserve-backup` account that hotserve

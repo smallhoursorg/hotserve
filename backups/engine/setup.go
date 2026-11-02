@@ -332,6 +332,14 @@ func backendOf(repo, envFile string) ([]credential, error) {
 		if strings.Contains(repo, "@") {
 			return nil, errors.New("the repository URL holds an @, which is refused: a key and secret in it are on the command line and in the shell's history, so give the URL without them and type them when asked; no bucket name holds an @, so a path with one is not supported")
 		}
+		// restic reads what follows s3: as a URL only where it begins
+		// "http" in lower case (internal/backend/s3/config.go); in any
+		// other case the scheme is a host of that name and there is no
+		// bucket, which restic retries without end [measured, restic
+		// 0.18.0: s3:HTTPS://… says "Bucket name cannot be empty"].
+		if i := strings.Index(rest, "://"); i > 0 && isScheme(rest[:i]) && !strings.HasPrefix(rest, "http") && strings.HasPrefix(strings.ToLower(rest[:i]), "http") {
+			return nil, fmt.Errorf("restic reads the scheme %s: only in lower case, and otherwise takes it for a host: give the URL as s3:%s://…", rest[:i], strings.ToLower(rest[:i]))
+		}
 		// B2's S3-compatible endpoint takes HTTPS alone [Backblaze's
 		// documentation]: said here, before any prompt, not by the storage
 		// after the key is typed.
