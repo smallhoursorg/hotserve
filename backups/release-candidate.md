@@ -517,7 +517,14 @@ channel), uids 996 and 993, the restore 10 s.
   `backup` block was added by hand after it, as the first box had it.
 - **`setup`:** found the first box's repository (`existing, id
   b171a534`). At the first try that was only after its look met the
-  10 s clock and a password was shown: the case #388 adds a line for.
+  10 s clock and a password was shown: the case #388 adds a line for,
+  and #389 removes from this step — the guide's rebuilt box now runs
+  `setup --existing <url>`, which makes no password on any answer of
+  the look's and asks for the repository's own. **Unverified** on B2
+  since: the next run of this check is the flag's, with the look's
+  clock met or not, and should also try the flag on a path with no
+  repository (exit 10 at once, nothing written) and read what the
+  look quotes of restic where it meets the clock.
 - **The restore,** before the first deploy: 501 MiB in 17 s. Every one
   of 43 entries was 986:986, where the snapshot holds 988:989; the
   database passed `integrity_check` and took a write as `motel`.
@@ -564,7 +571,7 @@ any unit starts, in these words (in its journal,
 `journalctl -u motel-backup.service`, after the date and host):
 
 ```
-motel-backup[<pid>]: motel-backup: the repository is b2:, which is not supported: as root, motel-backup setup 's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>' moves it to B2's S3-compatible endpoint, with an application key; restic's own B2 backend retries a failed upload without end
+motel-backup[<pid>]: motel-backup: the repository is b2:, which is not supported: as root, motel-backup setup --existing 's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>' moves it to B2's S3 endpoint, with an application key; restic's own B2 backend retries a failed upload without end
 ```
 
 and `status` says `the last run ended early: the repository is b2:,

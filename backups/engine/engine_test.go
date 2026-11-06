@@ -312,6 +312,11 @@ func (b *box) Run(ctx context.Context, s unit.Spec) (unit.Outcome, error) {
 		if role == "open" && s.StderrFile != "" && b.openErr != "" {
 			must(b.t, os.WriteFile(s.StderrFile, []byte(b.openErr), 0o600))
 		}
+		// A look that hangs is restic retrying too, its retry lines on
+		// stderr before the clock ends it.
+		if role == "probe" && s.StderrFile != "" && b.probeErr != "" {
+			must(b.t, os.WriteFile(s.StderrFile, []byte(b.probeErr), 0o600))
+		}
 		select {
 		case <-ctx.Done():
 		case <-b.release:

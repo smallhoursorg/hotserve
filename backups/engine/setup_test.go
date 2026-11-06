@@ -536,7 +536,7 @@ func TestTheRunsRemedyPastesAsOneLiteralArgument(t *testing.T) {
 				t.Fatalf("%s holds a quote", u)
 			}
 			msg := b2RunRefused(repo).Error()
-			if want := "as root, motel-backup setup '" + u + "' moves it"; !strings.Contains(msg, want) {
+			if want := "as root, motel-backup setup --existing '" + u + "' moves it"; !strings.Contains(msg, want) {
 				t.Fatalf("%s\nwant it to hold %s", msg, want)
 			}
 		})
@@ -545,20 +545,20 @@ func TestTheRunsRemedyPastesAsOneLiteralArgument(t *testing.T) {
 
 // The record keeps the run's b2: refusal whole for a bucket and path of
 // up to 58 characters, the slash between them counted, and the command
-// to paste whole, its closing quote included, up to 184 (the README's
-// accepted residual); one more cuts each.
+// to paste whole, its closing quote included, up to 173 (the README's
+// accepted residual; 184 before #389's `--existing`); one more cuts each.
 func TestTheRunsB2RefusalFitsTheRecord(t *testing.T) {
 	for _, c := range []struct {
 		n              int
 		whole, command bool
-	}{{58, true, true}, {59, false, true}, {184, false, true}, {185, false, false}} {
+	}{{58, true, true}, {59, false, true}, {173, false, true}, {174, false, false}} {
 		repo := "b2:" + strings.Repeat("b", 20) + ":" + strings.Repeat("p", c.n-21)
 		msg := b2RunRefused(repo).Error()
 		kept := record.Text(msg)
 		if got := kept == msg; got != c.whole {
 			t.Errorf("%d characters: kept whole = %v, want %v (%d runes)", c.n, got, c.whole, len([]rune(msg)))
 		}
-		if got := strings.Contains(kept, "setup '"+b2AsS3(repo)+"'"); got != c.command {
+		if got := strings.Contains(kept, "setup --existing '"+b2AsS3(repo)+"'"); got != c.command {
 			t.Errorf("%d characters: command kept = %v, want %v", c.n, got, c.command)
 		}
 	}

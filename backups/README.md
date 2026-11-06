@@ -900,6 +900,13 @@ It needs no privilege.
 - The repository check, where `restic cat config` has not answered in
   30 seconds: that check's verdict is `unreachable`, and the check is not
   made.
+- `setup --existing <url>` where the storage takes the key and says
+  there is no repository (exit 10 at the look):
+  "there is no repository at <url> (exit 10): setup --existing opens a
+  repository from an earlier box and makes none; …" — the URL names a
+  bucket or path the earlier box's repository is not at, or the
+  repository is gone, and on the operator's word that one is there
+  nothing is made; the working file is as it was.
 - `setup`, before it asks for anything: a repository that is a path on
   this box (`/srv/backups`, `local:`), `sftp:` (ssh takes its key from a
   home directory, which no unit has), `rclone:` (a config file, the
@@ -970,9 +977,9 @@ It needs no privilege.
   restore and a drill read the credential file's `RESTIC_REPOSITORY`
   as the manager would (the last assignment) and refuse a `b2:` one
   before any unit, the run recording it as its error: "the repository
-  is b2:, which is not supported: as root, motel-backup setup
+  is b2:, which is not supported: as root, motel-backup setup --existing
   's3:https://s3.<region>.backblazeb2.com/<bucket>/<path>' moves it to
-  B2's S3-compatible endpoint, with an application key; restic's own
+  B2's S3 endpoint, with an application key; restic's own
   B2 backend retries a failed upload without end" — the URL in single
   quotes, so that the command pasted as it is reaches setup whole, the
   escaping leaving no `'` in it, and short enough that the record's
@@ -1070,13 +1077,17 @@ Caddyfile.
 
 ## Setup
 
-`motel-backup setup <repository>`, as root, at a terminal. The
+`motel-backup setup [--existing] <repository>`, as root, at a terminal. The
 repository is a restic URL — `s3:https://s3.example.com/bucket`, or
 on B2 its S3-compatible endpoint, `s3:https://s3.<region>.backblazeb2.com/bucket`
 — and not a secret; the
 secrets are typed at the terminal, never given on the command line.
-What can be known to fail is refused before anything is asked for
-("What it refuses"). In order:
+`--existing`, before or after the URL, is the operator's word that a
+repository is there already — a rebuilt box's (the guide, "A rebuilt
+box") — and changes steps 5 and 6: no password is made or shown on any
+path, the repository's own is asked for, and a storage that says there
+is none ends setup. What can be known to fail is refused before
+anything is asked for ("What it refuses"). In order:
 
 1. the `motel-backup` account is made if it is not there
    (`useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment made-by-motel motel-backup`
@@ -1136,7 +1147,8 @@ What can be known to fail is refused before anything is asked for
    (one name: setup holds the run lock), root-only, with a throwaway
    password — and the repository is
    **looked for**: `restic cat config` as `motel-backup`, under a
-   ten-second clock, said as "looking for a repository at …". With a
+   ten-second clock (two minutes with `--existing`, below), said as
+   "looking for a repository at …". With a
    right key restic says at once whether there is no repository (exit
    10) or one this password does not open (exit 12) [measured]. A
    storage that **refuses at once** — restic's exit 1 within the clock:
@@ -1159,11 +1171,53 @@ What can be known to fail is refused before anything is asked for
    rclone's S3 server; B2's S3 endpoint says a bucket not there at once,
    as none (exit 10), and init meets it, below: RC check 1] — the
    look is given up on, said as such ("no repository answered within
-   10s": the three look alike there), and init answers instead. A look
+   10s": the three look alike there), quoting what restic said of the
+   storage before the stop — its last line that is not the stop's own
+   (the signal, the `Fatal: … context canceled` the stop makes of the
+   opening, and the "Is there a repository at the following location?"
+   and URL lines after every failed opening, which say nothing of the
+   storage), which is its last retry line where it retried: "(restic
+   said: Load(<config/>, 0, 0) returned error, retrying after …: …)"
+   [measured: a wrong secret on the e2e's S3 server, "The request
+   signature we calculated does not match"; a host that does not
+   resolve, "no such host"] — since nothing else keeps it (the run
+   directory goes with setup; RC check 7's slow look left no trace),
+   and init answers instead. A look
    that failed on its own account — a unit the manager could not set
    up, one that could not be started — is said as that, before any
-   password is made;
-6. where none was found, a repository password is made — 32 random
+   password is made. **With `--existing`**, the look has setup's
+   two-minute clock, not ten seconds — the operator's word is that a
+   repository is there, so a storage slow to answer is waited for, and
+   the question is never init's — and its answers are taken
+   differently: one found (exit 12) is opened with its own password, as
+   below; none (exit 10) ends setup — "there is no repository at <url>
+   (exit 10): setup --existing opens a repository from an earlier box
+   and makes none; check the URL — the bucket and the path — against
+   the earlier box's, or run setup without --existing to make a new
+   repository there" — with nothing written; a key refused at once is
+   asked for again, as without the flag (the third refusal's ending
+   adds the way out below); and a look given up on at
+   that clock is said ("no repository answered within 2m0s (restic
+   said: …): a bucket not made yet, a wrong key and a wrong host look
+   alike here; with --existing no password is made") and the key asked
+   for again, in the clock's own words ("the key id and secret again: a
+   wrong key is one of the three; the same key, if the storage was only
+   slow to answer, has the look run again"), up to three times in all
+   with refusals; the third ends setup with the same words and the way
+   out ("; check the URL and the key against the earlier box's, and run
+   setup again; nothing of setup's has been written"; the plain path is
+   not offered: on a bucket mistyped, with a key that may make one, init
+   there makes a new repository, the outcome the flag exists to keep a
+   rebuilt box from) — the look only reads, so no
+   lock is in question; restic's retry line is quoted where it wrote
+   one before the stop [measured: a host that does not resolve, e2e,
+   "no such host" where the resolver answered at once].
+   Init never runs with the flag. The flag
+   is for the one case that met the clock in the field: B2's S3
+   endpoint slow to answer a rebuilt box's look, once in four [RC check
+   7], which without it shows a password that is then not needed and
+   asks for the repository's own after (#389);
+6. where none was found — and `--existing` was not given — a repository password is made — 32 random
    bytes, base32, 52 characters — and **shown**, once, with what to
    store beside it (the repository URL and the storage key: with those
    three `restic -r <url>` reads every backup from any machine;
@@ -1453,6 +1507,8 @@ severity × occurrence × detection, then the fix's size and risk.
 
 | Failure | Where | S | O | D | Product | Fix | Why accepted |
 |---|---|---|---|---|---|---|---|
+| With `--existing`, a host that does not resolve, or a bucket not there on an S3 server that retries it, is waited for to setup's two-minute clock, up to three times with the key asked for again between, though restic's retry line, which the clock's message quotes, names the cause ("no such host"; "The specified bucket does not exist"). | `Setup`, `look` (`engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 2 (a reading of the retry line's words, as `backendRefused` reads init's, to end the look at once) | Under rule 3 the product is under 20 and the fix is a branch on restic's wording (2026-11-06, from the self-review of #389's fix). The message is right and names the cause; the cost is the wait, bounded, with Ctrl-C said safe after 20 s. The plain path meets the same two cases at once, through init. |
+| A look that exits 0 — the throwaway password opened the repository, or restic printed a config it does not read — is said as "no repository answered within <the look's clock>" — 10s, or 2m0s with `--existing`, where the key is then asked for again — when restic answered at once. | `look`, `Setup` (`engine/setup.go`) | 2 | 1 | 3 | 6 | size 2, risk 1 (a word of its own for exit 0) | Under rule 3 the product is under 20 and the fix is a branch (2026-11-06, from the self-review of #389's fix). A 52-character random password opening a repository, or restic 0.18.0 printing a config without an `id`, is nothing measured; and what follows is right either way: init, or with the flag the opening, answers, or with the flag setup ends as at the clock). |
 | A candidate validated in a directory others may not enter, which imports a file beside it, is refused at `validate` for that directory ("which others may not enter"), though a run reads the file installed at `/etc/motel/Caddyfile`. | `checkBackups` (`cmd/motel/backupcheck.go`) | 2 | 5 | 1 | 10 | size 2, risk 1 (stop a candidate's walk at its own directory) | Rule 2 holds (refused, the directory named); under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-18). A box push carries no import, so step 6 never meets it; and a candidate's relative imports resolve beside the candidate, not where it will be installed, so a candidate validated away from `/etc/motel` is asked about other files than a run would read anyway. |
 | The box suite's push of a backup path into a sibling's `shared/` (e2e box apply 3) holds the refusal to `motel validate:` alone, so a push refused at step 6 for another reason would pass it too. | e2e/box/apply.sh, box apply 3 | 3 | 2 | 3 | 18 | size 1, risk 2 (a substring of the bounded refusal: tried, and it flaked, since Caddy's module chain before the reason follows its servers' map order) | Under rule 3 the product is under 20 (2026-10-18). The same file is shown to fail `motel validate` for the path just before the push; the refusal can name the path once step 6's bound keeps the reason rather than the head of Caddy's line (owed on main, in box). |
 | On a box with a box repository, an operator who follows the guide's "without one" branch edits `/etc/motel/Caddyfile` in place and reloads; the next push finds the edit and puts the commit's file back, the edit's backup block with it unless it was also committed. | docs/backups.md, "Set it up", step 1 | 3 | 5 | 1 | 15 | size 1, risk 2 (a sentence no test checks) | Rule 2 holds: the push ends applied, the box correct by its own contract (the signed file is the whole config), and it names the out-of-band edit (`caddyfile_edited_out_of_band`, a warning in the template's `bin/apply`). If that leaves an app with no backup block, the next run says once that it no longer declares a backup, naming its last snapshot — only where the record before held one: an app never backed up leaves in silence (`engine.go`, the run's `apps`; `TestAnAppThatLeftThePlanIsSaidOnce`). A path dropped from a block still declared is not said either. Under rule 3 the product is under 20 and the fix is not size 1, risk 1 (2026-10-18). The step names the box repo first and says to skip the two lines there. |
@@ -1478,7 +1534,7 @@ severity × occurrence × detection, then the fix's size and risk.
 | On an S3 host other than AWS's and B2's, for which setup writes no region, every restic command's first request is minio-go's bucket-location lookup, which minio-go does not retry on a 5xx that carries no S3 error code: one such 500 puts restic's two retry lines on stderr beside a listing, exit 0, and the listing is not believed [M89: B2's documented JSON 5xx body, "Codes in the 5xx range … include JSON diagnostics" (Backblaze, Introduction to the S3-Compatible API), injected through a proxy]. An S3 XML 500 there is retried by minio-go in silence. | `besides` (`backups/engine/engine.go`); minio-go 7.0.89 `bucket-cache.go`, `executeMethod` in `api.go` | 2 | 3 | 1 | 6 | size 2, risk 3 (a region for every host would have to be asked for, and a wrong one is refused; reading restic's retry lines as harmless would believe a listing beside a line that means a snapshot was left out) | Rule 2 holds: the listing is a warning of the run, said as restic having something to say beside it, and the next run lists again. On AWS minio-go knows the region from a regional host alone (minio-go `pkg/s3utils/utils.go`, `GetRegionFromURL`, gives none for `s3.amazonaws.com`); there the guide's policy grants `s3:GetBucketLocation`, and AWS's errors are XML, which minio-go retries. On B2 setup writes it ("Setup", 4), and with it the same fault is silent (M89). Under rule 3 the product is under 20 (2026-10-23, #354). |
 | `status` as root says nothing of a credential file that sets `RESTIC_REPOSITORY_FILE`, which every run, restore and drill refuses; with no `RESTIC_REPOSITORY` beside it, its lint says that one is not set. | `showStatus` (`backups/cmd/motel-backup/main.go`); `repositoryInUse` (`backups/engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 1 (one more lint line in status) | Rule 2 holds: the run refuses before any unit in words that name the key and the remedy, and `status` shows that as the last run's error. Under rule 3 the product is under 20 (2026-10-24, #357 review round 2). |
 | A run, a restore and a drill refuse a `b2:` repository and a `RESTIC_REPOSITORY_FILE`, not every repository setup refuses: a hand-written `sftp:`, `rclone:`, local path or URL with credentials in it starts its units, which fail. | `repositoryInUse` (`backups/engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 2 (calling `RepositoryUsable` here too: a by-hand `rest:`, `gs:` or `swift:` file must still run) | Rule 2 holds: each fails at its first unit in restic's own words, the run red, and `status` as root warns of the file in setup's words. A `b2:` one is refused because it does not fail: it can hang (#177). Under rule 3 the product is under 20 (2026-10-24, #357 review round 2; the plan's "refuse everything setup refuses", declined as wider than #354). |
-| The run's `b2:` refusal has 115 runes before its URL's bucket and 127 after its path, and the record keeps 300 (`record.Text`): a bucket and path (escaped, with the slash between them) over 58 characters lose the end of the reason, and over 184 the end of the command to paste, its closing quote first, cut with a "…" (59 and 185 before #323's `as root`). | `b2RunRefused` (`backups/engine/setup.go`); `record.Text` | 3 | 5 | 1 | 15 | size 2, risk 2 (a wording for the record alone, or no URL in it past the cut; the wording was shortened in round 4 of #357's review, a fix to text a test checks) | Rule 2 holds: the cut is marked, and the journal keeps the whole line (`journalctl -u motel-backup.service`), since the error goes to stderr whole. A cut URL whose quote is closed and run points setup at a shorter path, where it finds no repository: it shows a new one's password (`Repository password (new)`) and asks that it be stored, where a move asks for the repository's own, puts the record aside, and ends `repository ready: … (new, …)`; `status` as root names the whole URL in its warning (severity 3 from round 13 of #357's review). The remedy is first by design, so the reason goes before it does. Under rule 3 the product is under 20 (2026-10-24, #357 review round 2; the bounds re-measured for #323's `as root`, four runes longer, scores unchanged, 2026-10-28). |
+| The run's `b2:` refusal has 126 runes before its URL's bucket and 116 after its path, and the record keeps 300 (`record.Text`): a bucket and path (escaped, with the slash between them) over 58 characters lose the end of the reason, and over 173 the end of the command to paste, its closing quote first, cut with a "…" (59 and 185 before #323's `as root`; 184 before #389's `--existing`, eleven runes moved from after the path to before the bucket). | `b2RunRefused` (`backups/engine/setup.go`); `record.Text` | 3 | 5 | 1 | 15 | size 2, risk 2 (a wording for the record alone, or no URL in it past the cut; the wording was shortened in round 4 of #357's review, a fix to text a test checks) | Rule 2 holds: the cut is marked, and the journal keeps the whole line (`journalctl -u motel-backup.service`), since the error goes to stderr whole. A cut URL whose quote is closed and run points `setup --existing` at a shorter path, where it finds no repository and refuses it, nothing written (#389; before it, setup there showed a new one's password (`Repository password (new)`) and asked that it be stored, where a move asks for the repository's own, put the record aside, and ended `repository ready: … (new, …)`); `status` as root names the whole URL in its warning (severity 3 from round 13 of #357's review). The remedy is first by design, so the reason goes before it does. Under rule 3 the product is under 20 (2026-10-24, #357 review round 2; the bounds re-measured for #323's `as root`, four runes longer, scores unchanged, 2026-10-28). |
 | The run's remedy, pasted without its placeholder filled in (`<region>`, or `<bucket>` for a bare `b2:`), is taken by setup, which asks for the key and secret before restic refuses the host, and asks again up to its limit. | `backendOf` (`backups/engine/setup.go`) | 2 | 5 | 1 | 10 | size 2, risk 1 (a refusal of a URL holding `<` or `>` before any prompt) | Rule 2 holds: each look is refused at once in restic's words, which name the host with its `<region>` in it, and nothing is written. Under rule 3 the product is under 20 (2026-10-24, #357 review round 4). |
 | `status` as root reads the credential file with a plain read: a FIFO in its place, which the run refuses, holds `status` until interrupted. | `showStatus` (`backups/cmd/motel-backup/main.go`) | 2 | 1 | 5 | 10 | size 1, risk 2 (the run's `readRegular`, exported; no test of status's own read) | Only root makes the file anything but setup's regular one, and `status` is run at a terminal, where the wait is seen and interrupted; the run, which no one watches, refuses it. Under rule 3 the product is under 20 (2026-10-24, #357 review round 5). |
 | The run opens what the credential file's path leads to, a link followed as the manager follows it, before it asks whether it is a regular file: a device node there is opened by root (`O_RDONLY\|O_NONBLOCK`) before it is refused. | `readRegular` (`backups/engine/setup.go`) | 2 | 1 | 5 | 10 | size 2, risk 1 (a stat before the open, as `box/envfiles.go` reads its files) | Only root puts anything but setup's regular file there, and the open reads nothing; the run then refuses it, named. Under rule 3 the product is under 20 (2026-10-24, #357 review round 8). |

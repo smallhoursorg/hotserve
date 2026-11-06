@@ -390,16 +390,29 @@ another uid, which a restore does not mind:
    and give it the box's Caddyfile with `motel init` from the box
    repository, as the first deploy did (step 3; with secrets,
    [A rebuilt box](secrets.md#a-rebuilt-box)).
-2. `motel-backup setup <the same URL>`, with the box's key. It
-   finds the repository and asks for its password instead of making
-   one:
+2. `motel-backup setup --existing <the same URL>`, with the box's
+   key. `--existing` is your word that the repository is there: setup
+   makes no password and shows none, whatever the storage's first
+   answer, and asks for the repository's own:
 
    ```
-   looking for a repository at s3:https://s3.example.com/my-backups (up to 10s)
+   looking for a repository at s3:https://s3.example.com/my-backups (up to 2m0s)
    the repository exists; its password is needed
    Repository password:
    repository ready: s3:https://s3.example.com/my-backups (existing, id e9157010)
    ```
+
+   With the flag the look has two minutes, not ten seconds, so a
+   storage slow to answer is waited for; one that has not answered by
+   then is said, naming what looks alike there (a bucket not made yet,
+   a wrong key, a wrong host), and the key is asked for again; the
+   third asking in all ends setup, with nothing written. If the
+   storage says there is no repository at that URL, setup ends and says
+   so: check the URL — the bucket and the path — against the old
+   box's. (Without
+   the flag, a slow first look is taken for a new repository: a
+   password is shown, to be stored, and only then is the repository
+   found and its own password asked for.)
 
 3. Before each app's first deploy, `motel-backup restore <app>`.
    With nothing in place there is nothing to back up first:

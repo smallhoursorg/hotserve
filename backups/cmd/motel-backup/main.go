@@ -1,7 +1,8 @@
 // Command motel-backup backs up what motel's apps declare.
 //
-//	motel-backup setup <repository>
-//	                        the account, the directories, the credential file, the repository; root, at a terminal
+//	motel-backup setup [--existing] <repository>
+//	                        the account, the directories, the credential file, the repository; root, at a terminal.
+//	                        --existing: the repository is there already (a rebuilt box), so no password is made
 //	motel-backup run     one backup run; root; what the timer starts
 //	motel-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
 //	                        one snapshot of one app, into place or into a new directory; root
@@ -68,7 +69,7 @@ import (
 
 const caddyfile = "/etc/motel/Caddyfile"
 
-const usage = `usage: motel-backup setup <repository>
+const usage = `usage: motel-backup setup [--existing] <repository>
        motel-backup run
        motel-backup restore <app> [--snapshot <id>] [--to <dir>] [--no-pre-backup] [--yes]
        motel-backup drill
@@ -77,21 +78,50 @@ const usage = `usage: motel-backup setup <repository>
        motel-backup account
        motel-backup sweep`
 
-// arguments says whether a command takes that many: restore takes its
-// own, validate takes one file, setup one repository, and nothing else
-// takes any — least of all the commands of units.
-func arguments(name string, n int) bool {
+// arguments says whether a command takes those: restore reads its
+// own, validate takes one file, setup one repository and its flag
+// (setupArgs), and nothing else takes any — least of all the commands
+// of units.
+func arguments(name string, args []string) bool {
 	switch name {
 	case "restore":
 		return true
-	case "validate", "setup":
-		return n == 1
+	case "validate":
+		return len(args) == 1
+	case "setup":
+		_, _, err := setupArgs(args)
+		return err == nil
 	}
-	return n == 0
+	return len(args) == 0
+}
+
+// setupArgs reads setup's: one repository, and --existing (or
+// -existing) once, before or after it. Anything else — a second
+// repository, the flag twice, any other word that begins with a dash,
+// the terminator `--` among them — is the usage text. One pass, no
+// flag package: there is one flag, and a URL never begins with a dash.
+// An empty word (a shell variable that is not set) is the one
+// repository, which the engine refuses as empty, naming that.
+func setupArgs(args []string) (repository string, existing bool, err error) {
+	given := false
+	for _, a := range args {
+		switch {
+		case (a == "--existing" || a == "-existing") && !existing:
+			existing = true
+		case strings.HasPrefix(a, "-") || given:
+			return "", false, errors.New(usage)
+		default:
+			repository, given = a, true
+		}
+	}
+	if !given {
+		return "", false, errors.New(usage)
+	}
+	return repository, existing, nil
 }
 
 func main() {
-	if len(os.Args) < 2 || !arguments(os.Args[1], len(os.Args)-2) {
+	if len(os.Args) < 2 || !arguments(os.Args[1], os.Args[2:]) {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -159,7 +189,13 @@ func command(name string, args []string) error {
 	}
 	switch name {
 	case "setup":
-		return setup(ctx, args[0])
+		// main's check read them already; a caller that did not check
+		// gets the usage text back.
+		repository, existing, err := setupArgs(args)
+		if err != nil {
+			return err
+		}
+		return setup(ctx, repository, existing)
 	case "run":
 		return run(ctx)
 	case "restore":
@@ -229,7 +265,7 @@ func runner(ctx context.Context, what string) (*unit.Runner, error) {
 // the secrets are typed there, with echo off, never given on a command
 // line. The engine checks what else can be known to fail before it
 // asks for one.
-func setup(ctx context.Context, repository string) error {
+func setup(ctx context.Context, repository string, existing bool) error {
 	cfg := config()
 	r, err := runner(ctx, "setup")
 	if err != nil {
@@ -241,7 +277,7 @@ func setup(ctx context.Context, repository string) error {
 		return err
 	}
 	defer t.Close()
-	rep, err := engine.Setup(ctx, cfg, r, engine.SetupOptions{Repository: repository, Terminal: t})
+	rep, err := engine.Setup(ctx, cfg, r, engine.SetupOptions{Repository: repository, Existing: existing, Terminal: t})
 	if err != nil {
 		return err
 	}

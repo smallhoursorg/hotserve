@@ -63,7 +63,7 @@ func plainBox(t *testing.T) (*box, *term) { return restoreBox(t), nil }
 // this is what holds when the file goes between that check and the
 // run's own.
 func TestNothingStartsBeforeSetup(t *testing.T) {
-	note := " is from before this version and is not read: run `motel-backup setup <its RESTIC_REPOSITORY>` as root, which asks for its RESTIC_PASSWORD; then remove it"
+	note := " is from before this version and is not read: run `motel-backup setup --existing <its RESTIC_REPOSITORY>` as root, which asks for its RESTIC_PASSWORD; then remove it"
 	for _, cmd := range runDrillRestore {
 		for _, old := range []string{"", ", with the old file beside"} {
 			t.Run(cmd.name+old, func(t *testing.T) {
@@ -198,7 +198,7 @@ func TestARunRefusesWhatSetupRefusesWithSetupsWords(t *testing.T) {
 		// own B2 backend (#177).
 		{"a repository other than b2:", func(b *box) {
 			writeOrPanic(b.cfg.EnvFile, "RESTIC_REPOSITORY=b2:hs-backups:dev\nRESTIC_PASSWORD=the-secret\nB2_ACCOUNT_ID=K001\nB2_ACCOUNT_KEY=k\n")
-		}, "the repository is b2:, which is not supported: as root, motel-backup setup 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3-compatible endpoint, with an application key; restic's own B2 backend retries a failed upload without end"},
+		}, "the repository is b2:, which is not supported: as root, motel-backup setup --existing 's3:https://s3.<region>.backblazeb2.com/hs-backups/dev' moves it to B2's S3 endpoint, with an application key; restic's own B2 backend retries a failed upload without end"},
 		// A file the manager could not read either: said, in place of
 		// every unit failing to start.
 		{"a credential file that can be read", func(b *box) {

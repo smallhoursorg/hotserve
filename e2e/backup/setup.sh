@@ -42,8 +42,10 @@ until_units() { # <n> <pattern>: waits up to a minute for that many units of the
 }
 
 echo "=== setup 0: the usage text ==="
-setup && fail "setup with no repository exited 0" || { says "^usage: motel-backup setup <repository>" && pass "setup with no repository is the usage text" || fail "said: $(cat "$OUT")"; }
+setup && fail "setup with no repository exited 0" || { says "^usage: motel-backup setup \[--existing\] <repository>" && pass "setup with no repository is the usage text" || fail "said: $(cat "$OUT")"; }
 setup a b && fail "setup with two arguments exited 0" || { says "^usage:" && pass "and so is setup with two" || fail "said: $(cat "$OUT")"; }
+setup --existing && fail "setup --existing with no repository exited 0" || { says "^usage:" && pass "and so is --existing alone" || fail "said: $(cat "$OUT")"; }
+setup --exists "$REPO" && fail "setup with a flag it does not have exited 0" || { says "^usage:" && pass "and so is a flag setup does not have" || fail "said: $(cat "$OUT")"; }
 
 echo "=== setup 1: not root, no terminal: refused before anything is touched ==="
 as_nobody motel-backup setup "$REPO" >"$OUT" 2>&1 && fail "setup as nobody exited 0" || { says "needs root: run the same command again as root" && ! says "$REPO" && pass "setup as nobody says to repeat the command as root, and renders none of it" || fail "as nobody: $(cat "$OUT")"; }
@@ -161,7 +163,7 @@ echo "=== setup 5: a file at the old path is named, and not read ==="
 mv "$ENVFILE" /root/env.keep
 printf 'RESTIC_PASSWORD=old\n' >"$OLD"
 chmod 0600 "$OLD"
-run && fail "a run with only the old file exited 0" || { says "not set up: $ENVFILE is not there" && says "$OLD is from before this version and is not read: run \`motel-backup setup <its RESTIC_REPOSITORY>\` as root, which asks for its RESTIC_PASSWORD; then remove it" && ! says "lstat" && pass "a run names the new path, and says what to do with the old one" || fail "the run said: $(cat "$OUT")"; }
+run && fail "a run with only the old file exited 0" || { says "not set up: $ENVFILE is not there" && says "$OLD is from before this version and is not read: run \`motel-backup setup --existing <its RESTIC_REPOSITORY>\` as root, which asks for its RESTIC_PASSWORD; then remove it" && ! says "lstat" && pass "a run names the new path, and says what to do with the old one" || fail "the run said: $(cat "$OUT")"; }
 [ "$(units_left)" = 0 ] && pass "and started nothing" || fail "units: $(systemctl list-units --all --no-legend 'motel_backup_*')"
 motel-backup status >"$OUT" 2>&1
 [ $? = 3 ] && says "$OLD is from before this version" && pass "status exits 3 and says the same" || fail "status: $(cat "$OUT")"
@@ -183,6 +185,7 @@ says "there is no repository at the configured location" && fail "an exit 1 was 
 [ "$(grep -c 'the key id and secret again (the password shown above still applies)' "$OUT")" = 2 ] && [ "$(grep -c 'Storage key id' "$OUT")" = 3 ] && pass "the key was asked for again, twice, the one password standing" || fail "the retries: $(grep -c 'Storage key id' "$OUT") askings, $(grep -c 'again' "$OUT") agains"
 [ "$(grep -c 'Repository password (new)' "$OUT")" = 1 ] && says "the password shown above was never used: discard it" && pass "one password was shown, and said to be dead at the end: init never opened the storage" || fail "the password's fate: $(grep -c 'Repository password (new)' "$OUT") shown; $(tail -1 "$OUT")"
 says "no repository answered within 10s: a bucket not made yet, a wrong key and a wrong host look alike here" && pass "the silent look was explained" || fail "the look: $(grep looking -A1 "$OUT" | head -3)"
+says "look alike here; a new repository will be made with the password shown next (restic said: .*returned error, retrying after .*signature" && pass "and quoted the storage's answer from the look's last retry line" || fail "the look quoted: $(grep -o 'restic said: .*' "$OUT" | head -3)"
 [ "$(sum)" = "$before" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "the working file is byte-identical, no copy of a credential is left, no unit is running" || fail "after a wrong key: same=$([ "$(sum)" = "$before" ] && echo yes || echo NO), temps=$(temps), units=$(units_left)"
 # A host that does not resolve: the look retries and is given up on,
 # init says so at once [measured], and the key is asked for again.
@@ -269,12 +272,49 @@ locks=$(rr list locks --no-lock 2>&1) && [ -z "$locks" ] && pass "no lock file i
 
 echo "=== setup 7: a rebuilt box opens the repository it already has, with its own password ==="
 rm -f "$ENVFILE"
+# --existing on a path with no repository: refused at once with the
+# storage's word (exit 10 at the look: the bucket is there, the path holds
+# nothing; a bucket not there is retried by the fixture, and met by the
+# clock), no password made, nothing written.
+t0=$(date +%s)
+converse "motel-backup setup --existing $REPO/nothere" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET"
+rc=$?
+took=$(($(date +%s) - t0))
+[ "$rc" != 0 ] && says "there is no repository at $REPO/nothere (exit 10): setup --existing opens a repository from an earlier box and makes none" && says "run setup without --existing to make a new repository there" && [ "$took" -lt 30 ] && pass "--existing on a path with no repository is refused with the storage's word (${took}s)" || fail "--existing, nothing there: exit $rc after ${took}s: $(cat "$OUT")"
+! says "Repository password" && ! says "stored" && pass "and no password was made or asked for" || fail "--existing, nothing there, said: $(grep -i password "$OUT")"
+[ ! -e "$ENVFILE" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "and nothing was written" || fail "after --existing on nothing: file=$([ -e "$ENVFILE" ] && echo yes || echo no), temps=$(temps), units=$(units_left)"
+# --existing on a host that does not resolve: the look, under the long
+# clock (30 s in the e2e build), retries to it: said, naming the look's
+# three, and the key is asked for again — no answer is typed, so the
+# conversation ends there: no password made or asked for, nothing
+# written. restic's retry line is quoted where it wrote one before the
+# clock (a resolver that answers at once does; one that times out may
+# not), so the quote is not required.
+t0=$(date +%s)
+converse "motel-backup setup --existing s3:http://nowhere.invalid:9/nothere" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET"
+rc=$?
+took=$(($(date +%s) - t0))
+[ "$rc" != 0 ] && says "looking for a repository at s3:http://nowhere.invalid:9/nothere (up to 30s)" && says "no repository answered within 30s\( (restic said: .*)\)\?: a bucket not made yet, a wrong key and a wrong host look alike here; with --existing no password is made" && says "the key id and secret again: a wrong key is one of the three; the same key, if the storage was only slow to answer, has the look run again" && ! says "refused the key" && [ "$(grep -c 'Storage key id' "$OUT")" = 2 ] && { says "restic said: .*no such host" || echo "note: no retry line was quoted (a resolver that times out)"; } && ! says "opening" && [ "$took" -ge 30 ] && [ "$took" -lt 100 ] && pass "--existing on a host that does not resolve is looked for under the long clock, said, and the key asked for again (${took}s)" || fail "--existing, no such host: exit $rc after ${took}s: $(cat "$OUT")"
+! says "Repository password" && ! says "stored" && [ ! -e "$ENVFILE" ] && [ "$(temps)" = 0 ] && [ "$(units_left)" = 0 ] && pass "and made no password, asked for none, and wrote nothing" || fail "after --existing on no such host: $(grep -i password "$OUT"); file=$([ -e "$ENVFILE" ] && echo yes || echo no), temps=$(temps), units=$(units_left)"
+# Without the flag first, as before #389: no file on the box, the look
+# under its short clock finds the repository and asks for its own
+# password; the record, which no file tied to this repository, is put
+# aside. Then the record is put back and the file removed for the
+# guide's own step.
 converse "motel-backup setup $REPO" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" "$pw"
 rc=$?
-[ "$rc" = 0 ] && says "repository ready: $REPO (existing, id [0-9a-f]\{8\})" && pass "setup opened the existing repository" || fail "rebuilt box: exit $rc: $(cat "$OUT")"
+[ "$rc" = 0 ] && says "repository ready: $REPO (existing, id [0-9a-f]\{8\})" && says "(up to 10s)" && says "the repository exists; its password is needed" && ! says "Repository password (new)" && says "the record was put aside (no credential file was there to tie it to this repository)" && [ "$(ls "$STATUS".aside-* | wc -l)" = 1 ] && pass "setup without the flag found the existing repository under its short clock, asked for its own password, and put the record aside" || fail "the existing repository, no flag: exit $rc: $(cat "$OUT")"
+mv "$(ls "$STATUS".aside-* | head -1)" "$STATUS" || fail "the record could not be put back: $(ls /var/lib/motel-backup)"
+rm -f "$ENVFILE"
+# The guide's rebuilt box: --existing, the same URL, the box's key.
+t0=$(date +%s)
+converse "motel-backup setup --existing $REPO" "$P_KEY" "$KEYID" "$P_SECRET" "$SECRET" "$P_PW" "$pw"
+rc=$?
+took=$(($(date +%s) - t0))
+[ "$rc" = 0 ] && says "repository ready: $REPO (existing, id [0-9a-f]\{8\})" && pass "setup --existing opened the existing repository (${took}s)" || fail "rebuilt box: exit $rc after ${took}s: $(cat "$OUT")"
 grep -q "^RESTIC_PASSWORD=$pw\$" "$ENVFILE" && pass "the file holds the repository's own password" || fail "the file holds: $(grep PASSWORD "$ENVFILE" | sed 's/=.*/=…/')"
 says "$pw" && fail "the repository's password was shown as it was typed" || pass "the repository's password was not shown as it was typed"
-says "the repository exists; its password is needed" && ! says "Repository password (new)" && ! says "stored" && pass "a rebuilt box is asked for the password it has, and shown none" || fail "the rebuilt box was shown: $(grep -i password "$OUT")"
+says "the repository exists; its password is needed" && says "(up to 30s)" && ! says "Repository password (new)" && ! says "stored" && pass "a rebuilt box is asked for the password it has, under the long clock, and shown none" || fail "the rebuilt box was shown: $(grep -i 'password\|looking' "$OUT")"
 rr cat config --no-lock >/dev/null 2>&1 && pass "the repository answers" || fail "the repository does not answer"
 # With no file before, the record cannot be tied to this repository: it
 # is put aside, and the next run drills what it backs up here.

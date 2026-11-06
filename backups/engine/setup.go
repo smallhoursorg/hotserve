@@ -39,6 +39,15 @@ type Terminal interface {
 type SetupOptions struct {
 	Repository string
 	Terminal   Terminal
+	// Existing is the operator's word that a repository is there — a
+	// rebuilt box's, the guide's "A rebuilt box" — so setup makes no
+	// password and shows none: it asks for the repository's own, and
+	// refuses where the storage says there is none. The look still
+	// runs, for a key the storage refuses, under setup's longer clock:
+	// a storage slow to answer is waited for, and a clock met all the
+	// same has the key asked for again; the third ends setup with
+	// nothing written.
+	Existing bool
 }
 
 // SetupReport is what setup did.
@@ -427,7 +436,7 @@ func b2Refused(repo string) error {
 // the path may hold, are the shell's otherwise; b2AsS3 leaves no ' in it
 // to end the quotes.
 func b2RunRefused(repo string) error {
-	return fmt.Errorf("the repository is b2:, which is not supported: as root, motel-backup setup '%s' moves it to B2's S3-compatible endpoint, with an application key; %s", b2AsS3(repo), b2Why)
+	return fmt.Errorf("the repository is b2:, which is not supported: as root, motel-backup setup --existing '%s' moves it to B2's S3 endpoint, with an application key; %s", b2AsS3(repo), b2Why)
 }
 
 // b2AsS3 is a b2: repository's URL at B2's S3-compatible endpoint: the
@@ -649,7 +658,7 @@ func OldEnvFileNote(cfg Config) string {
 	if _, err := os.Lstat(cfg.OldEnvFile); cfg.OldEnvFile == "" || err != nil {
 		return ""
 	}
-	return fmt.Sprintf(" (%s is from before this version and is not read: run `motel-backup setup <its RESTIC_REPOSITORY>` as root, which asks for its RESTIC_PASSWORD; then remove it)", cfg.OldEnvFile)
+	return fmt.Sprintf(" (%s is from before this version and is not read: run `motel-backup setup --existing <its RESTIC_REPOSITORY>` as root, which asks for its RESTIC_PASSWORD; then remove it)", cfg.OldEnvFile)
 }
 
 // setup is one setup under way: the run whose lock it holds, the
@@ -659,6 +668,9 @@ type setup struct {
 	*run
 	term Terminal
 	repo string
+	// existing is SetupOptions.Existing: a repository is there, on the
+	// operator's word, and no password is made.
+	existing bool
 	// staged is the file beside the working one, which the units here
 	// read, and which takes the working one's place at the end.
 	staged string
@@ -733,7 +745,7 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		return nil, err
 	}
 	defer end()
-	s := &setup{run: x, term: term, repo: o.Repository, staged: envfile.Staged(cfg.EnvFile)}
+	s := &setup{run: x, term: term, repo: o.Repository, existing: o.Existing, staged: envfile.Staged(cfg.EnvFile)}
 	if err != nil {
 		return nil, s.err(err)
 	}
@@ -843,27 +855,54 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 		// storage that refuses at once says why, and the key is asked
 		// for again. Where the look cannot tell, init answers, and says
 		// why.
-		term.Say(fmt.Sprintf("looking for a repository at %s (up to %s)", o.Repository, setupProbeClock))
-		found, message, err := s.look(ctx)
+		// With --existing the look has setup's longer clock: the
+		// operator's word is that a repository is there, so a storage
+		// slow to answer [RC check 7, B2: once in four looks] is waited
+		// for, and the question is not init's. A clock met all the same
+		// — a bucket not there, a wrong key, a wrong host, which restic
+		// retries alike, or a storage slow for two minutes — is said,
+		// and the key asked for again as for one refused at once; the
+		// third ends setup with nothing written: the look only reads,
+		// and no password was made or asked for.
+		within := setupProbeClock
+		if s.existing {
+			within = setupClock
+		}
+		term.Say(fmt.Sprintf("looking for a repository at %s (up to %s)", o.Repository, within))
+		found, message, err := s.look(ctx, within)
 		if err != nil {
 			return nil, s.err(err)
 		}
-		unsure := false
+		// Two answers have the key asked for again, up to three times in
+		// all, init's refusals counted with these. Refused at once:
+		// restic gave the look up and said why — the storage refused the
+		// key, or could not be reached — and init, whose first step is
+		// the same opening, would say the same; no password is made on a
+		// key the storage has not taken. The clock met with --existing
+		// (or an exit 0 that says nothing): the three look alike here,
+		// and the key is one of them. The third ending says, with the
+		// flag, what to check and that nothing was written.
+		var retried error
+		again := s.again()
 		switch {
 		case found == lookRefused:
-			// restic gave the look up at once and said why — the storage
-			// refused the key, or could not be reached — and init, whose
-			// first step is the same opening, would say the same. No
-			// password is made on a key the storage has not taken: the
-			// key is asked for again, up to three times in all, init's
-			// refusals counted with these.
-			failure := errors.New("restic could not open the repository (exit 1): " + record.Text(message))
+			retried = errors.New("restic could not open the repository (exit 1): " + record.Text(message))
+		case found == lookUnsure && s.existing:
+			retried, again = s.clockMet(within, message), againAfterClock
+		}
+		if retried != nil {
 			if attempt >= 3 {
-				return nil, s.err(failure)
+				if s.existing {
+					retried = s.wayOut(retried)
+				}
+				return nil, s.err(retried)
 			}
-			term.Say(failure.Error())
-			term.Say(s.again())
+			term.Say(retried.Error())
+			term.Say(again)
 			continue
+		}
+		unsure := false
+		switch {
 		case found == lookFound && ranBefore:
 			// A repository is there, and an earlier attempt's init ran
 			// with the password shown: the throwaway not opening it says
@@ -878,15 +917,19 @@ func Setup(ctx context.Context, cfg Config, r Runner, o SetupOptions) (*SetupRep
 			}
 		case found == lookFound:
 			needsOwn()
+		case found == lookNone && s.existing:
+			// The storage took the key and says there is none: not the
+			// repository the operator meant, and nothing to make.
+			return nil, s.err(s.noneForExisting())
 		case found == lookNone:
 			// None: one is made below.
 		case s.password != "":
 			// The clock ended the look, restic still retrying: init
 			// answers at once, and says which.
-			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made, and the password shown above still applies", setupProbeClock))
+			term.Say(fmt.Sprintf("no repository answered within %s: "+lookAlike+"; a new repository will be made, and the password shown above still applies%s", within, resticSaid(message)))
 		default:
 			unsure = true
-			term.Say(fmt.Sprintf("no repository answered within %s: a bucket not made yet, a wrong key and a wrong host look alike here; a new repository will be made with the password shown next", setupProbeClock))
+			term.Say(fmt.Sprintf("no repository answered within %s: "+lookAlike+"; a new repository will be made with the password shown next%s", within, resticSaid(message)))
 		}
 		if exists || rep.New {
 			break
@@ -1301,7 +1344,8 @@ const (
 )
 
 // look asks whether a repository is there, with the throwaway password,
-// under its own short clock. restic's exit 1 is the storage answering
+// under the clock given: the short one, or with --existing setup's
+// long one. restic's exit 1 is the storage answering
 // at once, in its own words on stderr, which are returned with it.
 // Over S3, restic gives up at once only on an answer its backend holds
 // permanent, a 403 (AccessDenied, what minio-go makes of a 403 with no
@@ -1309,13 +1353,18 @@ const (
 // IsPermanentError]; a wrong secret and a bucket not there are retried,
 // and the clock ends the look [measured, on rclone's S3 server]. Only
 // the clock, and an exit 0 that says nothing, leave the question to
-// init; any other failure is the unit's own, and ends setup before any
-// password is made.
-func (s *setup) look(ctx context.Context) (lookResult, string, error) {
-	o, message, err := s.repository(ctx, "probe", setupProbeClock, s.cfg.Restic, "cat", "config", "--no-lock")
+// init, or with --existing have the key asked for again; any other
+// failure is the unit's own, and ends setup before any password is
+// made.
+func (s *setup) look(ctx context.Context, within time.Duration) (lookResult, string, error) {
+	o, message, err := s.repository(ctx, "probe", within, s.cfg.Restic, "cat", "config", "--no-lock")
 	if err != nil {
 		if errors.Is(err, errDidNotAnswer) {
-			return lookUnsure, "", nil
+			// Stopped at its clock, with what restic said of the storage
+			// before the stop, for the operator, since nothing else
+			// keeps it: the run directory goes with setup [RC check 7:
+			// the slow look's words were not kept].
+			return lookUnsure, s.lastSaid("probe", true), nil
 		}
 		return lookUnsure, "", err
 	}
@@ -1344,6 +1393,45 @@ func (s *setup) again() string {
 		line += " (the password shown above still applies)"
 	}
 	return line
+}
+
+// lookAlike is what the look's clock cannot tell apart: restic retries
+// all three [measured, M47], and only init says which; with --existing
+// the look has setup's longer clock, and a clock met there has the key
+// asked for again.
+const lookAlike = "a bucket not made yet, a wrong key and a wrong host look alike here"
+
+// clockMet is setup --existing's look given up on at setup's clock, or
+// restic exiting 0 saying nothing: the three look alike here, and no
+// password was made.
+func (s *setup) clockMet(within time.Duration, message string) error {
+	return fmt.Errorf("no repository answered within %s%s: "+lookAlike+"; with --existing no password is made", within, resticSaid(message))
+}
+
+// againAfterClock is what the operator is told before the key is asked
+// for again after clockMet: not a refusal, so the key may be right and
+// the storage slow, and the same key has the look run again.
+const againAfterClock = "the key id and secret again: a wrong key is one of the three; the same key, if the storage was only slow to answer, has the look run again"
+
+// wayOut is the ending of setup --existing's third refused or clocked
+// look: what to check, and that nothing was written. The plain path is
+// not offered: after a refusal, init's first step is the same opening
+// and would be refused the same; after a clock, init on a bucket
+// mistyped, with a key that may make one, makes a new repository
+// there, with a password shown — the outcome the flag exists to keep a
+// rebuilt box from.
+func (s *setup) wayOut(err error) error {
+	return fmt.Errorf("%w; check the URL and the key against the earlier box's, and run setup again; nothing of setup's has been written", err)
+}
+
+// noneForExisting is setup --existing meeting a storage that took the
+// key and says there is no repository (exit 10 at the look): the URL
+// names a bucket or a path the earlier box's
+// repository is not at, or the repository is gone. On the operator's
+// word that one is there, setup makes none, and ends here with the
+// working file as it was.
+func (s *setup) noneForExisting() error {
+	return fmt.Errorf("there is no repository at %s (exit 10): setup --existing opens a repository from an earlier box and makes none; check the URL — the bucket and the path — against the earlier box's, or run setup without --existing to make a new repository there", s.repo)
 }
 
 // makeRepository runs restic init. This is the one unit here that is
@@ -1590,15 +1678,31 @@ var unitDescriptions = map[string]string{
 // are the stop's own — "unable to create lock in backend: context
 // canceled", "signal terminated received, cleaning up" [measured on
 // restic 0.18.0: the e2e's clock case; M1] — and say nothing of the
-// storage: the line before them is the one. That is read from the
-// words, and a restic that rewords its stop would be quoted again;
-// the e2e's clock case pins it. The cleaned message (resticMessage)
-// is the whole of stderr joined and cut to its head, where a minute of
-// a read's retries would hide the one line that names the key.
+// storage: the line before them is the one. Nor do the two lines
+// restic puts after every opening that failed, "Is there a repository
+// at the following location?" and the URL on the line after it, in
+// restic's own spelling, written in one call with the Fatal line
+// before them [restic 0.18.0, cmd/restic/global.go; measured: the
+// e2e's wrong key at the look's clock, where the URL was the last
+// line]: nothing from the hint on is read, and the line before is the
+// one, which in that case is restic's last retry line, "Load(<config/>,
+// 0, 0) returned error, retrying after …: …", carrying the storage's
+// answer. That is read from the words, and a restic that rewords its
+// stop would be quoted again; the e2e's clock cases pin it. The
+// cleaned message (resticMessage) is the whole of stderr joined and
+// cut to its head, where a minute of a read's retries would hide the
+// one line that names the key.
 func (s *setup) lastSaid(role string, stopped bool) string {
 	raw, _ := os.ReadFile(s.errFile(role))
 	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
+	end := len(lines)
+	for i, l := range lines {
+		if strings.Contains(l, isThereARepository) {
+			end = i
+			break
+		}
+	}
+	for i := end - 1; i >= 0; i-- {
 		l := lines[i]
 		if record.Text(l) == "" || stopped && (strings.Contains(l, "context canceled") || strings.Contains(l, "signal terminated received")) {
 			continue
@@ -1607,6 +1711,11 @@ func (s *setup) lastSaid(role string, stopped bool) string {
 	}
 	return ""
 }
+
+// isThereARepository is the line restic puts after every opening that
+// failed, with the URL on the line after it [restic 0.18.0,
+// cmd/restic/global.go].
+const isThereARepository = "Is there a repository at the following location?"
 
 // lockLeftLine is what a person waiting on the opening is told, and
 // what an interrupt from it on says: the lock file is restic's,
