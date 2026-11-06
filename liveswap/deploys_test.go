@@ -80,9 +80,8 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 	// Six deploys back to back land within one filesystem timestamp
 	// tick, and a tie between records is broken by name, where v1
 	// beats every f*. So each record is dated once its deploy returns,
-	// a minute apart as the fake clock runs, before the next deploy's
-	// prune reads it.
-	base, start := time.Now().Add(-time.Hour), rig.clock.Now()
+	// a minute after the last, before the next deploy's prune reads it.
+	base, n := time.Now().Add(-time.Hour), 0
 	deploy := func(v string, fail bool) {
 		if fail {
 			rig.runner.startErr = errors.New("boom")
@@ -93,7 +92,8 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 		if (err != nil) != fail {
 			t.Fatalf("%s: fail=%v, err=%v", v, fail, err)
 		}
-		stampRecord(t, rig.spec.dirs, v, base.Add(rig.clock.Now().Sub(start)))
+		n++
+		stampRecord(t, rig.spec.dirs, v, base.Add(time.Duration(n)*time.Minute))
 	}
 	deploy("v1", false)
 	deploy("f1", true)
