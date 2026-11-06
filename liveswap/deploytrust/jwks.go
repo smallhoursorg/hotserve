@@ -73,10 +73,11 @@ type keySet struct {
 // VerifySignature is the payload of the token raw when a key the set
 // holds verifies its signature. The IDTokenVerifier calling it has
 // already refused an algorithm the source does not accept and a token
-// with other than one signature. It never waits on the issuer, so the
-// context is not used.
+// with other than one signature. An ID token is a compact JWS (OIDC
+// Core 2), never the JSON serialization, so only that form is parsed.
+// It never waits on the issuer, so the context is not used.
 func (ks *keySet) VerifySignature(_ context.Context, raw string) ([]byte, error) {
-	jws, err := jose.ParseSigned(raw, signingAlgs)
+	jws, err := jose.ParseSignedCompact(raw, signingAlgs)
 	if err != nil {
 		return nil, fmt.Errorf("malformed jwt: %w", err)
 	}
