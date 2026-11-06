@@ -73,30 +73,35 @@ def gomod_requirement(repo, tag, module):
     return requirement_in(http_get(f"https://raw.githubusercontent.com/{repo}/{tag}/go.mod"), module)
 
 
-def requirement_in(gomod, module):
-    """The version a go.mod requires `module` at, in a require block or
-    a one-line require; None when it does not. replace, exclude and
-    retract lines name modules with versions too and are not
-    requirements, so the directive each line belongs to is tracked."""
+def directives(text):
+    """(directive, rest) for every line of a go.mod or go.work, comments
+    stripped, a block's lines carrying the block's directive."""
     block = None
-    for line in gomod.splitlines():
+    for line in text.splitlines():
         line = line.split("//", 1)[0].strip()
         if not line:
             continue
         if block:
             if line == ")":
                 block = None
-                continue
-            directive, rest = block, line
-        else:
-            words = line.split(None, 1)
-            directive, rest = words[0], (words[1].strip() if len(words) > 1 else "")
-            if rest == "(":
-                block = directive
-                continue
-        if directive != "require":
+            else:
+                yield block, line
             continue
-        m = re.match(rf"{re.escape(module)}\s+(v[0-9]\S*)$", rest)
+        words = line.split(None, 1)
+        rest = words[1].strip() if len(words) > 1 else ""
+        if rest == "(":
+            block = words[0]
+        else:
+            yield words[0], rest
+
+
+def requirement_in(gomod, module):
+    """The version a go.mod requires `module` at, in a require block or
+    a one-line require; None when it does not. replace, exclude and
+    retract lines name modules with versions too and are not
+    requirements."""
+    for directive, rest in directives(gomod):
+        m = directive == "require" and re.match(rf"{re.escape(module)}\s+(v[0-9]\S*)$", rest)
         if m:
             return m.group(1)
     return None
@@ -132,13 +137,6 @@ def evaluate(watch, findings):
             f"pin-watch: {wid} is malformed",
             f"The watch {shape}. Fix the entry in `{MANIFEST}`; until then the "
             "pin is unwatched.",
-        ))
-        return
-    if cond.get("type") != "upstream-gomod-requires":
-        findings.append((
-            f"pin-watch: {wid} has an unknown condition type",
-            f"`{cond.get('type')}` is not implemented; supported types: "
-            f"`upstream-gomod-requires`. Fix the entry in `{MANIFEST}`.",
         ))
         return
     try:
@@ -315,8 +313,8 @@ def reconcile_alerts(dismissals, findings):
         by_pair = {}
         for a in matched:
             by_pair.setdefault((a.get("manifest"), a.get("package")), []).append(a)
-        moved_on = {k for k, rows in by_pair.items()
-                    if any(a["state"] in ("fixed", "auto_dismissed") for a in rows)}
+        moved = ("fixed", "auto_dismissed")
+        moved_on = {k for k, rows in by_pair.items() if any(a["state"] in moved for a in rows)}
         again = [a for a in matched if a["state"] == "open"
                  and ((a.get("manifest"), a.get("package")) in moved_on or a.get("fixed_at"))]
         if again:
@@ -330,7 +328,10 @@ def reconcile_alerts(dismissals, findings):
                 f"in `{MANIFEST}`.",
             ))
             continue
-        if moved_on == set(by_pair):
+        # Stale only when nothing stands on the entry any more: a pair
+        # holding a dismissed alert beside a fixed one is a live
+        # dismissal whose evidence the entry is.
+        if all(a["state"] in moved for a in matched):
             findings.append((
                 f"pin-watch: dismissal {ghsa} outlived its alerts",
                 f"Dependabot alerts with GHSA `{ghsa}` are "
@@ -430,22 +431,9 @@ GOWORK = "go.work"
 
 def workspace_gomods(gowork=GOWORK):
     """Every go.mod the workspace builds, from go.work's use
-    directives, one-line or in a block, comments stripped."""
-    dirs, block = [], False
+    directives, one-line or in a block."""
     with open(gowork) as f:
-        for line in f:
-            line = line.split("//", 1)[0].strip()
-            words = line.split(None, 1)
-            if block:
-                if line == ")":
-                    block = False
-                elif line:
-                    dirs.append(line.strip('"'))
-            elif words and words[0] == "use" and len(words) == 2:
-                if words[1] == "(":
-                    block = True
-                else:
-                    dirs.append(words[1].strip('"'))
+        dirs = [rest.strip('"') for directive, rest in directives(f.read()) if directive == "use"]
     base = os.path.dirname(os.path.abspath(gowork))
     return [os.path.normpath(os.path.join(base, d, "go.mod")) for d in dirs]
 
@@ -469,14 +457,20 @@ def mappings(watches, findings):
     would have aborted the run before any issue was opened."""
     ok = []
     for i, w in enumerate(watches):
-        if isinstance(w, dict):
-            ok.append(w)
-        else:
+        if not isinstance(w, dict):
             findings.append((
                 f"pin-watch: watch #{i + 1} is not a mapping",
                 f"`watches[{i}]` in `{MANIFEST}` is `{w!r}`, not a mapping with "
                 "`id`, `unblock` and the rest; fix or delete it.",
             ))
+        elif "ignores" in w and not isinstance(w["ignores"], str):
+            findings.append((
+                f"pin-watch: watch #{i + 1} has an `ignores` that is not text",
+                f"`watches[{i}].ignores` in `{MANIFEST}` is `{w['ignores']!r}`; it "
+                "names one dependabot.yml ignore, as text. Fix it.",
+            ))
+        else:
+            ok.append(w)
     return ok
 
 

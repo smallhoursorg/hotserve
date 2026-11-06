@@ -145,6 +145,11 @@ class DismissalTests(unittest.TestCase):
         self.assertIn("dismissed alert #2", out)
         self.assertIn("dismissed alert #3", out)
 
+    def test_a_dismissed_alert_beside_a_fixed_one_still_stands_on_the_entry(self):
+        findings, calls, out = self.run_alerts(
+            [alert(1, "fixed"), alert(2, "dismissed")], [entry()], live=True)
+        self.assertEqual((findings, calls, out), ([], [], ""))
+
     def test_auto_dismissed_counts_as_moved_on(self):
         findings, calls, out = self.run_alerts([alert(1, "auto_dismissed")], [entry()])
         self.assertEqual(len(findings), 1)
@@ -276,6 +281,9 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(pw.mappings([None, "x", {"id": "ok"}], findings), [{"id": "ok"}])
         self.assertEqual([f[0] for f in findings],
                          ["pin-watch: watch #1 is not a mapping", "pin-watch: watch #2 is not a mapping"])
+        findings = []
+        self.assertEqual(pw.mappings([{"ignores": ["github.com/foo"]}], findings), [])
+        self.assertEqual([f[0] for f in findings], ["pin-watch: watch #1 has an `ignores` that is not text"])
 
     def test_a_repo_that_is_not_found_is_a_finding_not_a_transient_warning(self):
         import urllib.error

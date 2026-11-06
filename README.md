@@ -276,11 +276,13 @@ once the full CI graph is green. Two escape hatches, both declared in
 [`.github/pin-watch.yml`](.github/pin-watch.yml) and enforced by the
 weekly `pin-watch` workflow:
 
-- **Pins.** Every `ignore` in `dependabot.yml` must have a `watches`
-  entry declaring the machine-checkable condition under which the pin
-  is lifted (e.g. "caddy's latest release requires cel-go ≥ 0.29").
-  The workflow opens an issue when a condition is met, and flags any
-  ignore↔watch drift — a pin can never rot silently.
+- **Pins.** Every pin must have a `watches` entry declaring the
+  machine-checkable condition under which it is lifted (e.g. "caddy's
+  latest release requires cel-go ≥ 0.29"): an `ignore` in
+  `dependabot.yml`, or a require go.mod holds itself ahead of the last
+  tag, which the entry then names as its `min_version`. The workflow
+  opens an issue when a condition is met, and flags any ignore↔watch
+  drift and any go.mod↔watch drift — a pin can never rot silently.
 - **Alert triage.** `alert_dismissals` entries auto-dismiss Dependabot
   alerts by GHSA id, and `code_scanning_dismissals` entries do the same
   for CodeQL alerts by rule + file (with an `expect` cap so a new flow
