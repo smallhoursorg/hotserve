@@ -16,7 +16,7 @@ VERSION ?= $(shell (git describe --tags --exact-match 2>/dev/null || echo v0.0.0
 # Distro image for the package install smoke test (install-test).
 DISTRO ?= debian:13
 
-.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck secretscan usage usage-check build package clean-debs install-test e2e e2e-backup soak e2e-logs clean
+.PHONY: test test-integration vet tidy tidy-check lint fuzz fuzz-list vulncheck pin-watch-check secretscan usage usage-check build package clean-debs install-test e2e e2e-backup soak e2e-logs clean
 
 test:
 	$(COMPOSE) run --rm dev go test -race -cover $(PKGS)
@@ -149,6 +149,13 @@ fuzz:
 vulncheck:
 	$(COMPOSE) run --rm dev sh .github/scripts/vulncheck.sh $(MODULES)
 
+# The manifest rules of pin-watch.py (.github/scripts/pin_watch_test.py),
+# in the same python image as usage-check, which depends on it so CI's
+# usage-check job runs both; the test stubs PyYAML, which the image
+# lacks and the rules never read.
+pin-watch-check:
+	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I -B .github/scripts/pin_watch_test.py
+
 # Full-history secret scan — the same engine and image as CI's gitleaks
 # gate (the image is pinned in docker-compose.yml, where Dependabot
 # watches it), so local and CI can never drift.
@@ -192,7 +199,7 @@ usage:
 # transcripts, no token) and fails when the page no longer matches them.
 # It is also the only lane that runs the python image, so Dependabot's
 # bumps of that pin are exercised.
-usage-check:
+usage-check: pin-watch-check
 	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I -B .github/scripts/usage_test.py
 	$(COMPOSE) run --rm -T --user "$$(id -u):$$(id -g)" usage python3 -I .github/scripts/usage.py render
 	git diff --exit-code -- docs/footprint.md

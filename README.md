@@ -238,6 +238,7 @@ make vulncheck         # govulncheck, all modules (tool dep in go.mod — Depend
 make secretscan        # gitleaks secret scan: full history, or the working tree in a git worktree (same image as the CI gate)
 make usage             # what building this costs (Claude Code, Actions minutes, Copilot) → usage/*.csv + docs/footprint.md; needs gh auth login
 make usage-check       # usage.py's tests, then fails if docs/footprint.md no longer matches usage/*.csv; CI runs it on every PR
+make pin-watch-check   # pin-watch.py's manifest rules (dismissals, go.mod-held pins), in the same python image; usage-check runs it first
 make fuzz              # fuzz the untrusted-input surfaces (FUZZTIME=2m per target)
 make fuzz-list         # what fuzz will run (discovered per module, not listed by hand); CI runs it on every PR
 make soak              # ~20min leak hunt: deploy/reload churn, goroutine/fd assertions; CI runs it per merge to main and weekly
@@ -284,11 +285,16 @@ weekly `pin-watch` workflow:
   alerts by GHSA id, and `code_scanning_dismissals` entries do the same
   for CodeQL alerts by rule + file (with an `expect` cap so a new flow
   in the same file is never silently swallowed) — each with a reviewed
-  reason and evidence comment, so triage decisions are versioned
-  instead of buried in the UI. Unlisted alerts stay open and notify as
-  normal. An `alert_dismissals` entry may also name the advisory's Go
-  vulndb ID (`govulncheck:`); `make vulncheck` then lets that one ID
-  through, and fails once nothing calls it any more. This needs the
+  reason and evidence comment (280 characters, what GitHub keeps; a
+  longer one is refused, not posted cut), so triage decisions are
+  versioned instead of buried in the UI. Unlisted alerts stay open and
+  notify as normal. An entry whose alerts have all been fixed is
+  flagged as stale, and an alert open again in a go.mod and package
+  that had been fixed is a reintroduction, named rather than
+  dismissed. An `alert_dismissals` entry may also
+  name the advisory's Go vulndb ID (`govulncheck:`); `make vulncheck`
+  then lets that one ID through, and fails once nothing calls it any
+  more. This needs the
   `DEPENDABOT_ALERTS_TOKEN` Actions secret — a fine-grained PAT with
   **Dependabot alerts: read-write** on this repository only — because
   the Actions `GITHUB_TOKEN` cannot access the alerts API.

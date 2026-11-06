@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""pin-watch: every Dependabot ignore must declare its exit condition.
+"""pin-watch: every pin must declare its exit condition.
 
 Reads the manifest (.github/pin-watch.yml) and .github/dependabot.yml,
-verifies they agree — every ignore has a watch, every watch has a live
-ignore — then evaluates each watch's unblock condition against the
-upstream's latest release. Findings are printed; when
+verifies they agree — every ignore has a watch, every watch that names
+an ignore has a live one; a watch without `ignores` is a pin go.mod
+holds itself — then evaluates each watch's unblock condition against
+the upstream's latest release. Findings are printed; when
 PIN_WATCH_CREATE_ISSUES=1 (set by the workflow) each finding becomes
 one labeled, de-duplicated GitHub issue via `gh`.
 
@@ -12,7 +13,8 @@ Contains no dependency-specific logic: new pins are new manifest
 entries, never script changes.
 
 Run locally as a dry run: python3 .github/scripts/pin-watch.py
-(needs PyYAML — preinstalled on GitHub runners and in python:3 images).
+(needs PyYAML — preinstalled on GitHub runners; `pip install pyyaml`
+elsewhere, the python image in docker-compose.yml included).
 """
 
 import json
@@ -45,10 +47,18 @@ def http_get(url):
 
 
 def ver_key(v):
-    """Order key for vX.Y.Z-ish strings; pre-release/build metadata is
-    ignored (good enough for 'has the requirement reached vX.Y')."""
-    core = v.lstrip("v").split("-")[0].split("+")[0]
-    return tuple(int(p) if p.isdigit() else 0 for p in core.split("."))
+    """Order key for Go module versions: the release core, then a
+    pre-release sorts before the release of the same core (Go's
+    pseudo-versions are pre-releases: v0.30.3-0.<time>-<hash> < v0.30.3)
+    and pre-releases of one core sort by their string, which for
+    pseudo-versions is by commit time. Build metadata is ignored."""
+    v = v.lstrip("v").split("+")[0]
+    core, _, pre = v.partition("-")
+    return (tuple(int(p) if p.isdigit() else 0 for p in core.split(".")),
+            0 if pre else 1,
+            # semver 11: dot-separated identifiers, numeric ones as
+            # numbers (beta.9 < beta.10), numeric before alphanumeric.
+            tuple((0, int(i), "") if i.isdigit() else (1, 0, i) for i in pre.split(".")))
 
 
 def latest_release_tag(repo):
@@ -57,14 +67,70 @@ def latest_release_tag(repo):
 
 
 def gomod_requirement(repo, tag, module):
-    gomod = http_get(f"https://raw.githubusercontent.com/{repo}/{tag}/go.mod")
-    m = re.search(rf"^\s*{re.escape(module)}\s+(v[0-9][^\s]*)", gomod, re.M)
-    return m.group(1) if m else None
+    return requirement_in(http_get(f"https://raw.githubusercontent.com/{repo}/{tag}/go.mod"), module)
+
+
+def requirement_in(gomod, module):
+    """The version a go.mod requires `module` at, in a require block or
+    a one-line require; None when it does not. replace, exclude and
+    retract lines name modules with versions too and are not
+    requirements, so the directive each line belongs to is tracked."""
+    block = None
+    for line in gomod.splitlines():
+        line = line.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if block:
+            if line == ")":
+                block = None
+                continue
+            directive, rest = block, line
+        else:
+            words = line.split(None, 1)
+            directive, rest = words[0], (words[1].strip() if len(words) > 1 else "")
+            if rest == "(":
+                block = directive
+                continue
+        if directive != "require":
+            continue
+        m = re.match(rf"{re.escape(module)}\s+(v[0-9]\S*)$", rest)
+        if m:
+            return m.group(1)
+    return None
+
+
+WATCH_FIELDS = ("repo", "module", "min_version")
+
+
+def watch_shape(watch):
+    """What is wrong with a watch's unblock condition, as text, or None.
+    Checked before anything is evaluated or fetched: a missing or
+    non-text field would otherwise surface as a swallowed exception
+    (a transient-looking warning) or a traceback, and the pin would
+    rot with no issue."""
+    cond = watch.get("unblock")
+    if not isinstance(cond, dict):
+        return "has no `unblock` mapping"
+    if cond.get("type") != "upstream-gomod-requires":
+        return (f"has condition type `{cond.get('type')}`; supported types: "
+                "`upstream-gomod-requires`")
+    bad = [f for f in WATCH_FIELDS if not isinstance(cond.get(f), str) or not cond[f].strip()]
+    if bad:
+        return "lacks text for " + ", ".join(f"`{f}`" for f in bad) + " (quote a version like 0.31)"
+    return None
 
 
 def evaluate(watch, findings):
     cond = watch.get("unblock") or {}
     wid = watch.get("id") or watch.get("ignores") or "?"
+    shape = watch_shape(watch)
+    if shape:
+        findings.append((
+            f"pin-watch: {wid} is malformed",
+            f"The watch {shape}. Fix the entry in `{MANIFEST}`; until then the "
+            "pin is unwatched.",
+        ))
+        return
     if cond.get("type") != "upstream-gomod-requires":
         findings.append((
             f"pin-watch: {wid} has an unknown condition type",
@@ -117,6 +183,35 @@ def open_issues(findings):
 
 VALID_DISMISS_REASONS = {
     "fix_started", "inaccurate", "no_bandwidth", "not_used", "tolerable_risk"}
+# GitHub keeps this many characters of a dismissal comment. The comment
+# is the dismissal's versioned evidence, so one that would be cut is
+# refused rather than posted short.
+COMMENT_LIMIT = 280
+
+
+def comment_fits(kind, key, comment, findings):
+    """The comment is the dismissal's evidence, posted with it: text,
+    present, and no longer than GitHub keeps. Anything else is a
+    finding and the entry dismisses nothing."""
+    if not isinstance(comment, str) or not comment.strip():
+        findings.append((
+            f"pin-watch: {kind} dismissal {key} has no comment",
+            "The comment is the dismissal's evidence, posted with it; an "
+            "entry without one — or with a bare date, number or flag where "
+            f"text should be — is not a reviewed dismissal. Add it in `{MANIFEST}`.",
+        ))
+        return False
+    if len(comment) <= COMMENT_LIMIT:
+        return True
+    findings.append((
+        f"pin-watch: {kind} dismissal {key} has a comment over "
+        f"{COMMENT_LIMIT} characters",
+        f"GitHub keeps {COMMENT_LIMIT} characters of a dismissal comment and "
+        f"this one is {len(comment)}, so the posted text would differ from "
+        f"`{MANIFEST}`. Shorten it; the YAML comment above the entry holds "
+        "the long form.",
+    ))
+    return False
 
 
 def gh(args, token=None):
@@ -124,6 +219,21 @@ def gh(args, token=None):
     if token:
         env["GH_TOKEN"] = token
     return subprocess.check_output(["gh", *args], env=env)
+
+
+def gh_pages(args, token=None):
+    """`gh api --paginate --jq '[...]'` prints one JSON array per page,
+    back to back, so a listing past 100 rows is not one document.
+    Decode each and return the rows of all pages as one list."""
+    text = gh(args, token).decode()
+    rows, pos, dec = [], 0, json.JSONDecoder()
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos >= len(text):
+            return rows
+        page, pos = dec.raw_decode(text, pos)
+        rows.extend(page)
 
 
 def reconcile_alerts(dismissals, findings):
@@ -146,23 +256,28 @@ def reconcile_alerts(dismissals, findings):
         ))
         return
     live = os.environ.get("PIN_WATCH_CREATE_ISSUES") == "1"
-    alerts = json.loads(gh(
+    alerts = gh_pages(
         ["api", "--paginate",
          f"repos/{os.environ['GH_REPO']}/dependabot/alerts?per_page=100",
          "--jq",
-         "[.[] | {number, state, ghsa: .security_advisory.ghsa_id}]"],
-        token=token))
+         "[.[] | {number, state, ghsa: .security_advisory.ghsa_id, fixed_at, "
+         "manifest: .dependency.manifest_path, package: .dependency.package.name}]"],
+        token=token)
     by_ghsa = {}
     for a in alerts:
         by_ghsa.setdefault(a["ghsa"], []).append(a)
     for d in dismissals:
         ghsa, reason = d.get("ghsa"), d.get("reason")
+        comment = d.get("comment")
         if reason not in VALID_DISMISS_REASONS:
             findings.append((
                 f"pin-watch: dismissal {ghsa} has invalid reason",
                 f"`{reason}` is not one of {sorted(VALID_DISMISS_REASONS)}.",
             ))
             continue
+        # Recorded, not fatal: the match checks below still run, so one
+        # pass names everything wrong with the entry.
+        fits = comment_fits("alert", ghsa, comment, findings)
         matched = by_ghsa.get(ghsa)
         if not matched:
             findings.append((
@@ -170,6 +285,46 @@ def reconcile_alerts(dismissals, findings):
                 f"No Dependabot alert in any state has GHSA `{ghsa}` — "
                 f"stale entry in `{MANIFEST}`, delete it.",
             ))
+            continue
+        # Dependabot raises one alert per go.mod and package, so the
+        # states are read per (manifest, package). Open and dismissed
+        # are the states this entry works on and makes. Fixed or
+        # auto_dismissed means that pair moved on: every pair moved on
+        # makes the entry stale, and an alert open where its pair had
+        # moved on — a new alert beside a fixed one, or a fixed alert
+        # reopened (fixed_at set) — is a reintroduction by another
+        # path, not the alert the entry reviewed: named, not dismissed.
+        # A pair still open beside one that moved on is a bump landing
+        # module by module, and is dismissed as before.
+        by_pair = {}
+        for a in matched:
+            by_pair.setdefault((a.get("manifest"), a.get("package")), []).append(a)
+        moved_on = {k for k, rows in by_pair.items()
+                    if any(a["state"] in ("fixed", "auto_dismissed") for a in rows)}
+        again = [a for a in matched if a["state"] == "open"
+                 and ((a.get("manifest"), a.get("package")) in moved_on or a.get("fixed_at"))]
+        if again:
+            findings.append((
+                f"pin-watch: dismissal {ghsa} met a reintroduction",
+                f"GHSA `{ghsa}` was fixed and is open again in "
+                + ", ".join(f"`{a.get('package')}` in `{a.get('manifest')}` (#{a['number']})"
+                            for a in again)
+                + ": a dependency came back by another path. NOT "
+                f"dismissed — triage afresh, then amend or delete the entry "
+                f"in `{MANIFEST}`.",
+            ))
+            continue
+        if moved_on == set(by_pair):
+            findings.append((
+                f"pin-watch: dismissal {ghsa} outlived its alerts",
+                f"Dependabot alerts with GHSA `{ghsa}` are "
+                + ", ".join(f"#{a['number']} {a['state']}" for a in matched)
+                + ". The dependency moved on, so the entry in "
+                f"`{MANIFEST}` is stale: delete it (and its `govulncheck:` "
+                "key).",
+            ))
+            continue
+        if not fits:
             continue
         for a in matched:
             if a["state"] != "open":
@@ -182,7 +337,7 @@ def reconcile_alerts(dismissals, findings):
                 f"repos/{os.environ['GH_REPO']}/dependabot/alerts/{a['number']}",
                 "-f", "state=dismissed",
                 "-f", f"dismissed_reason={reason}",
-                "-f", f"dismissed_comment={d.get('comment', '')[:280]}"],
+                "-f", f"dismissed_comment={comment}"],
                token=token)
             print(f"dismissed alert #{a['number']} ({ghsa}) as {reason}")
 
@@ -201,14 +356,15 @@ def reconcile_code_scanning(dismissals, findings):
     if not dismissals:
         return
     live = os.environ.get("PIN_WATCH_CREATE_ISSUES") == "1"
-    alerts = json.loads(gh(
+    alerts = gh_pages(
         ["api", "--paginate",
          f"repos/{os.environ['GH_REPO']}/code-scanning/alerts?per_page=100",
          "--jq",
          "[.[] | {number, state, rule: .rule.id, "
-         "path: .most_recent_instance.location.path}]"]))
+         "path: .most_recent_instance.location.path}]"])
     for d in dismissals:
         rule, path_, reason = d.get("rule"), d.get("path"), d.get("reason")
+        comment = d.get("comment")
         key = f"{rule} in {path_}"
         if reason not in VALID_CODE_SCANNING_REASONS:
             findings.append((
@@ -216,6 +372,7 @@ def reconcile_code_scanning(dismissals, findings):
                 f"`{reason}` is not one of {sorted(VALID_CODE_SCANNING_REASONS)}.",
             ))
             continue
+        fits = comment_fits("code-scanning", key, comment, findings)
         matched = [a for a in alerts if a["rule"] == rule and a["path"] == path_]
         if not matched:
             findings.append((
@@ -237,6 +394,8 @@ def reconcile_code_scanning(dismissals, findings):
                 + ", ".join(f"#{a['number']}" for a in open_matches),
             ))
             continue
+        if not fits:
+            continue
         for a in open_matches:
             if not live:
                 print(f"dry run: would dismiss code-scanning alert "
@@ -246,8 +405,107 @@ def reconcile_code_scanning(dismissals, findings):
                 f"repos/{os.environ['GH_REPO']}/code-scanning/alerts/{a['number']}",
                 "-f", "state=dismissed",
                 "-f", f"dismissed_reason={reason}",
-                "-f", f"dismissed_comment={d.get('comment', '')[:280]}"])
+                "-f", f"dismissed_comment={comment}"])
             print(f"dismissed code-scanning alert #{a['number']} ({key}) as {reason}")
+
+
+GOWORK = "go.work"
+
+
+def workspace_gomods(gowork=GOWORK):
+    """Every go.mod the workspace builds, from go.work's use
+    directives, one-line or in a block, comments stripped."""
+    dirs, block = [], False
+    with open(gowork) as f:
+        for line in f:
+            line = line.split("//", 1)[0].strip()
+            words = line.split(None, 1)
+            if block:
+                if line == ")":
+                    block = False
+                elif line:
+                    dirs.append(line.strip('"'))
+            elif words and words[0] == "use" and len(words) == 2:
+                if words[1] == "(":
+                    block = True
+                else:
+                    dirs.append(words[1].strip('"'))
+    base = os.path.dirname(os.path.abspath(gowork))
+    return [os.path.normpath(os.path.join(base, d, "go.mod")) for d in dirs]
+
+
+def requirements_here(module, gomods):
+    """{go.mod path: version} for every workspace go.mod requiring module."""
+    out = {}
+    for path in gomods:
+        if not os.path.exists(path):
+            continue
+        with open(path) as f:
+            v = requirement_in(f.read(), module)
+        if v:
+            out[os.path.relpath(path)] = v
+    return out
+
+
+def sync_findings(watches, ignores, gomods=None):
+    """Every Dependabot ignore has a watch and every watch naming an
+    ignore has a live one. A watch without `ignores` is a pin that
+    go.mod holds itself (a require at a pseudo-version, say): it has no
+    Dependabot side to agree with, so it agrees with go.mod instead —
+    every workspace go.mod that requires the module does so at exactly
+    the watch's min_version, the version upstream has to reach for the
+    lines to go, and at least one does. go.work is read only when such
+    a watch exists."""
+    watched = {w["ignores"] for w in watches if w.get("ignores")}
+    out = [
+        f"- dependabot ignores `{n}` but `{MANIFEST}` has no watch for it — "
+        "every ignore must declare its exit condition"
+        for n in sorted(ignores - watched)
+    ] + [
+        f"- `{MANIFEST}` watches `{n}` but dependabot no longer ignores it — "
+        "delete the stale watch"
+        for n in sorted(watched - ignores)
+    ]
+    for w in watches:
+        if w.get("ignores"):
+            continue
+        wid = w.get("id")
+        if watch_shape(w):
+            # evaluate names what is wrong; here only that go.mod
+            # cannot be checked against it.
+            out.append(
+                f"- `{MANIFEST}` watch `{wid}` names no ignore, so it is a pin "
+                "go.mod holds, but it is malformed (see its own finding) — the "
+                "pin cannot be checked against go.mod")
+            continue
+        cond = w["unblock"]
+        module, want = cond["module"], cond["min_version"]
+        if gomods is None:
+            gomods = workspace_gomods()
+        have = requirements_here(module, gomods)
+        if not have:
+            out.append(
+                f"- `{MANIFEST}` watch `{wid}` is a pin go.mod holds, but no "
+                f"workspace go.mod requires `{module}` — delete the watch")
+        for path, v in sorted(have.items()):
+            if v == want:
+                continue
+            if ver_key(v) > ver_key(want):
+                # Module graph pruning keeps an indirect line for every
+                # module in the build, so the pin is never "dropped":
+                # once upstream requires more, tidy rewrites the line to
+                # upstream's version and the pin is no longer ours.
+                out.append(
+                    f"- `{MANIFEST}` watch `{wid}` is a pin go.mod held, but "
+                    f"`{path}` now requires `{module}` at {v}, past its "
+                    f"min_version {want}: upstream moved on and the line is "
+                    "upstream's — delete the watch")
+            else:
+                out.append(
+                    f"- `{MANIFEST}` watch `{wid}` is a pin go.mod holds, but "
+                    f"`{path}` requires `{module}` at {v}, below its min_version "
+                    f"{want} — re-pin both together, or delete the watch")
+    return out
 
 
 def main():
@@ -260,16 +518,7 @@ def main():
 
     findings = []
 
-    watched = {w.get("ignores") for w in watches}
-    sync = [
-        f"- dependabot ignores `{n}` but `{MANIFEST}` has no watch for it — "
-        "every ignore must declare its exit condition"
-        for n in sorted(ignores - watched)
-    ] + [
-        f"- `{MANIFEST}` watches `{n}` but dependabot no longer ignores it — "
-        "delete the stale watch"
-        for n in sorted(watched - ignores)
-    ]
+    sync = sync_findings(watches, ignores)
     if sync:
         findings.append(
             ("pin-watch: manifest and dependabot ignores are out of sync",

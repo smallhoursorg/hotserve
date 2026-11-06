@@ -41,7 +41,11 @@ updates:
     # A Dependabot `ignore` here MUST have a matching watch declaring
     # its exit condition in .github/pin-watch.yml — the pin-watch
     # workflow opens an issue when the condition is met, and flags any
-    # ignore without a watch.
+    # ignore without a watch. A pin go.mod holds itself (a require at
+    # a pseudo-version ahead of the last tag) needs a watch too, one
+    # without `ignores`; pin-watch checks the watch against go.mod, but
+    # cannot tell such a pin from a version MVS selected, so a pin
+    # without a watch is for review to catch.
 
   - package-ecosystem: github-actions
     # The examples' workflows are SHA-pinned like ours and are

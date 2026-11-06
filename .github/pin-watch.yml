@@ -1,13 +1,24 @@
-# pin-watch manifest: every Dependabot *ignore* must have an entry
-# here declaring the condition under which the pin should be lifted.
-# The pin-watch workflow evaluates these weekly and opens an issue
-# when a condition is met — and flags any ignore without a watch (or
-# watch without an ignore), so a pin can never rot silently.
+# pin-watch manifest: every pin must have an entry here declaring the
+# condition under which it should be lifted — a Dependabot *ignore*,
+# or a require go.mod holds itself (a pseudo-version ahead of the last
+# tag, say). The pin-watch workflow evaluates these weekly and opens
+# an issue when a condition is met — and flags any ignore without a
+# watch (or watch naming an ignore that is gone), so a pin can never
+# rot silently.
 #
 # Schema per watch:
 #   id:          short slug, used in issue titles
 #   ignores:     dependency-name exactly as it appears in a
-#                dependabot.yml ignore entry
+#                dependabot.yml ignore entry; absent for a pin held in
+#                go.mod, which then agrees with go.mod instead: every
+#                workspace go.mod (go.work's use list) that requires
+#                the module does so at exactly min_version (the version
+#                upstream has to reach), and at least one does; a re-pin
+#                moves all of them or is flagged. The lines never go:
+#                module graph pruning keeps an indirect require for
+#                every module in the build, so once upstream requires
+#                more, tidy rewrites them to upstream's version and the
+#                watch is deleted
 #   reason:      why the pin exists (human context for the issue)
 #   unblock:     the machine-checkable exit condition
 #     type: upstream-gomod-requires   # the only type implemented so far:
@@ -16,7 +27,30 @@
 #     min_version: <vX.Y.Z>            #   …at at least this version
 #   action:      what to do when the condition fires
 
-watches: []
+watches:
+  - id: smallstep-certificates-master
+    # Held in go.mod, not by an ignore: the four Caddy-bearing modules
+    # require github.com/smallstep/certificates at a master
+    # pseudo-version (min_version below is that pin; PR #405).
+    # v0.30.2, the last tag, requires go.step.sm/crypto 0.91.0, which
+    # carries go-jose/v3 <= 3.0.5 — three DoS advisories with no v3 fix
+    # (GHSA-mgcc-cww5-fp2q, GHSA-4w3g-jfj2-cw2q, GHSA-vvm8-gf78-28g4),
+    # reachable through any Caddyfile with an acme_server site — and
+    # does not compile against crypto 0.92.0, the first release on
+    # go-jose/v4. Master does. Caddy itself still requires v0.30.2.
+    reason: >-
+      go.mod requires smallstep/certificates at a master pseudo-version
+      so go-jose/v3 (three unfixed DoS advisories) leaves the build;
+      v0.30.2 does not compile against go.step.sm/crypto 0.92.0.
+    unblock:
+      type: upstream-gomod-requires
+      repo: caddyserver/caddy
+      module: github.com/smallstep/certificates
+      min_version: v0.30.3-0.20261105213751-6d5a251fbe01
+    action: >-
+      Bump Caddy in the root, box, liveswap and penaltybox modules, run
+      `go mod tidy` (the certificates lines become Caddy's version; they
+      stay, as indirect requires do), and delete this watch.
 
 # Dependabot alert triage as code: alerts whose GHSA is listed here are
 # auto-dismissed by the pin-watch workflow with the given reason and
@@ -25,6 +59,15 @@ watches: []
 # section can only silence what a PR has reviewed.
 # reason must be one of GitHub's dismissed_reason values:
 #   fix_started | inaccurate | no_bandwidth | not_used | tolerable_risk
+# comment is at most 280 characters — what GitHub keeps; pin-watch
+# refuses a longer one rather than post it cut, so the long form goes
+# in a YAML comment above the entry. An entry whose alerts are all
+# `fixed` or `auto_dismissed` is flagged as stale: the dependency moved
+# on. States are read per go.mod and package (one alert each), and an
+# alert open again where its pair had moved on, or reopened in place,
+# is a reintroduction by another path, named rather than dismissed; a
+# pair still open beside one that moved on is a bump landing module by
+# module, dismissed as before.
 # Requires the DEPENDABOT_ALERTS_TOKEN secret (fine-grained PAT,
 # "Dependabot alerts: read-write" on this repo only) — the Actions
 # GITHUB_TOKEN cannot access the Dependabot alerts API.
@@ -47,7 +90,8 @@ alert_dismissals: []
 # an issue instead. reason must be one of GitHub's values:
 #   false positive | won't fix | used in tests
 # Uses the workflow's own GITHUB_TOKEN (security-events: write IS
-# grantable, unlike the Dependabot alerts API).
+# grantable, unlike the Dependabot alerts API). comment: 280 characters
+# at most, as above.
 
 code_scanning_dismissals:
   - rule: go/request-forgery
