@@ -63,6 +63,16 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.keep = 2
+	// Pruning and the status order records by the file's modification
+	// time, which the fake clock does not move: six deploys back to
+	// back land within one filesystem timestamp tick, and a tie is
+	// broken by name, where v1 beats every f*. So each record is given
+	// the clock's time once its deploy returns — before the next
+	// deploy, whose prune reads it.
+	stamp := func(v string) {
+		now := rig.clock.Now()
+		must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, v), now, now))
+	}
 	fail := func(v string) {
 		rig.runner.startErr = errors.New("boom")
 		rig.clock.Advance(time.Minute)
@@ -70,12 +80,14 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 			t.Fatalf("%s should have failed", v)
 		}
 		rig.runner.startErr = nil
+		stamp(v)
 	}
 	ok := func(v string) {
 		rig.clock.Advance(time.Minute)
 		if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/" + v, version: v, by: "test"}); err != nil {
 			t.Fatalf("%s: %v", v, err)
 		}
+		stamp(v)
 	}
 	ok("v1")
 	fail("f1")
@@ -87,9 +99,9 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 	for _, d := range rig.ma.status().Deploys {
 		names = append(names, d.Version)
 	}
-	// On disk: v3, v2 → kept. Others by the time their record was
-	// written: f3, f2, f1, v1 → the newest 2 (f3, f2) kept; v1's
-	// record went with its release.
+	// On disk: v3, v2 → kept. Others by their record's time: f3, f2,
+	// f1, v1 → the newest 2 (f3, f2) kept; v1's record went with its
+	// release.
 	if got := strings.Join(names, ","); got != "v3,v2,f3,f2" {
 		t.Fatalf("records after pruning = %s", got)
 	}
