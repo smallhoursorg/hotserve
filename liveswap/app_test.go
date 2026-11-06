@@ -900,15 +900,21 @@ func TestDeployConcurrentGets409Error(t *testing.T) {
 	}
 }
 
+// stampRecord dates version's deploy record: the record's write time
+// is its place in the order pruning and the status use, and file times
+// are too coarse to tell apart deploys a fake pipeline runs within a
+// millisecond — the fake clock moves no file's time.
+func stampRecord(t *testing.T, d appDirs, version string, when time.Time) {
+	t.Helper()
+	must(t, os.Chtimes(deployRecordPath(d.deploys, version), when, when))
+}
+
 // deployAt deploys version through the rig and dates its deploy record
-// minute minutes after base: the record's write time is the release's
-// place in the order, and file times are too coarse to tell apart
-// deploys a fake pipeline runs within a millisecond.
+// minute minutes after base.
 func deployAt(t *testing.T, rig *testRig, version string, base time.Time, minute int) {
 	t.Helper()
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/" + version, version: version}))
-	when := base.Add(time.Duration(minute) * time.Minute)
-	must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, version), when, when))
+	stampRecord(t, rig.spec.dirs, version, base.Add(time.Duration(minute)*time.Minute))
 }
 
 func TestDeployGCKeepsNewestReleases(t *testing.T) {

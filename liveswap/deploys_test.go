@@ -63,45 +63,39 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 	rig := newTestRig(t)
 	rig.spec.keep = 2
-	// Pruning and the status order records by the file's modification
-	// time, which the fake clock does not move: six deploys back to
-	// back land within one filesystem timestamp tick, and a tie is
-	// broken by name, where v1 beats every f*. So each record is given
-	// the clock's time once its deploy returns — before the next
-	// deploy, whose prune reads it.
-	stamp := func(v string) {
-		now := rig.clock.Now()
-		must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, v), now, now))
-	}
-	fail := func(v string) {
-		rig.runner.startErr = errors.New("boom")
+	// Six deploys back to back land within one filesystem timestamp
+	// tick, and a tie between records is broken by name, where v1
+	// beats every f*. So each record is dated with the fake clock once
+	// its deploy returns, before the next deploy's prune reads it. The
+	// prune inside a deploy sees that deploy's own record at its real
+	// write time, newer than every stamp — which is its place anyway.
+	deploy := func(v string, fail bool) {
+		if fail {
+			rig.runner.startErr = errors.New("boom")
+		}
 		rig.clock.Advance(time.Minute)
-		if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/" + v, version: v, by: "test"}); err == nil {
+		err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/" + v, version: v, by: "test"})
+		rig.runner.startErr = nil
+		if fail && err == nil {
 			t.Fatalf("%s should have failed", v)
 		}
-		rig.runner.startErr = nil
-		stamp(v)
-	}
-	ok := func(v string) {
-		rig.clock.Advance(time.Minute)
-		if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/" + v, version: v, by: "test"}); err != nil {
+		if !fail && err != nil {
 			t.Fatalf("%s: %v", v, err)
 		}
-		stamp(v)
+		stampRecord(t, rig.spec.dirs, v, rig.clock.Now())
 	}
-	ok("v1")
-	fail("f1")
-	fail("f2")
-	fail("f3")
-	ok("v2")
-	ok("v3") // release GC keeps 2: v3, v2 (v1 pruned)
+	deploy("v1", false)
+	deploy("f1", true)
+	deploy("f2", true)
+	deploy("f3", true) // a failed release is removed: f1's record goes, f3 and f2 fill the slots beside v1's
+	deploy("v2", false)
+	deploy("v3", false) // release GC keeps 2: v3, v2 (v1 pruned)
 	var names []string
 	for _, d := range rig.ma.status().Deploys {
 		names = append(names, d.Version)
 	}
 	// On disk: v3, v2 → kept. Others by their record's time: f3, f2,
-	// f1, v1 → the newest 2 (f3, f2) kept; v1's record went with its
-	// release.
+	// v1 → the newest 2 kept; v1's record went with its release.
 	if got := strings.Join(names, ","); got != "v3,v2,f3,f2" {
 		t.Fatalf("records after pruning = %s", got)
 	}
@@ -113,7 +107,7 @@ func TestPruneDeployRecordsKeepsOnDiskAndNewest(t *testing.T) {
 	base := time.Now().Add(-time.Hour)
 	for i, v := range []string{"a", "b", "c", "d"} {
 		must(t, writeDeployRecord(d, v, []byte(`{"version":"`+v+`","status":"failed"}`)))
-		must(t, os.Chtimes(deployRecordPath(dir, v), base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute)))
+		stampRecord(t, d, v, base.Add(time.Duration(i)*time.Minute))
 	}
 	must(t, os.WriteFile(filepath.Join(dir, ".record-123.tmp"), []byte("{"), 0o600)) // a write that never got its rename
 	// Strays hold no retention slot and are removed: a file that is
