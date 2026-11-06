@@ -31,6 +31,8 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("v1 should have failed in pre_start")
 	}
+	// Dated so the order asserted below is the write time's, not the
+	// name tie-break's (which "v2" > "v1" would also satisfy).
 	base := time.Now().Add(-time.Hour)
 	stampRecord(t, rig.spec.dirs, "v1", base)
 	rec, err := readDeployRecord(rig.spec.dirs, "v1")
@@ -47,7 +49,6 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	}
 
 	rig.runner.runOnceErr = nil
-	rig.clock.Advance(time.Minute)
 	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v2.tgz", version: "v2", by: "test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +556,7 @@ func TestDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 	if !strings.Contains(string(rec), `"status":"succeeded"`) {
 		t.Fatalf("status rewritten on disk: %s", rec)
 	}
-	base := time.Now().Add(-time.Hour)
+	base := time.Now().Add(-time.Hour) // dated as in TestDeployRecordsAreWrittenAndListed
 	stampRecord(t, rig.spec.dirs, "v1", base)
 	rig.spec.preStart = []string{"./migrate"}
 	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed", 0)
