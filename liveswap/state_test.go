@@ -526,7 +526,7 @@ func TestReleaseOrderLedger(t *testing.T) {
 					must(t, writeDeployRecord(d, r.name, []byte(`{"version":"`+r.name+`","status":"`+r.record+`"}`)))
 				}
 				if r.record != "" {
-					must(t, os.Chtimes(deployRecordPath(d.deploys, r.name), r.rec, r.rec))
+					stampRecord(t, d, r.name, r.rec)
 				}
 			}
 			if tc.linkRecords {

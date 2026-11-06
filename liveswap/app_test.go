@@ -900,17 +900,8 @@ func TestDeployConcurrentGets409Error(t *testing.T) {
 	}
 }
 
-// stampRecord dates version's deploy record: the record's write time
-// is its place in the order pruning and the status use, and file times
-// are too coarse to tell apart deploys a fake pipeline runs within a
-// millisecond — the fake clock moves no file's time.
-func stampRecord(t *testing.T, d appDirs, version string, when time.Time) {
-	t.Helper()
-	must(t, os.Chtimes(deployRecordPath(d.deploys, version), when, when))
-}
-
 // deployAt deploys version through the rig and dates its deploy record
-// minute minutes after base.
+// minute minutes after base (stampRecord says why).
 func deployAt(t *testing.T, rig *testRig, version string, base time.Time, minute int) {
 	t.Helper()
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{url: "https://x/" + version, version: version}))
@@ -1090,7 +1081,7 @@ func TestALostRollbackRecordDoesNotPruneTheVersionThatServed(t *testing.T) {
 	deployAt(t, rig, "v1", base, 0)
 	deployAt(t, rig, "v2", base, 1)
 	must(t, rig.ma.Deploy(context.Background(), deployRequest{version: "v1", rollback: true}))
-	must(t, os.Chtimes(deployRecordPath(rig.spec.dirs.deploys, "v1"), base, base)) // the rollback's record never landed
+	stampRecord(t, rig.spec.dirs, "v1", base) // the rollback's record never landed
 	// The status agrees with the GC to come: v1 is running, so it is
 	// listed first, whatever its record says.
 	if got := rig.ma.status().AvailableVersions; !slices.Equal(got, []string{"v1", "v2"}) {

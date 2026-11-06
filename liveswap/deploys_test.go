@@ -58,6 +58,20 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	}
 }
 
+// stampRecord dates version's deploy record. A record's write time is
+// its place in the order pruning and the status use, and file times
+// are too coarse to tell apart deploys a fake pipeline runs within a
+// millisecond; the fake clock moves no file's time. A test dates each
+// record from a base an hour in the past, so a record a deploy has
+// just written — and whose prune runs before the test can date it —
+// is newer than every dated one.
+func stampRecord(t *testing.T, d appDirs, version string, when time.Time) {
+	t.Helper()
+	if err := os.Chtimes(deployRecordPath(d.deploys, version), when, when); err != nil {
+		t.Fatalf("dating %s's deploy record: %v", version, err)
+	}
+}
+
 // Records are pruned with the releases: every version still on disk
 // keeps its record, and the newest keep others survive.
 func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
@@ -65,10 +79,10 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 	rig.spec.keep = 2
 	// Six deploys back to back land within one filesystem timestamp
 	// tick, and a tie between records is broken by name, where v1
-	// beats every f*. So each record is dated with the fake clock once
-	// its deploy returns, before the next deploy's prune reads it. The
-	// prune inside a deploy sees that deploy's own record at its real
-	// write time, newer than every stamp — which is its place anyway.
+	// beats every f*. So each record is dated once its deploy returns,
+	// a minute apart as the fake clock runs, before the next deploy's
+	// prune reads it.
+	base, start := time.Now().Add(-time.Hour), rig.clock.Now()
 	deploy := func(v string, fail bool) {
 		if fail {
 			rig.runner.startErr = errors.New("boom")
@@ -76,13 +90,10 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 		rig.clock.Advance(time.Minute)
 		err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/" + v, version: v, by: "test"})
 		rig.runner.startErr = nil
-		if fail && err == nil {
-			t.Fatalf("%s should have failed", v)
+		if (err != nil) != fail {
+			t.Fatalf("%s: fail=%v, err=%v", v, fail, err)
 		}
-		if !fail && err != nil {
-			t.Fatalf("%s: %v", v, err)
-		}
-		stampRecord(t, rig.spec.dirs, v, rig.clock.Now())
+		stampRecord(t, rig.spec.dirs, v, base.Add(rig.clock.Now().Sub(start)))
 	}
 	deploy("v1", false)
 	deploy("f1", true)
