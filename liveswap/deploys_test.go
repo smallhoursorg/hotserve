@@ -31,6 +31,8 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	if err := deployOnceV1(t, rig); err == nil {
 		t.Fatal("v1 should have failed in pre_start")
 	}
+	base := time.Now().Add(-time.Hour)
+	stampRecord(t, rig.spec.dirs, "v1", base)
 	rec, err := readDeployRecord(rig.spec.dirs, "v1")
 	if err != nil {
 		t.Fatalf("no record for the failed v1: %v", err)
@@ -49,6 +51,7 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v2.tgz", version: "v2", by: "test"}); err != nil {
 		t.Fatal(err)
 	}
+	stampRecord(t, rig.spec.dirs, "v2", base.Add(time.Minute))
 	st := rig.ma.status()
 	if len(st.Deploys) != 2 || st.Deploys[0].Version != "v2" || st.Deploys[0].Status != "succeeded" || st.Deploys[1].Version != "v1" || st.Deploys[1].Status != "failed" || st.Deploys[1].Phase != "preparing" {
 		t.Fatalf("status.deploys = %+v", st.Deploys)
@@ -61,10 +64,10 @@ func TestDeployRecordsAreWrittenAndListed(t *testing.T) {
 // stampRecord dates version's deploy record. A record's write time is
 // its place in the order pruning and the status use, and file times
 // are too coarse to tell apart deploys a fake pipeline runs within a
-// millisecond; the fake clock moves no file's time. A test dates each
-// record from a base an hour in the past, so a record a deploy has
-// just written — and whose prune runs before the test can date it —
-// is newer than every dated one.
+// millisecond; the fake clock moves no file's time. A test that reads
+// an order dates its records, a minute apart from a base an hour in
+// the past, so that a record a deploy has just written — whose prune
+// runs before the test can date it — is newer than every dated one.
 func stampRecord(t *testing.T, d appDirs, version string, when time.Time) {
 	t.Helper()
 	if err := os.Chtimes(deployRecordPath(d.deploys, version), when, when); err != nil {
@@ -80,13 +83,13 @@ func TestDeployRecordsArePrunedWithReleases(t *testing.T) {
 	// Six deploys back to back land within one filesystem timestamp
 	// tick, and a tie between records is broken by name, where v1
 	// beats every f*. So each record is dated once its deploy returns,
-	// a minute after the last, before the next deploy's prune reads it.
+	// a minute after the last from a base an hour back, before the
+	// next deploy's prune reads it (stampRecord).
 	base, n := time.Now().Add(-time.Hour), 0
 	deploy := func(v string, fail bool) {
 		if fail {
 			rig.runner.startErr = errors.New("boom")
 		}
-		rig.clock.Advance(time.Minute)
 		err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/" + v, version: v, by: "test"})
 		rig.runner.startErr = nil
 		if (err != nil) != fail {
@@ -552,11 +555,14 @@ func TestDeployRecordOutcomeSurvivesAVocabularySecret(t *testing.T) {
 	if !strings.Contains(string(rec), `"status":"succeeded"`) {
 		t.Fatalf("status rewritten on disk: %s", rec)
 	}
+	base := time.Now().Add(-time.Hour)
+	stampRecord(t, rig.spec.dirs, "v1", base)
 	rig.spec.preStart = []string{"./migrate"}
 	rig.runner.runOnceErr = runOnceExit("exit status 1", "u", "failed", 0)
 	if err := rig.ma.Deploy(context.Background(), deployRequest{url: "https://example.test/v2.tgz", version: "v2", by: "test"}); err == nil {
 		t.Fatal("v2 should have failed")
 	}
+	stampRecord(t, rig.spec.dirs, "v2", base.Add(time.Minute))
 	rec, err = readDeployRecord(rig.spec.dirs, "v2")
 	must(t, err)
 	if s := string(rec); !strings.Contains(s, `"status":"failed"`) || !strings.Contains(s, `"phase":"preparing"`) {
