@@ -270,6 +270,41 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(pw.requirement_in("require\texample.com/m\tv1.4.0\n", "example.com/m"), "v1.4.0")
 
 
+class WatchTests(unittest.TestCase):
+    def test_an_entry_that_is_not_a_mapping_is_a_finding_not_a_crash(self):
+        findings = []
+        self.assertEqual(pw.mappings([None, "x", {"id": "ok"}], findings), [{"id": "ok"}])
+        self.assertEqual([f[0] for f in findings],
+                         ["pin-watch: watch #1 is not a mapping", "pin-watch: watch #2 is not a mapping"])
+
+    def test_a_repo_that_is_not_found_is_a_finding_not_a_transient_warning(self):
+        import urllib.error
+        w = {"id": "x", "unblock": {"type": "upstream-gomod-requires", "repo": "o/typo",
+                                    "module": "example.com/m", "min_version": "v1.0.0"}}
+
+        def gone(url):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO())
+
+        def flaky(url):
+            raise urllib.error.HTTPError(url, 503, "Unavailable", {}, io.BytesIO())
+
+        saved, pw.http_get = pw.http_get, gone
+        try:
+            findings = []
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                pw.evaluate(w, findings)
+            self.assertEqual([f[0] for f in findings], ["pin-watch: x — upstream not found"])
+            self.assertNotIn("could not evaluate", err.getvalue())
+            pw.http_get = flaky
+            findings = []
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                pw.evaluate(w, findings)
+            self.assertEqual(findings, [])
+            self.assertIn("could not evaluate", err.getvalue())
+        finally:
+            pw.http_get = saved
+
+
 class VersionTests(unittest.TestCase):
     def test_a_pseudo_version_is_below_its_release_and_ordered_by_time(self):
         k = pw.ver_key

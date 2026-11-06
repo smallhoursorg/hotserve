@@ -13,8 +13,10 @@ Contains no dependency-specific logic: new pins are new manifest
 entries, never script changes.
 
 Run locally as a dry run: python3 .github/scripts/pin-watch.py
-(needs PyYAML — preinstalled on GitHub runners; `pip install pyyaml`
-elsewhere, the python image in docker-compose.yml included).
+(needs PyYAML, which GitHub runners preinstall; anywhere else, the
+python image in docker-compose.yml included, `pip install pyyaml`
+first. pin_watch_test.py stubs the module instead: the rules under
+test never read YAML, so `make pin-watch-check` runs in that image.)
 """
 
 import json
@@ -22,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 import yaml
@@ -141,6 +144,19 @@ def evaluate(watch, findings):
     try:
         tag = latest_release_tag(cond["repo"])
         found = gomod_requirement(cond["repo"], tag, cond["module"])
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # Not transient: the repo has no releases, or is not where the
+            # watch says. Left as a warning the pin would rot unwatched.
+            findings.append((
+                f"pin-watch: {wid} — upstream not found",
+                f"`{cond['repo']}` has no latest release or no go.mod at it "
+                f"(HTTP 404 from {e.url}). Fix `repo` in `{MANIFEST}`; until "
+                "then the pin is unwatched.",
+            ))
+            return
+        print(f"warning: {wid}: could not evaluate ({e})", file=sys.stderr)
+        return
     except Exception as e:  # noqa: BLE001 — transient API failure: next week retries
         print(f"warning: {wid}: could not evaluate ({e})", file=sys.stderr)
         return
@@ -447,6 +463,23 @@ def requirements_here(module, gomods):
     return out
 
 
+def mappings(watches, findings):
+    """The watches that are mappings; every other entry (a bare null, a
+    string) is a finding and is dropped, where touching its fields
+    would have aborted the run before any issue was opened."""
+    ok = []
+    for i, w in enumerate(watches):
+        if isinstance(w, dict):
+            ok.append(w)
+        else:
+            findings.append((
+                f"pin-watch: watch #{i + 1} is not a mapping",
+                f"`watches[{i}]` in `{MANIFEST}` is `{w!r}`, not a mapping with "
+                "`id`, `unblock` and the rest; fix or delete it.",
+            ))
+    return ok
+
+
 def sync_findings(watches, ignores, gomods=None):
     """Every Dependabot ignore has a watch and every watch naming an
     ignore has a live one. A watch without `ignores` is a pin that
@@ -510,13 +543,13 @@ def sync_findings(watches, ignores, gomods=None):
 
 def main():
     manifest = load(MANIFEST)
-    watches = manifest.get("watches") or []
     ignores = set()
     for update in load(DEPENDABOT).get("updates") or []:
         for ig in update.get("ignore") or []:
             ignores.add(ig["dependency-name"])
 
     findings = []
+    watches = mappings(manifest.get("watches") or [], findings)
 
     sync = sync_findings(watches, ignores)
     if sync:
