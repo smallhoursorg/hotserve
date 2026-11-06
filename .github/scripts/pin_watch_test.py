@@ -234,6 +234,10 @@ class SyncTests(unittest.TestCase):
                                      "repos": "o/r", "min_version": "v1"}}, "`repo`"),
             ({"id": "x", "unblock": {"type": "upstream-gomod-requires", "module": "m",
                                      "repo": "o/r", "min_version": 0.31}}, "`min_version`"),
+            ({"id": "x", "unblock": {"type": "upstream-gomod-requires", "module": "m",
+                                     "repo": "o/r", "min_version": "banana"}}, "not a Go module version"),
+            ({"id": "x", "unblock": {"type": "upstream-gomod-requires", "module": "m",
+                                     "repo": "o/r", "min_version": "0.31.0"}}, "not a Go module version"),
             ({"id": "x", "unblock": {"type": "elsewhere"}}, "condition type"),
             ({"id": "x"}, "no `unblock`"),
         ):
@@ -281,9 +285,18 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(pw.mappings([None, "x", {"id": "ok"}], findings), [{"id": "ok"}])
         self.assertEqual([f[0] for f in findings],
                          ["pin-watch: watch #1 is not a mapping", "pin-watch: watch #2 is not a mapping"])
-        findings = []
-        self.assertEqual(pw.mappings([{"ignores": ["github.com/foo"]}], findings), [])
-        self.assertEqual([f[0] for f in findings], ["pin-watch: watch #1 has an `ignores` that is not text"])
+        for bad in (["github.com/foo"], "", "  ", None):
+            findings = []
+            self.assertEqual(pw.mappings([{"ignores": bad}], findings), [])
+            self.assertEqual([f[0] for f in findings], ["pin-watch: watch #1 has an `ignores` that is not text"], bad)
+        self.assertEqual(pw.mappings([{"ignores": "github.com/foo"}, {"id": "held"}], []),
+                         [{"ignores": "github.com/foo"}, {"id": "held"}])
+
+    def test_real_versions_pass_the_shape_check(self):
+        for v in ("v0.30.3", PSEUDO, "v1.0.0-rc.1", "v2.0.0+incompatible", "v0.0.0-20200630053402-0a67ce9b0693"):
+            w = {"id": "x", "unblock": {"type": "upstream-gomod-requires", "repo": "o/r",
+                                        "module": "m", "min_version": v}}
+            self.assertIsNone(pw.watch_shape(w), v)
 
     def test_a_repo_that_is_not_found_is_a_finding_not_a_transient_warning(self):
         import urllib.error

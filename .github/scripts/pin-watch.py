@@ -108,6 +108,11 @@ def requirement_in(gomod, module):
 
 
 WATCH_FIELDS = ("repo", "module", "min_version")
+# A Go module version: vMAJOR.MINOR.PATCH, a pre-release (pseudo-versions
+# are one), build metadata. ver_key reads anything, mapping what is not
+# a number to zero, so the shape is checked here before a `banana` could
+# compare below every real version and fire the watch.
+GO_VERSION = re.compile(r"^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$")
 
 
 def watch_shape(watch):
@@ -125,6 +130,8 @@ def watch_shape(watch):
     bad = [f for f in WATCH_FIELDS if not isinstance(cond.get(f), str) or not cond[f].strip()]
     if bad:
         return "lacks text for " + ", ".join(f"`{f}`" for f in bad) + " (quote a version like 0.31)"
+    if not GO_VERSION.match(cond["min_version"]):
+        return f"has min_version `{cond['min_version']}`, not a Go module version (vX.Y.Z, pseudo-versions included)"
     return None
 
 
@@ -463,11 +470,12 @@ def mappings(watches, findings):
                 f"`watches[{i}]` in `{MANIFEST}` is `{w!r}`, not a mapping with "
                 "`id`, `unblock` and the rest; fix or delete it.",
             ))
-        elif "ignores" in w and not isinstance(w["ignores"], str):
+        elif "ignores" in w and not (isinstance(w["ignores"], str) and w["ignores"].strip()):
             findings.append((
                 f"pin-watch: watch #{i + 1} has an `ignores` that is not text",
                 f"`watches[{i}].ignores` in `{MANIFEST}` is `{w['ignores']!r}`; it "
-                "names one dependabot.yml ignore, as text. Fix it.",
+                "names one dependabot.yml ignore, as text, or is left out for a "
+                "pin go.mod holds. Fix it.",
             ))
         else:
             ok.append(w)
