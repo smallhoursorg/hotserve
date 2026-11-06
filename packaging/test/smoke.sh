@@ -984,6 +984,8 @@ done
 # scripts on a pty, and each line ends in \r, taken off first.
 tr -d '\r' </tmp/install.out | grep -qx "  motel-backup setup <repository>" \
 	|| die "postinstall did not say that the timers wait for setup"
+grep -q "enabled and set up" /tmp/install.out \
+	&& die "postinstall called the backups set up on a box with no credential file: $(grep Backups: /tmp/install.out)" || true
 grep -q "refuse that account" /tmp/install.out \
 	&& die "postinstall warned of the account it had just made: $(grep motel-backup /tmp/install.out)" || true
 motel-backup account >/dev/null || die "the account postinstall made is not one setup accepts: $(motel-backup account 2>&1)"
@@ -1151,6 +1153,13 @@ grep -q 'journalctl -u motel' /tmp/reinstall.err \
 	&& die "reinstall printed the failed-restart hint although the restart succeeded"
 grep -qx 'motel restarted.' /tmp/reinstall.out \
 	|| die "reinstall over a running motel did not say it restarted"
+# Stage 2c ran setup: the credential file is in place, so the backups
+# are set up, and the notice must say so rather than send the operator
+# back to setup (#403).
+grep -qx 'Backups: the hourly timer and the Sunday restore drill are enabled and set up; motel-backup status says where they stand' /tmp/reinstall.out \
+	|| die "reinstall over a set-up box did not say the backups are set up: $(grep Backups: /tmp/reinstall.out /tmp/reinstall.err || echo 'no Backups: line')"
+tr -d '\r' </tmp/reinstall.out | grep -qx "  motel-backup setup <repository>" \
+	&& die "reinstall over a set-up box told the operator to run setup again" || true
 id -nG motel | tr ' ' '\n' | grep -qx motel \
 	|| die "reinstall did not restore the motel user's group membership: the package's group-owned directories would be unreachable"
 cmp -s /tmp/Caddyfile.configured "$CONFIG" \
@@ -1204,13 +1213,56 @@ expect_backup_state "after an upgrade, disabled before it" disabled inactive "$C
 systemctl enable --now motel-backup.timer motel-backup-drill.timer
 dpkg -i "$deb" >/dev/null
 expect_backup_state "after an upgrade, enabled before it" enabled active "$CRED_SHA"
+# An administrator's enable --runtime (enabled until the next boot) is
+# enabled for what runs today: the upgrade keeps it (the helper has no
+# persistent enable to restore), and the Backups: line says set up, not
+# disabled (Copilot on #404).
+systemctl disable --now motel-backup.timer motel-backup-drill.timer
+systemctl enable --runtime --now motel-backup.timer motel-backup-drill.timer
+dpkg -i "$deb" >/tmp/upgrade-runtime.log 2>&1 || { cat /tmp/upgrade-runtime.log; die "the upgrade with the timers enabled --runtime failed"; }
+expect_backup_state "after an upgrade, enabled --runtime before it" enabled-runtime active "$CRED_SHA"
+grep -qx 'Backups: the hourly timer and the Sunday restore drill are enabled and set up; motel-backup status says where they stand' /tmp/upgrade-runtime.log \
+	|| die "the upgrade over timers enabled --runtime did not call them enabled and set up: $(grep Backups: /tmp/upgrade-runtime.log || echo 'no Backups: line')"
+systemctl disable --now motel-backup.timer motel-backup-drill.timer
+systemctl enable --now motel-backup.timer motel-backup-drill.timer
+expect_backup_state "enabled again after the --runtime staging" enabled active "$CRED_SHA"
 # The timers as dh_installsystemd has them (the owner, 2026-09-27): an
 # upgrade restarts a timer that is enabled, one an administrator
 # stopped among them — the README says so, and to disable it to keep
 # it off — and leaves one the administrator masked masked.
 systemctl stop motel-backup.timer
 systemctl mask --now motel-backup-drill.timer
-dpkg -i "$deb" >/dev/null
+dpkg -i "$deb" >/tmp/upgrade-mask.log 2>&1 || { cat /tmp/upgrade-mask.log; die "the upgrade with one timer stopped and one masked failed"; }
+# The Backups: line says of each timer what is so, and does not call a
+# box with the drill masked set up for both (Copilot on #404).
+grep -qx 'Backups: motel-backup.timer is enabled and motel-backup-drill.timer is masked, as they were left; systemctl enable --now turns on one that is disabled, after systemctl unmask on one that is masked' /tmp/upgrade-mask.log \
+	|| die "the upgrade over a masked drill timer did not name each timer's state: $(grep Backups: /tmp/upgrade-mask.log || echo 'no Backups: line')"
+grep -q "enabled and set up" /tmp/upgrade-mask.log \
+	&& die "the upgrade over a masked drill timer called both timers enabled and set up" || true
+grep -qx '  and the backups are set up; motel-backup status says where they stand' /tmp/upgrade-mask.log \
+	|| die "the upgrade over a masked drill timer did not say the backups are set up: $(grep -A1 Backups: /tmp/upgrade-mask.log)"
+# The same box before setup: the line keeps the setup pointer the one
+# enabled timer needs (a review of #404).
+# This stage now restarts motel more times inside ten seconds than
+# any box does (each dpkg -i is one), and systemd's default start
+# limit, five in ten seconds, would hold the next one and leave motel
+# failed: the counter is reset first, which is the test's doing, not
+# the package's.
+systemctl reset-failed motel
+mv "$CRED" "$CRED.aside"
+dpkg -i "$deb" >/tmp/upgrade-mask-nofile.log 2>&1 || { cat /tmp/upgrade-mask-nofile.log; mv "$CRED.aside" "$CRED"; die "the upgrade with one timer masked and no credential file failed"; }
+mv "$CRED.aside" "$CRED"
+grep -qx '  and the one that is enabled runs nothing until: motel-backup setup <repository>' /tmp/upgrade-mask-nofile.log \
+	|| die "the upgrade over a masked drill timer with no credential file did not point at setup: $(grep -A1 Backups: /tmp/upgrade-mask-nofile.log)"
+# Both masked: named as masked, with unmask before enable, not called
+# disabled with an enable --now that a mask refuses (a review of #404).
+systemctl mask --now motel-backup.timer
+dpkg -i "$deb" >/tmp/upgrade-masked-both.log 2>&1 || { cat /tmp/upgrade-masked-both.log; die "the upgrade with both timers masked failed"; }
+grep -qx 'Backups: motel-backup.timer is masked and motel-backup-drill.timer is masked, as they were left; systemctl enable --now motel-backup.timer motel-backup-drill.timer turns them on, after systemctl unmask on one that is masked' /tmp/upgrade-masked-both.log \
+	|| die "the upgrade over two masked timers did not name them masked: $(grep Backups: /tmp/upgrade-masked-both.log || echo 'no Backups: line')"
+systemctl unmask motel-backup.timer
+systemctl reset-failed motel-backup.timer 2>/dev/null || true
+systemctl start motel-backup.timer
 [ "$(systemctl is-active motel-backup.timer || true)" = active ] \
 	|| die "after an upgrade, a timer stopped and left enabled is $(systemctl is-active motel-backup.timer || true): dh_installsystemd restarts it"
 # (Debian's helper asks the manager to restart it all the same, which
@@ -1240,9 +1292,29 @@ rm -f /usr/local/sbin/getent
 [ "$took" -le 150 ] || die "the upgrade with a directory that does not answer took ${took}s"
 grep -q "motel: whether the motel-backup account exists could not be told (the user directory did not answer within 30s)" /tmp/upgrade-nss.log \
 	|| die "postinstall did not say that the directory did not answer: $(cat /tmp/upgrade-nss.log)"
+# The credential file is in place and the account could not be told:
+# the Backups: line says neither set up nor run setup (Copilot on #404).
+grep -qx "Backups: the hourly timer and the Sunday restore drill are enabled, and the credential file is in place; the runs wait on the motel-backup account (above): motel-backup account says when it is right" /tmp/upgrade-nss.log \
+	|| die "the upgrade with a directory that does not answer did not say the runs wait on the account: $(grep Backups: /tmp/upgrade-nss.log || echo 'no Backups: line')"
+grep -q "enabled and set up" /tmp/upgrade-nss.log \
+	&& die "the upgrade with a directory that does not answer called the backups set up" || true
 [ "$(getent passwd motel-backup | wc -l)" = 1 ] || die "a second motel-backup account was made: $(getent passwd | grep motel-backup)"
 dpkg -s motel | grep -q '^Status: install ok installed$' || die "motel is not configured after the upgrade with a directory that does not answer"
 echo "a directory that does not answer: postinstall said so within ${took}s, made no account, and the configure completed"
+# An account of the name that motel did not make (its comment is not
+# made-by-motel): said on stderr, and the Backups: line sends the
+# operator to motel-backup account, not to setup, which refuses it too
+# (a review of #404).
+usermod --comment someone-elses motel-backup
+dpkg -i "$deb" >/tmp/upgrade-refused.log 2>&1 || { cat /tmp/upgrade-refused.log; usermod --comment made-by-motel motel-backup; die "the upgrade with an account motel did not make failed: a warning must not fail an install"; }
+usermod --comment made-by-motel motel-backup
+grep -q "refuse that account until it is put right" /tmp/upgrade-refused.log \
+	|| die "postinstall did not warn of the account motel did not make: $(cat /tmp/upgrade-refused.log)"
+grep -qx "Backups: the hourly timer and the Sunday restore drill are enabled, and the credential file is in place; the runs wait on the motel-backup account (above): motel-backup account says when it is right" /tmp/upgrade-refused.log \
+	|| die "the upgrade with a refused account did not say the runs wait on it: $(grep Backups: /tmp/upgrade-refused.log || echo 'no Backups: line')"
+grep -q "enabled and set up" /tmp/upgrade-refused.log \
+	&& die "the upgrade with a refused account called the backups set up" || true
+motel-backup account >/dev/null || die "the account is not accepted again after its comment was put back: $(motel-backup account 2>&1)"
 # An upgrade from a release that had no backup timers — every box that
 # first gets this feature: the helper has no state for them, and they
 # are enabled and started as on an install, not left stopped until a
@@ -1998,6 +2070,17 @@ grep -q "motel: the motel-backup account could not be made (useradd: group motel
 	|| die "postinstall did not say that the account could not be made, and why: $(cat /tmp/install-noaccount.log)"
 grep -q "nothing else of motel does: motel-backup setup <repository> makes it, or says why it cannot" /tmp/install-noaccount.log \
 	|| die "postinstall did not say what makes the account: $(cat /tmp/install-noaccount.log)"
+# The credential file is there (purge kept it) and the account is not:
+# the Backups: line must not call that set up, in the breath after
+# saying the account is missing, nor say the timers run nothing (the
+# units' condition is the file, so each run starts and fails on the
+# account, as the lines below prove) (#403).
+grep -q "enabled and set up" /tmp/install-noaccount.log \
+	&& die "postinstall called the backups set up where it had just said the account could not be made: $(grep Backups: /tmp/install-noaccount.log)" || true
+tr -d '\r' </tmp/install-noaccount.log | grep -qx "  motel-backup setup <repository>" \
+	&& die "postinstall said the timers run nothing until setup on a box whose runs start and fail on the account" || true
+tr -d '\r' </tmp/install-noaccount.log | grep -qx "Backups: the hourly timer and the Sunday restore drill are enabled, and the credential file is in place; the runs wait on the motel-backup account (above): motel-backup account says when it is right" \
+	|| die "postinstall did not say that the runs wait on the account: $(grep Backups: /tmp/install-noaccount.log || echo 'no Backups: line')"
 timeout 300 systemctl enable --now motel || die "motel did not start on the box where the account could not be made"
 expect_backup_state "installed where the account cannot be made" enabled active "$CRED_SHA"
 systemctl start motel-backup.service && die "a run with no account exited 0" || true

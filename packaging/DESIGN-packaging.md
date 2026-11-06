@@ -34,6 +34,8 @@ the scales:
 | `apt purge` finds something mounted at or under `/var/lib/motel-box`, by either its literal or its physical path (or cannot read `/proc/self/mountinfo`, resolve the path, or finish the scan, or the physical path holds a space, tab, newline or backslash, which the table escapes): the exchange tree is kept whole, so a purge and a reinstall come up on the old `applied.json` and record | packaging/postremove.sh (`mounted`) | 2 | 1 | 1 | 2; root's own mount in a directory the package owns; named on stderr with the remedy (unmount, then remove); the alternative, an rm through the mount, would remove what is not the package's |
 | `apt purge` finds a symlink, or anything but a regular file, at `/etc/motel/Caddyfile`: kept, so a reinstall comes up on what it points to | packaging/postremove.sh | 2 | 5 | 1 | 10; an operator's own path (not a fault, so occurrence 5 and detection carries it): named on stderr, and postinstall leaves a symlink alone too, so the box comes up on the file the operator chose |
 | `apt purge` while a run of the box applier holds root's lock for longer than the purge waits (30s; a run is seconds): the config and the exchange tree are both kept, so a reinstall comes up on them | packaging/postremove.sh (the lock) | 2 | 1 | 1 | 2; a run that long is a fault of its own (a disk that will not sync), and the purge names both paths and the journal to read; removing under a run would let it put a Caddyfile back after the purge (Copilot on #255, S3 O2 D5 = 30, fixed by taking the lock) |
+| The install's `Backups:` line reads the credential file's presence as setup's work, the units' own test (`ConditionPathExists=`): a directory or an empty file root put at `/etc/motel-backup/repository.env` by hand is called set up, and the timers start runs that fail on it | packaging/postinstall.sh (the `Backups:` line, #403) | 2 | 1 | 1 | 2; root's own entry where the scripts expect setup's file; each run names the file it cannot read, and the line itself sends the operator to `motel-backup status`, which says so too; `-f` would print the setup line instead, no more right about timers that run |
+| An upgrade of a box with a credential file at the path an earlier version used (`/etc/motel/backup.env`) and none at today's prints the plain setup line, without the note `motel-backup status` adds (which repository to give setup, and to remove the old file) | packaging/postinstall.sh (the `Backups:` line, #403) | 2 | 2 | 1 | 4; a box from before the move, which no release made; the first run and `status` both name the old file and what to do with it; postinstall knowing the old path too is one more copy of what the binary holds |
 | `apt purge motel` keeps the backup credential file as the way to read the backups already made, and a following `apt autoremove` takes `restic` (and `sqlite3`, and `ca-certificates` where only the package brought it) off the box, so reading them needs `apt install restic` first | packaging/nfpm.yaml (Depends, #351); the purge's lines in packaging/postremove.sh name the kept file and not `apt install restic` | 2 | 2 | 1 | 4; two acts of root's, and autoremove lists what it removes before doing so; the same held when the two programs were Recommends (auto-installed alike); `apt-mark manual` from postinstall would leave three packages nobody asked for marked as asked for |
 
 **Owed** (over the bar, not yet fixed): none.
@@ -68,3 +70,13 @@ Dated one-liners; the full text of each is in git.
   runs v0.3.1: postinstall stops removing the AppArmor profile packages
   before the Debian-13-only matrix left, and the two residuals of
   taking a box to or from a release with the starter as a conffile go.
+- 2026-11-06 — #403: the install's `Backups:` line says of each timer
+  only what is so (enabled, enabled-runtime, masked, disabled; the two
+  named apart where they differ) and then what the backups are: not
+  set up without the credential file, so what is enabled runs nothing
+  until setup; set up with the file and an account the runs accept;
+  waiting on the account, with the file and an account that is
+  missing, refused or not told, since the runs the timers start fail
+  on it and setup is not what puts it right. The smoke test stages
+  each. Two residuals of the line accepted (a hand-made entry at the
+  path; the old path's note).

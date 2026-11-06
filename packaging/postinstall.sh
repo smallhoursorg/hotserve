@@ -71,6 +71,7 @@ chown motel:motel /var/lib/motel /var/lib/liveswap
 # no backups, and setup, which makes the account when it is missing,
 # is where that is refused.
 backup_st=0
+backup_account=unknown # ok, missing or refused once looked at: the Backups: line below rests on it
 nss getent passwd motel-backup >/dev/null 2>&1 || backup_st=$?
 if [ "$backup_st" = 2 ]; then
 	if command -v useradd >/dev/null 2>&1; then
@@ -84,6 +85,7 @@ if [ "$backup_st" != 0 ] && [ "$backup_st" != 2 ]; then
 	124 | 137) why="the user directory did not answer within 30s" ;; # 137: killed after ignoring the SIGTERM
 	*) why="getent exited $backup_st" ;;
 	esac
+	backup_account=unknown
 	echo "motel: whether the motel-backup account exists could not be told ($why); no account is made beside the directory's, and backups wait for it: motel-backup account says when it is right" >&2
 elif nss getent passwd motel-backup >/dev/null 2>&1; then
 	# The rule is setup's, and in setup's words: the binary this package
@@ -92,8 +94,12 @@ elif nss getent passwd motel-backup >/dev/null 2>&1; then
 	if [ -x /usr/bin/motel-backup ] && ! said=$(/usr/bin/motel-backup account 2>&1); then
 		echo "motel: ${said#motel-backup: }" >&2
 		echo "motel: motel-backup setup, and every run, restore and drill, refuse that account until it is put right; motel-backup account says when it is" >&2
+		backup_account=refused
+	elif [ -x /usr/bin/motel-backup ]; then
+		backup_account=ok
 	fi
 else
+	backup_account=missing
 	echo "motel: the motel-backup account could not be made (${why:-no reason was given}); backups wait for it, and nothing else of motel does: motel-backup setup <repository> makes it, or says why it cannot" >&2
 fi
 # The box applier's exchange tree, /var/lib/motel-box: made now that
@@ -319,12 +325,50 @@ if [ -d /run/systemd/system ]; then
 		systemctl enable motel-backup.timer motel-backup-drill.timer 2>/dev/null || true
 		systemctl "$action" motel-backup.timer motel-backup-drill.timer 2>/dev/null || true
 	fi
-	if systemctl is-enabled --quiet motel-backup.timer 2>/dev/null; then
-		echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
-		echo "  motel-backup setup <repository>"
+	# Each timer's own state, so the line says of both only what is so:
+	# an administrator's disable or mask of one is kept across an
+	# upgrade, and enabled-runtime (their enable --runtime, gone at the
+	# next boot) is enabled for what runs today. Then what the backups
+	# are: the credential file is what setup writes and the units wait
+	# on (ConditionPathExists=, the same test as -e), so without it
+	# nothing runs until setup; with it and an account the runs accept
+	# they are set up, and telling that box's operator to run setup
+	# again would be wrong (#403); with it and an account that is
+	# missing, refused or not told (said above), the runs the timers
+	# start fail on the account, and setup is not what puts it right.
+	hourly=$(systemctl is-enabled motel-backup.timer 2>/dev/null) || true
+	drill=$(systemctl is-enabled motel-backup-drill.timer 2>/dev/null) || true
+	: "${hourly:=unknown}" "${drill:=unknown}"
+	if [ ! -e /etc/motel-backup/repository.env ]; then
+		backups=setup
+	elif [ "$backup_account" = ok ]; then
+		backups=ready
 	else
-		echo "Backups: the hourly timer and the Sunday restore drill are disabled, as they were left; systemctl enable --now motel-backup.timer motel-backup-drill.timer turns them on"
+		backups=account
 	fi
+	case "$hourly/$drill" in
+	enabled*/enabled*)
+		case "$backups" in
+		setup)
+			echo "Backups: the hourly timer and the Sunday restore drill are enabled, and run nothing until:"
+			echo "  motel-backup setup <repository>"
+			;;
+		ready) echo "Backups: the hourly timer and the Sunday restore drill are enabled and set up; motel-backup status says where they stand" ;;
+		*) echo "Backups: the hourly timer and the Sunday restore drill are enabled, and the credential file is in place; the runs wait on the motel-backup account (above): motel-backup account says when it is right" ;;
+		esac
+		;;
+	enabled*/* | */enabled*)
+		echo "Backups: motel-backup.timer is $hourly and motel-backup-drill.timer is $drill, as they were left; systemctl enable --now turns on one that is disabled, after systemctl unmask on one that is masked"
+		case "$backups" in
+		setup) echo "  and the one that is enabled runs nothing until: motel-backup setup <repository>" ;;
+		ready) echo "  and the backups are set up; motel-backup status says where they stand" ;;
+		*) echo "  and the credential file is in place; the runs wait on the motel-backup account (above): motel-backup account says when it is right" ;;
+		esac
+		;;
+	*)
+		echo "Backups: motel-backup.timer is $hourly and motel-backup-drill.timer is $drill, as they were left; systemctl enable --now motel-backup.timer motel-backup-drill.timer turns them on, after systemctl unmask on one that is masked"
+		;;
+	esac
 fi
 # Explicit, so no message above can decide the package's state.
 exit 0
