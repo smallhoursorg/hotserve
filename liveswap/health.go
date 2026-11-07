@@ -154,11 +154,13 @@ func (p *httpProber) probeOnce(ctx context.Context, sock *socketRef, path string
 		// is read than is kept: the excerpt is cut after the known
 		// values are replaced (failureDetail), so that cut never leaves
 		// a fragment of one; the token the read's own bound may have
-		// cut goes here (dropUnfinished, journal.go).
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, probeBodyRead))
+		// cut goes here (dropUnfinished, journal.go). One byte more is
+		// read than kept, to tell a body of exactly probeBodyRead bytes,
+		// which is whole, from a longer one.
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, probeBodyRead+1))
 		body := string(raw)
-		if len(body) >= probeBodyRead {
-			body = dropUnfinished(body, false)
+		if len(body) > probeBodyRead {
+			body = dropUnfinished(body[:probeBodyRead], false)
 		}
 		return &probeError{status: resp.StatusCode, location: resp.Header.Get("Location"), body: body}
 	}

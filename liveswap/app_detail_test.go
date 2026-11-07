@@ -269,6 +269,27 @@ func TestDropUnfinished(t *testing.T) {
 	}
 }
 
+// The journal's read keeps one byte more than its limit, so an output
+// of exactly the limit is known whole and keeps its first token; only a
+// longer one, cut, loses it.
+func TestBoundedTail(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		limit int
+		want  string
+	}{
+		{"abc def\n", 8, "abc def"},
+		{"abc def\n", 7, "… def"},
+		{"abc def", 7, "abc def"},
+		{"ab\n", 8, "ab"},
+		{"", 8, ""},
+	} {
+		if got := boundedTail([]byte(tc.in), tc.limit); got != tc.want {
+			t.Errorf("boundedTail(%q, %d) = %q, want %q", tc.in, tc.limit, got, tc.want)
+		}
+	}
+}
+
 // deploy_log_lines 0 asks the journal for nothing; a journal that
 // cannot be read says so instead of a tail; and a success carries no
 // detail at all.

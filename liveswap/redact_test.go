@@ -416,6 +416,31 @@ func TestRedactJSONHoistsANestedRedactedEnv(t *testing.T) {
 	}
 }
 
+// The hoist also runs when the filter itself found nothing — the
+// detail's early replacement left only markers — and adds no field
+// when the name is a string's text rather than a field.
+func TestRedactJSONHoistsWithNothingOfItsOwnToReport(t *testing.T) {
+	r := NewRedactor(nil, nil)
+	for _, tc := range []struct{ name, body, want string }{
+		{"a nested field alone", `{"error":"failed","status":{"last_deploy":{"redacted_env":["API_TOKEN"],"detail":{"probe":{"body":"[redacted:API_TOKEN]"}}}}}`, `"redacted_env":["API_TOKEN"]`},
+		{"the name as text", `{"error":"the field is called \"redacted_env\""}`, ""},
+	} {
+		out := r.redactJSON([]byte(tc.body))
+		var got struct {
+			RedactedEnv *[]string `json:"redacted_env"`
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatal(err)
+		}
+		if tc.want == "" && got.RedactedEnv != nil {
+			t.Errorf("%s: gained a field: %s", tc.name, out)
+		}
+		if tc.want != "" && (got.RedactedEnv == nil || !strings.HasPrefix(out, `{"error":"failed","redacted_env":["API_TOKEN"]`)) {
+			t.Errorf("%s: no top-level field in %s", tc.name, out)
+		}
+	}
+}
+
 // An assignment is judged by its parts: the key stays readable and the
 // value is masked on its own, and a short value is not carried over the
 // bar by its key's letters.

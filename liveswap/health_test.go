@@ -389,19 +389,25 @@ func TestProberProcessDeathKeepsLastProbe(t *testing.T) {
 // known values are replaced (TestFailureDetailCutsAfterTheKnownValues).
 func TestProbeOnceKeepsABoundedBodyExcerpt(t *testing.T) {
 	big := strings.Repeat("word1 ", probeBodyRead)
-	want := big[:probeBodyRead]
-	want = want[:strings.LastIndexByte(want, ' ')+1] + "…"
-	sock := unixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(big))
-	}))
-	p := &httpProber{clock: newFakeClock()}
-	err := p.probeOnce(context.Background(), testSocketRef(t, sock), "/health", time.Second)
-	var pe *probeError
-	if !errors.As(err, &pe) || pe.status != http.StatusInternalServerError {
-		t.Fatalf("want a probe error with the status, got %v", err)
-	}
-	if pe.body != want {
-		t.Fatalf("body read is %d bytes ending %q, want the first %d less the cut token", len(pe.body), pe.body[len(pe.body)-12:], probeBodyRead)
+	cut := big[:probeBodyRead]
+	cut = cut[:strings.LastIndexByte(cut, ' ')+1] + "…"
+	exact := big[:probeBodyRead]
+	for _, tc := range []struct{ name, body, want string }{
+		{"a longer body loses the cut token", big, cut},
+		{"a body of exactly the read is whole", exact, exact},
+	} {
+		sock := unixServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		p := &httpProber{clock: newFakeClock()}
+		err := p.probeOnce(context.Background(), testSocketRef(t, sock), "/health", time.Second)
+		var pe *probeError
+		if !errors.As(err, &pe) || pe.status != http.StatusInternalServerError {
+			t.Fatalf("%s: want a probe error with the status, got %v", tc.name, err)
+		}
+		if pe.body != tc.want {
+			t.Fatalf("%s: body read is %d bytes ending %q, want %d ending %q", tc.name, len(pe.body), pe.body[len(pe.body)-12:], len(tc.want), tc.want[len(tc.want)-12:])
+		}
 	}
 }

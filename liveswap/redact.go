@@ -615,7 +615,12 @@ func (r *Redactor) redactJSON(raw []byte) string {
 	} else {
 		body = r.filterBody(string(raw), seen)
 	}
-	if len(seen) > 0 {
+	// The hoist runs when the filter found a value, and when the body
+	// carries a redacted_env of its own below the top level — a
+	// deployResult's, whose values the detail replaced before any
+	// filter ran, so that the filter finds nothing here (app.go,
+	// failureDetail).
+	if len(seen) > 0 || strings.Contains(body, `"redacted_env"`) {
 		names := reportedKeys(seen)
 		for i, n := range names {
 			names[i] = r.replaceKnown(n, seen)
@@ -700,7 +705,11 @@ func withField(body, name string, values []string) string {
 	var tree any
 	_ = json.Unmarshal([]byte(body), &tree) // obj parsed, so this does too
 	had := nestedStrings(tree, name, nil)
-	v, err := json.Marshal(union(values, had))
+	all := union(values, had)
+	if len(all) == 0 {
+		return body // the name was a string's text, not a field: no empty field is added
+	}
+	v, err := json.Marshal(all)
 	if err != nil {
 		return body
 	}

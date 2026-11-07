@@ -89,20 +89,36 @@ func (journalctlReader) tail(ctx context.Context, of tailOf, since time.Time, n 
 	// memory is fixed whatever the app wrote. A dropped prefix leaves a
 	// partial first line, whose first token the bound may have cut in
 	// two: that token goes (dropUnfinished), since a fragment of an
-	// env_file value is one the filter cannot match.
+	// env_file value is one the filter cannot match. One byte more is
+	// read than kept, to tell an output of exactly the limit, which is
+	// whole, from a longer one.
 	const limit = 2 * deployLogMaxBytes
-	out, err := runJournalctl(ctx, tailArgs(of.units, streamIDs(found), since, n), limit)
+	out, err := runJournalctl(ctx, tailArgs(of.units, streamIDs(found), since, n), limit+1)
 	if err != nil {
 		return nil, err
 	}
-	text := strings.TrimRight(string(out), "\n")
-	if len(out) >= limit {
-		text = dropUnfinished(text, true)
-	}
+	text := boundedTail(out, limit)
 	if text == "" {
 		return nil, nil
 	}
 	return strings.Split(text, "\n"), nil
+}
+
+// boundedTail is the text of out, read through a tailWriter one byte
+// larger than limit: an out longer than limit was cut by the read, so
+// it is trimmed to limit and loses the token the cut may have split
+// (dropUnfinished); one of at most limit bytes was read whole and keeps
+// its first token.
+func boundedTail(out []byte, limit int) string {
+	cut := len(out) > limit
+	if cut {
+		out = out[len(out)-limit:]
+	}
+	text := strings.TrimRight(string(out), "\n")
+	if cut {
+		text = dropUnfinished(text, true)
+	}
+	return text
 }
 
 // dropUnfinished removes the token a read bound may have cut in two:
